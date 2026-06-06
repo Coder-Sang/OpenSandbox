@@ -357,7 +357,7 @@ class SandboxPoolSync:
                 config=self._config.with_max_idle(self._resolve_max_idle()),
                 state_store=self._state_store,
                 create_one=self._create_one_sandbox,
-                on_discard_sandbox=self._kill_sandbox_best_effort,
+                on_discard_sandbox=self._discard_sandbox_callback,
                 reconcile_state=self._reconcile_state,
                 warmup_executor=executor,
             )
@@ -466,6 +466,14 @@ class SandboxPoolSync:
         config = self._connection_config.model_copy(update={"transport": None})
         config._owns_transport = True
         return config
+
+    def _discard_sandbox_callback(self, sandbox_id: str) -> None:
+        """``Callable[[str], None]`` adapter for the reconciler's ``on_discard_sandbox``
+        hook. The reconciler does not care whether the kill succeeded — it only needs the
+        sandbox to be removed from the pool's bookkeeping — so we drop the bool return
+        value here.
+        """
+        self._kill_sandbox_best_effort(sandbox_id)
 
     def _kill_sandbox_best_effort(self, sandbox_id: str) -> bool:
         """Best-effort kill a sandbox via the pool's manager.

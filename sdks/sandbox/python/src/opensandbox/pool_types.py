@@ -22,7 +22,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from enum import Enum
 from math import ceil
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Protocol, cast
 from uuid import uuid4
 
 from opensandbox.config.connection_sync import ConnectionConfigSync
@@ -34,7 +34,7 @@ from opensandbox.models.sandboxes import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable
+    from collections.abc import Awaitable, Iterable
 
     from opensandbox.config.connection import ConnectionConfig
     from opensandbox.sandbox import Sandbox
@@ -348,32 +348,34 @@ def _require_positive(value: timedelta, message: str) -> None:
 
 
 def try_take_idle_with_min_ttl(
-    store: PoolStateStore, pool_name: str, min_remaining_ttl: timedelta
+    store: PoolStateStore, pool_name: str, min_remaining_ttl: timedelta | None
 ) -> TakeIdleResult:
     """Call ``store.try_take_idle_min_ttl`` if available, else fall back to ``try_take_idle``.
 
     Pool stores added before #983 only implement :meth:`PoolStateStore.try_take_idle`.
     This helper preserves source compatibility for those stores: when the threshold is
-    zero/negative or the store does not implement the variant, the binary-expiry path
-    is used and the returned result has an empty ``discarded_alive_sandbox_ids``.
+    ``None``, zero, or negative — or the store does not implement the variant — the
+    binary-expiry path is used and the returned result has an empty
+    ``discarded_alive_sandbox_ids``.
     """
-    if min_remaining_ttl.total_seconds() <= 0:
+    if min_remaining_ttl is None or min_remaining_ttl.total_seconds() <= 0:
         return TakeIdleResult(sandbox_id=store.try_take_idle(pool_name))
     method = getattr(store, "try_take_idle_min_ttl", None)
     if callable(method):
-        return method(pool_name, min_remaining_ttl)
+        return cast(TakeIdleResult, method(pool_name, min_remaining_ttl))
     return TakeIdleResult(sandbox_id=store.try_take_idle(pool_name))
 
 
 async def try_take_idle_with_min_ttl_async(
-    store: AsyncPoolStateStore, pool_name: str, min_remaining_ttl: timedelta
+    store: AsyncPoolStateStore, pool_name: str, min_remaining_ttl: timedelta | None
 ) -> TakeIdleResult:
     """Async counterpart of :func:`try_take_idle_with_min_ttl`."""
-    if min_remaining_ttl.total_seconds() <= 0:
+    if min_remaining_ttl is None or min_remaining_ttl.total_seconds() <= 0:
         return TakeIdleResult(sandbox_id=await store.try_take_idle(pool_name))
     method = getattr(store, "try_take_idle_min_ttl", None)
     if callable(method):
-        return await method(pool_name, min_remaining_ttl)
+        coro = cast("Awaitable[TakeIdleResult]", method(pool_name, min_remaining_ttl))
+        return await coro
     return TakeIdleResult(sandbox_id=await store.try_take_idle(pool_name))
 
 
@@ -381,20 +383,20 @@ def reap_expired_idle_with_min_ttl(
     store: PoolStateStore,
     pool_name: str,
     now: datetime,
-    min_remaining_ttl: timedelta,
+    min_remaining_ttl: timedelta | None,
 ) -> tuple[str, ...]:
     """Call ``store.reap_expired_idle_min_ttl`` if available, else fall back.
 
     Returns the IDs of alive sandboxes the store dropped because their remaining TTL fell
-    below the threshold, so callers can kill them. Stores predating this method return an
-    empty tuple.
+    below the threshold, so callers can kill them. Stores predating this method, or callers
+    passing ``None`` / zero / negative, get an empty tuple.
     """
-    if min_remaining_ttl.total_seconds() <= 0:
+    if min_remaining_ttl is None or min_remaining_ttl.total_seconds() <= 0:
         store.reap_expired_idle(pool_name, now)
         return ()
     method = getattr(store, "reap_expired_idle_min_ttl", None)
     if callable(method):
-        result = method(pool_name, now, min_remaining_ttl)
+        result = cast("Iterable[str] | None", method(pool_name, now, min_remaining_ttl))
         return tuple(result) if result else ()
     store.reap_expired_idle(pool_name, now)
     return ()
@@ -404,15 +406,18 @@ async def reap_expired_idle_with_min_ttl_async(
     store: AsyncPoolStateStore,
     pool_name: str,
     now: datetime,
-    min_remaining_ttl: timedelta,
+    min_remaining_ttl: timedelta | None,
 ) -> tuple[str, ...]:
     """Async counterpart of :func:`reap_expired_idle_with_min_ttl`."""
-    if min_remaining_ttl.total_seconds() <= 0:
+    if min_remaining_ttl is None or min_remaining_ttl.total_seconds() <= 0:
         await store.reap_expired_idle(pool_name, now)
         return ()
     method = getattr(store, "reap_expired_idle_min_ttl", None)
     if callable(method):
-        result = await method(pool_name, now, min_remaining_ttl)
+        coro = cast(
+            "Awaitable[Iterable[str] | None]", method(pool_name, now, min_remaining_ttl)
+        )
+        result = await coro
         return tuple(result) if result else ()
     await store.reap_expired_idle(pool_name, now)
     return ()

@@ -370,7 +370,7 @@ class SandboxPoolAsync:
                     config=self._config.with_max_idle(await self._resolve_max_idle()),
                     state_store=self._state_store,
                     create_one=self._create_one_sandbox,
-                    on_discard_sandbox=self._kill_sandbox_best_effort,
+                    on_discard_sandbox=self._discard_sandbox_callback,
                     reconcile_state=self._reconcile_state,
                 )
             except Exception as exc:
@@ -483,6 +483,13 @@ class SandboxPoolAsync:
         config = self._connection_config.model_copy(update={"transport": None})
         config._owns_transport = True
         return config
+
+    async def _discard_sandbox_callback(self, sandbox_id: str) -> None:
+        """``Callable[[str], Awaitable[None]]`` adapter for the reconciler's
+        ``on_discard_sandbox`` hook. Drops the bool return value of
+        :meth:`_kill_sandbox_best_effort`.
+        """
+        await self._kill_sandbox_best_effort(sandbox_id)
 
     async def _kill_sandbox_best_effort(self, sandbox_id: str) -> bool:
         """Best-effort kill a sandbox via the pool's manager.
