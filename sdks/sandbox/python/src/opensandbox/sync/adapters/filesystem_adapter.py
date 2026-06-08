@@ -294,6 +294,7 @@ class FilesystemAdapterSync(FilesystemSync):
             response_obj = replace_content.sync_detailed(
                 client=self._client,
                 body=FilesystemModelConverter.to_api_replace_content_body(entries),
+                verbose=True,
             )
 
             handle_api_error(response_obj, "Replace contents")

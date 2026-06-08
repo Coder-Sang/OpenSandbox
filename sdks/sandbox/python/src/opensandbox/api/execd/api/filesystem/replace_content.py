@@ -24,19 +24,26 @@ from ...client import AuthenticatedClient, Client
 from ...models.error_response import ErrorResponse
 from ...models.replace_content_body import ReplaceContentBody
 from ...models.replace_content_response_200 import ReplaceContentResponse200
-from ...types import Response
+from ...types import UNSET, Response, Unset
 
 
 def _get_kwargs(
     *,
     body: ReplaceContentBody,
+    verbose: bool | Unset = False,
 ) -> dict[str, Any]:
     headers: dict[str, Any] = {}
+
+    params: dict[str, Any] = {}
+
+    params["verbose"] = verbose
+
+    params = {k: v for k, v in params.items() if v is not UNSET and v is not None}
 
     _kwargs: dict[str, Any] = {
         "method": "post",
         "url": "/files/replace",
-        "params": {"verbose": "true"},
+        "params": params,
     }
 
     _kwargs["json"] = body.to_dict()
@@ -86,6 +93,7 @@ def sync_detailed(
     *,
     client: AuthenticatedClient | Client,
     body: ReplaceContentBody,
+    verbose: bool | Unset = False,
 ) -> Response[ErrorResponse | ReplaceContentResponse200]:
     """Replace file content
 
@@ -93,7 +101,11 @@ def sync_detailed(
     of the old string with the new string (similar to strings.ReplaceAll).
     Preserves file permissions. Useful for batch text substitution across files.
 
+    When `verbose=true` is set, the response includes per-file replacement counts.
+    Without this parameter, the response body is empty (backward-compatible behavior).
+
     Args:
+        verbose (bool | Unset):  Default: False.
         body (ReplaceContentBody):
 
     Raises:
@@ -106,6 +118,7 @@ def sync_detailed(
 
     kwargs = _get_kwargs(
         body=body,
+        verbose=verbose,
     )
 
     response = client.get_httpx_client().request(
@@ -119,6 +132,7 @@ def sync(
     *,
     client: AuthenticatedClient | Client,
     body: ReplaceContentBody,
+    verbose: bool | Unset = False,
 ) -> ErrorResponse | ReplaceContentResponse200 | None:
     """Replace file content
 
@@ -126,7 +140,11 @@ def sync(
     of the old string with the new string (similar to strings.ReplaceAll).
     Preserves file permissions. Useful for batch text substitution across files.
 
+    When `verbose=true` is set, the response includes per-file replacement counts.
+    Without this parameter, the response body is empty (backward-compatible behavior).
+
     Args:
+        verbose (bool | Unset):  Default: False.
         body (ReplaceContentBody):
 
     Raises:
@@ -140,6 +158,7 @@ def sync(
     return sync_detailed(
         client=client,
         body=body,
+        verbose=verbose,
     ).parsed
 
 
@@ -147,6 +166,7 @@ async def asyncio_detailed(
     *,
     client: AuthenticatedClient | Client,
     body: ReplaceContentBody,
+    verbose: bool | Unset = False,
 ) -> Response[ErrorResponse | ReplaceContentResponse200]:
     """Replace file content
 
@@ -154,7 +174,11 @@ async def asyncio_detailed(
     of the old string with the new string (similar to strings.ReplaceAll).
     Preserves file permissions. Useful for batch text substitution across files.
 
+    When `verbose=true` is set, the response includes per-file replacement counts.
+    Without this parameter, the response body is empty (backward-compatible behavior).
+
     Args:
+        verbose (bool | Unset):  Default: False.
         body (ReplaceContentBody):
 
     Raises:
@@ -167,6 +191,7 @@ async def asyncio_detailed(
 
     kwargs = _get_kwargs(
         body=body,
+        verbose=verbose,
     )
 
     response = await client.get_async_httpx_client().request(**kwargs)
@@ -178,6 +203,7 @@ async def asyncio(
     *,
     client: AuthenticatedClient | Client,
     body: ReplaceContentBody,
+    verbose: bool | Unset = False,
 ) -> ErrorResponse | ReplaceContentResponse200 | None:
     """Replace file content
 
@@ -185,7 +211,11 @@ async def asyncio(
     of the old string with the new string (similar to strings.ReplaceAll).
     Preserves file permissions. Useful for batch text substitution across files.
 
+    When `verbose=true` is set, the response includes per-file replacement counts.
+    Without this parameter, the response body is empty (backward-compatible behavior).
+
     Args:
+        verbose (bool | Unset):  Default: False.
         body (ReplaceContentBody):
 
     Raises:
@@ -200,5 +230,6 @@ async def asyncio(
         await asyncio_detailed(
             client=client,
             body=body,
+            verbose=verbose,
         )
     ).parsed

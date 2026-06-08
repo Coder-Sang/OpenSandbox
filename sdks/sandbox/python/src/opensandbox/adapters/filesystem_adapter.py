@@ -420,6 +420,7 @@ class FilesystemAdapter(Filesystem):
             response_obj = await replace_content.asyncio_detailed(
                 client=client,
                 body=FilesystemModelConverter.to_api_replace_content_body(entries),
+                verbose=True,
             )
 
             handle_api_error(response_obj, "Replace contents")
