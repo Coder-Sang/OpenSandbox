@@ -905,6 +905,68 @@ paths:
         "500":
           $ref: "#/components/responses/InternalServerError"
 
+  /directories/list:
+    get:
+      summary: List directory contents
+      description: |
+        Lists entries under a directory with optional depth control. By default,
+        only immediate children are returned (`depth=1`). Set `depth` to a larger
+        value to include descendants up to that many levels below `path`. The
+        root directory itself is not included in the response.
+      operationId: listDirectory
+      tags:
+        - Filesystem
+      parameters:
+        - name: path
+          in: query
+          required: true
+          description: Directory path to list
+          schema:
+            type: string
+          example: /workspace/project
+        - name: depth
+          in: query
+          required: false
+          description: Maximum child depth to include. `1` lists immediate children only.
+          schema:
+            type: integer
+            format: int32
+            minimum: 0
+            default: 1
+          example: 2
+      responses:
+        "200":
+          description: Array of directory entries with metadata
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/FileInfo"
+              example:
+                - path: /workspace/project/src
+                  type: directory
+                  size: 0
+                  modified_at: 2025-11-16T14:30:45Z
+                  created_at: 2025-11-16T14:30:45Z
+                  owner: admin
+                  group: admin
+                  mode: 755
+                - path: /workspace/project/README.md
+                  type: file
+                  size: 2048
+                  modified_at: 2025-11-16T14:30:45Z
+                  created_at: 2025-11-16T14:30:45Z
+                  owner: admin
+                  group: admin
+                  mode: 644
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
   /directories:
     post:
       summary: Create directories
@@ -1256,6 +1318,11 @@ components:
           type: string
           description: Absolute file path
           example: /workspace/file.txt
+        type:
+          type: string
+          description: Entry type
+          enum: [file, directory, symlink, other]
+          example: file
         size:
           type: integer
           format: int64

@@ -16,6 +16,7 @@ import type { SearchFilesResponse } from "../models/filesystem.js";
 import type {
   ContentReplaceEntry,
   ContentReplaceResult,
+  DirectoryListEntry,
   FileInfo,
   MoveEntry,
   SearchEntry,
@@ -32,6 +33,7 @@ import type {
 export interface SandboxFiles {
   getFileInfo(paths: string[]): Promise<Record<string, FileInfo>>;
   search(entry: SearchEntry): Promise<SearchFilesResponse>;
+  listDirectory(entry: DirectoryListEntry): Promise<FileInfo[]>;
 
   createDirectories(entries: Pick<WriteEntry, "path" | "mode" | "owner" | "group">[]): Promise<void>;
   deleteDirectories(paths: string[]): Promise<void>;

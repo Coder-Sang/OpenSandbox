@@ -28,6 +28,12 @@ public class SandboxFileInfo
     public required string Path { get; set; }
 
     /// <summary>
+    /// Gets or sets the entry type.
+    /// </summary>
+    [JsonPropertyName("type")]
+    public string? Type { get; set; }
+
+    /// <summary>
     /// Gets or sets the file size in bytes.
     /// </summary>
     [JsonPropertyName("size")]

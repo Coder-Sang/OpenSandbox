@@ -51,7 +51,30 @@ func TestFilesystemControllerGetFilesInfo(t *testing.T) {
 	info, ok := resp[target]
 	require.True(t, ok, "response missing entry for %s", target)
 	require.NotEmpty(t, info.Path)
+	require.Equal(t, "file", info.Type)
 	require.NotZero(t, info.Size)
+}
+
+func TestFilesystemControllerGetFilesInfoReportsSymlink(t *testing.T) {
+	tmpDir := t.TempDir()
+	target := filepath.Join(tmpDir, "target.txt")
+	linkPath := filepath.Join(tmpDir, "link.txt")
+	require.NoError(t, os.WriteFile(target, []byte("demo"), 0o644))
+	if err := os.Symlink(target, linkPath); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	query := fmt.Sprintf("/files/info?path=%s", url.QueryEscape(linkPath))
+	ctrl, rec := newFilesystemController(t, http.MethodGet, query, nil)
+
+	ctrl.GetFilesInfo()
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]model.FileInfo
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	info, ok := resp[linkPath]
+	require.True(t, ok, "response missing entry for %s", linkPath)
+	require.Equal(t, "symlink", info.Type)
 }
 
 func TestFilesystemControllerSearchFiles(t *testing.T) {
@@ -71,6 +94,134 @@ func TestFilesystemControllerSearchFiles(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &files))
 	require.Len(t, files, 1)
 	require.Equal(t, a, files[0].Path)
+	require.Equal(t, "file", files[0].Type)
+}
+
+func TestFilesystemControllerListDirectoryDefaultDepth(t *testing.T) {
+	tmpDir := t.TempDir()
+	filePath := filepath.Join(tmpDir, "alpha.txt")
+	dirPath := filepath.Join(tmpDir, "nested")
+	deepFile := filepath.Join(dirPath, "deep.txt")
+	require.NoError(t, os.MkdirAll(dirPath, 0o755))
+	require.NoError(t, os.WriteFile(filePath, []byte("alpha"), 0o644))
+	require.NoError(t, os.WriteFile(deepFile, []byte("deep"), 0o644))
+
+	rawURL := fmt.Sprintf("/directories/list?path=%s", url.QueryEscape(tmpDir))
+	ctrl, rec := newFilesystemController(t, http.MethodGet, rawURL, nil)
+
+	ctrl.ListDirectory()
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var entries []model.FileInfo
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &entries))
+	require.Len(t, entries, 2)
+
+	byPath := map[string]model.FileInfo{}
+	for _, entry := range entries {
+		byPath[entry.Path] = entry
+	}
+	require.Equal(t, "file", byPath[filePath].Type)
+	require.Equal(t, "directory", byPath[dirPath].Type)
+	require.NotContains(t, byPath, deepFile)
+}
+
+func TestFilesystemControllerListDirectoryDepth(t *testing.T) {
+	tmpDir := t.TempDir()
+	nested := filepath.Join(tmpDir, "nested")
+	deeper := filepath.Join(nested, "deeper")
+	deepFile := filepath.Join(nested, "deep.txt")
+	tooDeep := filepath.Join(deeper, "too-deep.txt")
+	require.NoError(t, os.MkdirAll(deeper, 0o755))
+	require.NoError(t, os.WriteFile(deepFile, []byte("deep"), 0o644))
+	require.NoError(t, os.WriteFile(tooDeep, []byte("too deep"), 0o644))
+
+	rawURL := fmt.Sprintf("/directories/list?path=%s&depth=2", url.QueryEscape(tmpDir))
+	ctrl, rec := newFilesystemController(t, http.MethodGet, rawURL, nil)
+
+	ctrl.ListDirectory()
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var entries []model.FileInfo
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &entries))
+
+	byPath := map[string]model.FileInfo{}
+	for _, entry := range entries {
+		byPath[entry.Path] = entry
+	}
+	require.Equal(t, "directory", byPath[nested].Type)
+	require.Equal(t, "directory", byPath[deeper].Type)
+	require.Equal(t, "file", byPath[deepFile].Type)
+	require.NotContains(t, byPath, tooDeep)
+}
+
+func TestFilesystemControllerListDirectoryDepthZero(t *testing.T) {
+	tmpDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "alpha.txt"), []byte("alpha"), 0o644))
+
+	rawURL := fmt.Sprintf("/directories/list?path=%s&depth=0", url.QueryEscape(tmpDir))
+	ctrl, rec := newFilesystemController(t, http.MethodGet, rawURL, nil)
+
+	ctrl.ListDirectory()
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var entries []model.FileInfo
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &entries))
+	require.Empty(t, entries)
+}
+
+func TestFilesystemControllerListDirectoryReportsSymlinkWithoutRecursing(t *testing.T) {
+	tmpDir := t.TempDir()
+	targetDir := filepath.Join(tmpDir, "target")
+	linkPath := filepath.Join(tmpDir, "link")
+	targetFile := filepath.Join(targetDir, "target.txt")
+	require.NoError(t, os.MkdirAll(targetDir, 0o755))
+	require.NoError(t, os.WriteFile(targetFile, []byte("target"), 0o644))
+	if err := os.Symlink(targetDir, linkPath); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	rawURL := fmt.Sprintf("/directories/list?path=%s&depth=2", url.QueryEscape(tmpDir))
+	ctrl, rec := newFilesystemController(t, http.MethodGet, rawURL, nil)
+
+	ctrl.ListDirectory()
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var entries []model.FileInfo
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &entries))
+
+	byPath := map[string]model.FileInfo{}
+	for _, entry := range entries {
+		byPath[entry.Path] = entry
+	}
+	require.Equal(t, "symlink", byPath[linkPath].Type)
+	require.NotContains(t, byPath, filepath.Join(linkPath, "target.txt"))
+	require.Contains(t, byPath, targetFile)
+}
+
+func TestFilesystemControllerListDirectoryRejectsInvalidRequests(t *testing.T) {
+	tmpDir := t.TempDir()
+	filePath := filepath.Join(tmpDir, "file.txt")
+	require.NoError(t, os.WriteFile(filePath, []byte("file"), 0o644))
+
+	tests := []struct {
+		name   string
+		rawURL string
+		want   int
+	}{
+		{name: "missing path", rawURL: "/directories/list", want: http.StatusBadRequest},
+		{name: "missing directory", rawURL: "/directories/list?path=/not/exists", want: http.StatusNotFound},
+		{name: "file path", rawURL: fmt.Sprintf("/directories/list?path=%s", url.QueryEscape(filePath)), want: http.StatusBadRequest},
+		{name: "invalid depth", rawURL: fmt.Sprintf("/directories/list?path=%s&depth=abc", url.QueryEscape(tmpDir)), want: http.StatusBadRequest},
+		{name: "negative depth", rawURL: fmt.Sprintf("/directories/list?path=%s&depth=-1", url.QueryEscape(tmpDir)), want: http.StatusBadRequest},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctrl, rec := newFilesystemController(t, http.MethodGet, tt.rawURL, nil)
+			ctrl.ListDirectory()
+			require.Equal(t, tt.want, rec.Code)
+		})
+	}
 }
 
 func TestFilesystemControllerReplaceContent(t *testing.T) {

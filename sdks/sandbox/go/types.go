@@ -350,6 +350,7 @@ type CommandLogsResponse struct {
 // FileInfo contains file metadata including path and permissions.
 type FileInfo struct {
 	Path       string    `json:"path"`
+	Type       string    `json:"type,omitempty"`
 	Size       int64     `json:"size"`
 	ModifiedAt time.Time `json:"modified_at"`
 	CreatedAt  time.Time `json:"created_at"`

@@ -47,6 +47,7 @@ func NewRouter(accessToken string) *gin.Engine {
 
 	directories := r.Group("/directories")
 	{
+		directories.GET("/list", withFilesystem(func(c *controller.FilesystemController) { c.ListDirectory() }))
 		directories.POST("", withFilesystem(func(c *controller.FilesystemController) { c.MakeDirs() }))
 		directories.DELETE("", withFilesystem(func(c *controller.FilesystemController) { c.RemoveDirs() }))
 	}

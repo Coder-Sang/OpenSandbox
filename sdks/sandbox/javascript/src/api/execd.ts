@@ -471,6 +471,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/directories/list": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List directory contents
+         * @description Lists entries under a directory with optional depth control. By default,
+         *     only immediate children are returned (`depth=1`). Set `depth` to a larger
+         *     value to include descendants up to that many levels below `path`. The
+         *     root directory itself is not included in the response.
+         */
+        get: operations["listDirectory"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/directories": {
         parameters: {
             query?: never;
@@ -771,6 +794,12 @@ export interface components {
              * @example /workspace/file.txt
              */
             path: string;
+            /**
+             * @description Entry type
+             * @example file
+             * @enum {string}
+             */
+            type?: "file" | "directory" | "symlink" | "other";
             /**
              * Format: int64
              * @description File size in bytes
@@ -1708,6 +1737,64 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
+            500: components["responses"]["InternalServerError"];
+        };
+    };
+    listDirectory: {
+        parameters: {
+            query: {
+                /**
+                 * @description Directory path to list
+                 * @example /workspace/project
+                 */
+                path: string;
+                /**
+                 * @description Maximum child depth to include. `1` lists immediate children only.
+                 * @example 2
+                 */
+                depth?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Array of directory entries with metadata */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    /**
+                     * @example [
+                     *       {
+                     *         "path": "/workspace/project/src",
+                     *         "type": "directory",
+                     *         "size": 0,
+                     *         "modified_at": "2025-11-16T14:30:45Z",
+                     *         "created_at": "2025-11-16T14:30:45Z",
+                     *         "owner": "admin",
+                     *         "group": "admin",
+                     *         "mode": 755
+                     *       },
+                     *       {
+                     *         "path": "/workspace/project/README.md",
+                     *         "type": "file",
+                     *         "size": 2048,
+                     *         "modified_at": "2025-11-16T14:30:45Z",
+                     *         "created_at": "2025-11-16T14:30:45Z",
+                     *         "owner": "admin",
+                     *         "group": "admin",
+                     *         "mode": 644
+                     *       }
+                     *     ]
+                     */
+                    "application/json": components["schemas"]["FileInfo"][];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            404: components["responses"]["NotFound"];
             500: components["responses"]["InternalServerError"];
         };
     };

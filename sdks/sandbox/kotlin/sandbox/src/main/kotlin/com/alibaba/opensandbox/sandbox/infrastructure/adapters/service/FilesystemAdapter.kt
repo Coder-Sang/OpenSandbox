@@ -289,6 +289,18 @@ internal class FilesystemAdapter(
         }
     }
 
+    override fun listDirectory(
+        path: String,
+        depth: Int?,
+    ): List<EntryInfo> {
+        return try {
+            api.listDirectory(path, depth).map { it.toEntryInfo() }
+        } catch (e: Exception) {
+            logger.error("Failed to list directory {}", path, e)
+            throw e.toSandboxException()
+        }
+    }
+
     override fun moveFiles(entries: List<MoveEntry>) {
         return try {
             val renameItems = entries.toApiRenameFileItems()

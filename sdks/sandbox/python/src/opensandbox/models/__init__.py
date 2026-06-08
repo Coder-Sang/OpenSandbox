@@ -34,6 +34,7 @@ from opensandbox.models.execd import (
 from opensandbox.models.filesystem import (
     ContentReplaceEntry,
     ContentReplaceResult,
+    DirectoryListEntry,
     EntryInfo,
     MoveEntry,
     SearchEntry,
@@ -76,6 +77,7 @@ __all__ = [
     "EntryInfo",
     "WriteEntry",
     "MoveEntry",
+    "DirectoryListEntry",
     "SetPermissionEntry",
     "ContentReplaceEntry",
     "ContentReplaceResult",

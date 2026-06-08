@@ -99,6 +99,21 @@ internal sealed class FilesystemAdapter : ISandboxFiles
         await _client.DeleteAsync(pathWithQuery, cancellationToken: cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task<IReadOnlyList<SandboxFileInfo>> ListDirectoryAsync(
+        string path,
+        int? depth = null,
+        CancellationToken cancellationToken = default)
+    {
+        var queryParams = new Dictionary<string, string?>
+        {
+            ["path"] = path,
+            ["depth"] = depth?.ToString()
+        };
+
+        var response = await _client.GetAsync<JsonElement>("/directories/list", queryParams, cancellationToken).ConfigureAwait(false);
+        return ParseSearchFilesResponse(response);
+    }
+
     public async Task WriteFilesAsync(
         IEnumerable<WriteEntry> entries,
         CancellationToken cancellationToken = default)
@@ -381,6 +396,7 @@ internal sealed class FilesystemAdapter : ISandboxFiles
         return new SandboxFileInfo
         {
             Path = element.GetProperty("path").GetString() ?? string.Empty,
+            Type = element.TryGetProperty("type", out var type) ? type.GetString() : null,
             Size = element.TryGetProperty("size", out var size) && size.ValueKind == JsonValueKind.Number
                 ? size.GetInt64()
                 : null,

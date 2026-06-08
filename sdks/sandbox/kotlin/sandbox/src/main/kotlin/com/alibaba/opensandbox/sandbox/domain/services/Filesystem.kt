@@ -167,6 +167,19 @@ interface Filesystem {
     fun deleteDirectories(paths: List<String>)
 
     /**
+     * Lists directory contents with optional depth control.
+     *
+     * @param path Directory path to list
+     * @param depth Optional maximum child depth to include
+     * @return List of EntryInfo objects containing metadata for directory entries
+     * @throws SandboxException if the operation fails
+     */
+    fun listDirectory(
+        path: String,
+        depth: Int? = null,
+    ): List<EntryInfo>
+
+    /**
      * Moves files from source to destination paths.
      *
      * @param entries List of MoveEntry objects specifying source and destination paths

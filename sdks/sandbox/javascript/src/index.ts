@@ -64,6 +64,7 @@ export type { SandboxFilter, SandboxManagerOptions } from "./manager.js";
 export type { ExecdHealth } from "./services/execdHealth.js";
 export type { ExecdMetrics } from "./services/execdMetrics.js";
 export type {
+  FileEntryType,
   FileInfo,
   FileMetadata,
   Permission,
@@ -118,6 +119,7 @@ export { Sandbox } from "./sandbox.js";
 export type {
   ContentReplaceEntry,
   ContentReplaceResult,
+  DirectoryListEntry,
   MoveEntry,
   SearchEntry,
   SetPermissionEntry,

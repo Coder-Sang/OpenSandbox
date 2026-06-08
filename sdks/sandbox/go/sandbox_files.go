@@ -52,6 +52,14 @@ func (s *Sandbox) SearchFiles(ctx context.Context, dir, pattern string) ([]FileI
 	return s.execd.SearchFiles(ctx, dir, pattern)
 }
 
+// ListDirectory lists directory contents with optional depth control.
+func (s *Sandbox) ListDirectory(ctx context.Context, path string, depth int) ([]FileInfo, error) {
+	if s.execd == nil {
+		return nil, fmt.Errorf("opensandbox: execd client not initialized")
+	}
+	return s.execd.ListDirectory(ctx, path, depth)
+}
+
 // SetPermissions changes file permissions.
 func (s *Sandbox) SetPermissions(ctx context.Context, req PermissionsRequest) error {
 	if s.execd == nil {

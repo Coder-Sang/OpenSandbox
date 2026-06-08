@@ -1531,6 +1531,53 @@ func TestSearchFiles(t *testing.T) {
 	}
 }
 
+func TestListDirectory(t *testing.T) {
+	want := []FileInfo{
+		{Path: "/sandbox/src", Type: "directory", Size: 0, Owner: "root", Group: "root", Mode: 755},
+		{Path: "/sandbox/README.md", Type: "file", Size: 256, Owner: "root", Group: "root", Mode: 644},
+	}
+
+	_, client := newExecdServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			assert.Fail(t, fmt.Sprintf("expected GET, got %s", r.Method))
+		}
+		if r.URL.Path != "/directories/list" {
+			assert.Fail(t, fmt.Sprintf("expected /directories/list, got %s", r.URL.Path))
+		}
+		if r.URL.Query().Get("path") != "/sandbox" {
+			assert.Fail(t, fmt.Sprintf("expected path=/sandbox, got %s", r.URL.Query().Get("path")))
+		}
+		if r.URL.Query().Get("depth") != "2" {
+			assert.Fail(t, fmt.Sprintf("expected depth=2, got %s", r.URL.Query().Get("depth")))
+		}
+
+		jsonResponse(w, http.StatusOK, want)
+	})
+
+	got, err := client.ListDirectory(context.Background(), "/sandbox", 2)
+	require.NoErrorf(t, err, "ListDirectory")
+	require.Len(t, got, 2)
+	require.Equal(t, "directory", got[0].Type)
+	require.Equal(t, "file", got[1].Type)
+}
+
+func TestListDirectorySendsDepthZero(t *testing.T) {
+	_, client := newExecdServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/directories/list" {
+			assert.Fail(t, fmt.Sprintf("expected /directories/list, got %s", r.URL.Path))
+		}
+		if r.URL.Query().Get("depth") != "0" {
+			assert.Fail(t, fmt.Sprintf("expected depth=0, got %s", r.URL.Query().Get("depth")))
+		}
+
+		jsonResponse(w, http.StatusOK, []FileInfo{})
+	})
+
+	got, err := client.ListDirectory(context.Background(), "/sandbox", 0)
+	require.NoErrorf(t, err, "ListDirectory")
+	require.Len(t, got, 0)
+}
+
 func TestSetPermissions(t *testing.T) {
 	_, client := newExecdServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {

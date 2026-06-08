@@ -349,6 +349,9 @@ public class SandboxEgressLifecycleTests
         public Task DeleteDirectoriesAsync(IEnumerable<string> paths, CancellationToken cancellationToken = default) =>
             throw new NotImplementedException();
 
+        public Task<IReadOnlyList<SandboxFileInfo>> ListDirectoryAsync(string path, int? depth = null, CancellationToken cancellationToken = default) =>
+            throw new NotImplementedException();
+
         public Task WriteFilesAsync(IEnumerable<WriteEntry> entries, CancellationToken cancellationToken = default) =>
             throw new NotImplementedException();
 

@@ -24,6 +24,7 @@ from .create_session_request import CreateSessionRequest
 from .create_session_response import CreateSessionResponse
 from .error_response import ErrorResponse
 from .file_info import FileInfo
+from .file_info_type import FileInfoType
 from .file_metadata import FileMetadata
 from .get_files_info_response_200 import GetFilesInfoResponse200
 from .make_dirs_body import MakeDirsBody
@@ -53,6 +54,7 @@ __all__ = (
     "CreateSessionResponse",
     "ErrorResponse",
     "FileInfo",
+    "FileInfoType",
     "FileMetadata",
     "GetFilesInfoResponse200",
     "MakeDirsBody",

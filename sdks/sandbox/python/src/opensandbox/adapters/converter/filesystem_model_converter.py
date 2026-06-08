@@ -25,6 +25,7 @@ This converter is designed to work with openapi-python-client generated models.
 from typing import Any
 
 from opensandbox.api.execd.models import FileInfo
+from opensandbox.api.execd.types import UNSET
 from opensandbox.models.filesystem import (
     ContentReplaceEntry,
     ContentReplaceResult,
@@ -46,8 +47,13 @@ class FilesystemModelConverter:
     @staticmethod
     def to_entry_info(api_file_info: FileInfo) -> EntryInfo:
         """Convert API FileInfo to domain EntryInfo."""
+        entry_type = None
+        if api_file_info.type_ is not UNSET:
+            entry_type = str(api_file_info.type_)
+
         return EntryInfo(
             path=api_file_info.path,
+            type=entry_type,
             mode=api_file_info.mode,
             owner=api_file_info.owner,
             group=api_file_info.group,

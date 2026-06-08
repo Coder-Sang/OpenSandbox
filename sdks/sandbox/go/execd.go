@@ -255,6 +255,17 @@ func (e *ExecdClient) SearchFiles(ctx context.Context, dir string, pattern strin
 	return result, err
 }
 
+// ListDirectory lists directory contents with optional depth control.
+func (e *ExecdClient) ListDirectory(ctx context.Context, path string, depth int) ([]FileInfo, error) {
+	var result []FileInfo
+	params := url.Values{}
+	params.Set("path", path)
+	params.Set("depth", strconv.Itoa(depth))
+	reqPath := "/directories/list?" + params.Encode()
+	err := e.client.doRequest(ctx, http.MethodGet, reqPath, nil, &result)
+	return result, err
+}
+
 // ReplaceInFiles performs text replacement in the specified files.
 func (e *ExecdClient) ReplaceInFiles(ctx context.Context, req ReplaceRequest) error {
 	return e.client.doRequest(ctx, http.MethodPost, "/files/replace", req, nil)

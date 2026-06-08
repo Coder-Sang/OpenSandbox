@@ -126,20 +126,21 @@ func MakeDir(dir string, perm model.Permission) error {
 	return ChmodFile(abs, perm)
 }
 
-func GetFileInfo(filePath string) (model.FileInfo, error) {
-	absPath, err := pathutil.ExpandAbsPath(filePath)
-	if err != nil {
-		return model.FileInfo{}, fmt.Errorf("invalid path %s: %w", filePath, err)
+func fileType(fileInfo os.FileInfo) string {
+	mode := fileInfo.Mode()
+	if mode&os.ModeSymlink != 0 {
+		return "symlink"
 	}
-
-	fileInfo, err := os.Stat(absPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return model.FileInfo{}, fmt.Errorf("file not found: %s", filePath)
-		}
-		return model.FileInfo{}, fmt.Errorf("error accessing file %s: %w", filePath, err)
+	if fileInfo.IsDir() {
+		return "directory"
 	}
+	if mode.IsRegular() {
+		return "file"
+	}
+	return "other"
+}
 
+func buildFileInfo(absPath string, fileInfo os.FileInfo) (model.FileInfo, error) {
 	createdAt := getFileCreateTime(fileInfo)
 	if data, ok := fileInfo.Sys().(*syscall.Win32FileAttributeData); ok && data != nil {
 		createdAt = time.Unix(0, data.CreationTime.Nanoseconds())
@@ -149,6 +150,7 @@ func GetFileInfo(filePath string) (model.FileInfo, error) {
 
 	return model.FileInfo{
 		Path:       absPath,
+		Type:       fileType(fileInfo),
 		Size:       fileInfo.Size(),
 		ModifiedAt: fileInfo.ModTime(),
 		CreatedAt:  createdAt,
@@ -161,6 +163,23 @@ func GetFileInfo(filePath string) (model.FileInfo, error) {
 			}(),
 		},
 	}, nil
+}
+
+func GetFileInfo(filePath string) (model.FileInfo, error) {
+	absPath, err := pathutil.ExpandAbsPath(filePath)
+	if err != nil {
+		return model.FileInfo{}, fmt.Errorf("invalid path %s: %w", filePath, err)
+	}
+
+	fileInfo, err := os.Lstat(absPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return model.FileInfo{}, fmt.Errorf("file not found: %s", filePath)
+		}
+		return model.FileInfo{}, fmt.Errorf("error accessing file %s: %w", filePath, err)
+	}
+
+	return buildFileInfo(absPath, fileInfo)
 }
 
 func SearchFileMetadata(metadata map[string]model.FileMetadata, filePath string) (string, model.FileMetadata, bool) {

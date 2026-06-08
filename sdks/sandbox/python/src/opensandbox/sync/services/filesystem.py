@@ -27,6 +27,7 @@ from typing import Protocol
 from opensandbox.models.filesystem import (
     ContentReplaceEntry,
     ContentReplaceResult,
+    DirectoryListEntry,
     EntryInfo,
     MoveEntry,
     SearchEntry,
@@ -239,6 +240,21 @@ class FilesystemSync(Protocol):
 
         Returns:
             List of EntryInfo objects containing metadata for matching files/directories.
+
+        Raises:
+            SandboxException: If the operation fails.
+        """
+        ...
+
+    def list_directory(self, entry: DirectoryListEntry) -> list[EntryInfo]:
+        """
+        List directory contents with optional depth control.
+
+        Args:
+            entry: DirectoryListEntry object containing path and optional depth.
+
+        Returns:
+            List of EntryInfo objects containing metadata for directory entries.
 
         Raises:
             SandboxException: If the operation fails.

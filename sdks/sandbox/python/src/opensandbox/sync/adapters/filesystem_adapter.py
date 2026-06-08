@@ -41,6 +41,7 @@ from opensandbox.exceptions import InvalidArgumentException, SandboxApiException
 from opensandbox.models.filesystem import (
     ContentReplaceEntry,
     ContentReplaceResult,
+    DirectoryListEntry,
     EntryInfo,
     MoveEntry,
     SearchEntry,
@@ -344,6 +345,31 @@ class FilesystemAdapterSync(FilesystemSync):
             )
         except Exception as e:
             logger.error("Failed to search files", exc_info=e)
+            raise ExceptionConverter.to_sandbox_exception(e) from e
+
+    def list_directory(self, entry: DirectoryListEntry) -> list[EntryInfo]:
+        try:
+            from opensandbox.api.execd.api.filesystem import list_directory
+            from opensandbox.api.execd.models import FileInfo
+            from opensandbox.api.execd.types import UNSET
+
+            response_obj = list_directory.sync_detailed(
+                client=self._client,
+                path=entry.path,
+                depth=entry.depth if entry.depth is not None else UNSET,
+            )
+            handle_api_error(response_obj, "List directory")
+            parsed = response_obj.parsed
+            if not parsed:
+                return []
+            if isinstance(parsed, list) and all(isinstance(x, FileInfo) for x in parsed):
+                return FilesystemModelConverter.to_entry_info_list(parsed)
+            raise SandboxApiException(
+                message="List directory failed: unexpected response type",
+                request_id=extract_request_id(getattr(response_obj, "headers", None)),
+            )
+        except Exception as e:
+            logger.error("Failed to list directory", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     def get_file_info(self, paths: list[str]) -> dict[str, EntryInfo]:

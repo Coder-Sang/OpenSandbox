@@ -217,6 +217,111 @@ func (c *FilesystemController) RemoveDirs() {
 	c.RespondSuccess(nil)
 }
 
+// ListDirectory lists directory contents with optional depth control
+func (c *FilesystemController) ListDirectory() {
+	rec := beginFilesystemMetric("listdir")
+	defer rec.Finish(c.basicController)
+
+	path := c.ctx.Query("path")
+	if path == "" {
+		c.RespondError(
+			http.StatusBadRequest,
+			model.ErrorCodeMissingQuery,
+			"missing query parameter 'path'",
+		)
+		return
+	}
+
+	depth := 1
+	if rawDepth := c.ctx.Query("depth"); rawDepth != "" {
+		parsedDepth, err := strconv.Atoi(rawDepth)
+		if err != nil || parsedDepth < 0 {
+			c.RespondError(
+				http.StatusBadRequest,
+				model.ErrorCodeInvalidRequest,
+				fmt.Sprintf("invalid query parameter 'depth': %s", rawDepth),
+			)
+			return
+		}
+		depth = parsedDepth
+	}
+
+	path, err := pathutil.ExpandAbsPath(path)
+	if err != nil {
+		c.RespondError(
+			http.StatusInternalServerError,
+			model.ErrorCodeRuntimeError,
+			fmt.Sprintf("error converting path %s to absolute. %v", path, err),
+		)
+		return
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		c.handleFileError(err)
+		return
+	}
+	if !info.IsDir() {
+		c.RespondError(
+			http.StatusBadRequest,
+			model.ErrorCodeInvalidRequest,
+			fmt.Sprintf("path is not a directory: %s", path),
+		)
+		return
+	}
+
+	entries, err := listDirectoryEntries(path, depth)
+	if err != nil {
+		c.RespondError(
+			http.StatusInternalServerError,
+			model.ErrorCodeRuntimeError,
+			fmt.Sprintf("error listing directory %s. %v", path, err),
+		)
+		return
+	}
+
+	rec.MarkSuccess()
+	c.RespondSuccess(entries)
+}
+
+func listDirectoryEntries(root string, maxDepth int) ([]model.FileInfo, error) {
+	entries := make([]model.FileInfo, 0, 16)
+	if maxDepth == 0 {
+		return entries, nil
+	}
+
+	var walk func(string, int) error
+	walk = func(dir string, currentDepth int) error {
+		dirEntries, err := os.ReadDir(dir)
+		if err != nil {
+			return err
+		}
+
+		for _, entry := range dirEntries {
+			entryPath := filepath.Join(dir, entry.Name())
+			info, err := entry.Info()
+			if err != nil {
+				return err
+			}
+
+			entryInfo, err := buildFileInfo(entryPath, info)
+			if err != nil {
+				return err
+			}
+			entries = append(entries, entryInfo)
+
+			if entry.IsDir() && currentDepth+1 < maxDepth {
+				if err := walk(entryPath, currentDepth+1); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+
+	return entries, walk(root, 0)
+}
+
 // SearchFiles searches for files matching a pattern in a directory
 func (c *FilesystemController) SearchFiles() {
 	rec := beginFilesystemMetric("search")
@@ -271,21 +376,11 @@ func (c *FilesystemController) SearchFiles() {
 		}
 
 		if match {
-			files = append(files, model.FileInfo{
-				Path:       filePath,
-				Size:       info.Size(),
-				ModifiedAt: info.ModTime(),
-				CreatedAt:  getFileCreateTime(info),
-				Permission: model.Permission{
-					Owner: "",
-					Group: "",
-					Mode: func() int {
-						mode := strconv.FormatInt(int64(info.Mode().Perm()), 8)
-						i, _ := strconv.Atoi(mode)
-						return i
-					}(),
-				},
-			})
+			fileInfo, err := buildFileInfo(filePath, info)
+			if err != nil {
+				return err
+			}
+			files = append(files, fileInfo)
 		}
 
 		return nil
