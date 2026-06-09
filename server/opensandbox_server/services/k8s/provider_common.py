@@ -228,11 +228,13 @@ def _workload_platform_constraint_scope(
     pod_template_key: str,
     analyzer: Callable[[Any], tuple[bool, bool]],
 ) -> tuple[bool, bool]:
-    pod_spec = (
-        workload.get("spec", {})
-        .get(pod_template_key, {})
-        .get("spec", {})
-    )
+    # Use `or {}` instead of `.get(key, {})`: in pool mode the BatchSandbox CR
+    # has spec.template explicitly set to null (the key exists but the value is
+    # None), so `.get("template", {})` returns None rather than {}, causing
+    # the next chained `.get()` to raise AttributeError.
+    spec = workload.get("spec") or {}
+    template = spec.get(pod_template_key) or {}
+    pod_spec = template.get("spec") or {}
     return analyzer(pod_spec)
 
 

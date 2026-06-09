@@ -18,7 +18,19 @@ from fastapi import HTTPException
 from opensandbox_server.services.constants import SandboxErrorCodes
 from opensandbox_server.services.k8s.provider_common import (
     _translate_resource_limits_for_k8s,
+    _workload_platform_constraint_scope,
 )
+
+
+# ---------------------------------------------------------------------------
+# Helpers for _workload_platform_constraint_scope tests
+# ---------------------------------------------------------------------------
+
+def _analyzer(pod_spec):
+    """Return whether pod_spec has nodeSelector / nodeName (platform constraints)."""
+    has_platform = bool(pod_spec.get("nodeSelector") or pod_spec.get("nodeName"))
+    has_non_platform = bool(pod_spec.get("affinity"))
+    return has_platform, has_non_platform
 
 
 def test_translate_resource_limits_passes_gpu_count():
@@ -72,3 +84,65 @@ def test_translate_resource_limits_drops_invalid_gpu(bad_value):
 
 def test_translate_resource_limits_empty_dict():
     assert _translate_resource_limits_for_k8s({}) == {}
+
+
+# ---------------------------------------------------------------------------
+# _workload_platform_constraint_scope
+# ---------------------------------------------------------------------------
+
+def test_platform_constraint_scope_null_template_does_not_crash():
+    # Regression: pool-mode BatchSandbox CRs have spec.template: null.
+    # .get("template", {}) returns None when the key exists with value None,
+    # causing AttributeError on the next chained .get().
+    workload = {"spec": {"template": None, "poolRef": "pool-runc"}}
+    result = _workload_platform_constraint_scope(workload, "template", _analyzer)
+    assert result == (False, False)
+
+
+def test_platform_constraint_scope_missing_template_key():
+    workload = {"spec": {"poolRef": "pool-runc"}}
+    result = _workload_platform_constraint_scope(workload, "template", _analyzer)
+    assert result == (False, False)
+
+
+def test_platform_constraint_scope_null_spec():
+    workload = {"spec": None}
+    result = _workload_platform_constraint_scope(workload, "template", _analyzer)
+    assert result == (False, False)
+
+
+def test_platform_constraint_scope_empty_workload():
+    result = _workload_platform_constraint_scope({}, "template", _analyzer)
+    assert result == (False, False)
+
+
+def test_platform_constraint_scope_detects_node_selector():
+    workload = {
+        "spec": {
+            "template": {
+                "spec": {
+                    "nodeSelector": {"kubernetes.io/arch": "amd64"},
+                }
+            }
+        }
+    }
+    has_platform, has_non_platform = _workload_platform_constraint_scope(
+        workload, "template", _analyzer
+    )
+    assert has_platform is True
+    assert has_non_platform is False
+
+
+def test_platform_constraint_scope_pod_template_key_alias():
+    # AgentSandbox uses "podTemplate" instead of "template"
+    workload = {
+        "spec": {
+            "podTemplate": {
+                "spec": {"nodeSelector": {"kubernetes.io/os": "linux"}}
+            }
+        }
+    }
+    has_platform, _ = _workload_platform_constraint_scope(
+        workload, "podTemplate", _analyzer
+    )
+    assert has_platform is True
