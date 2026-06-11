@@ -256,9 +256,21 @@ func (c *FilesystemController) ListDirectory() {
 		return
 	}
 
-	info, err := os.Stat(path)
+	// Use Lstat so a symlink passed as the root is detected and rejected
+	// rather than silently followed: /directories/list never traverses
+	// symlinks (see the public spec), so listing through a symlink-as-root
+	// would expose a different subtree than the caller asked for.
+	info, err := os.Lstat(path)
 	if err != nil {
 		c.handleFileError(err)
+		return
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		c.RespondError(
+			http.StatusBadRequest,
+			model.ErrorCodeInvalidRequest,
+			fmt.Sprintf("path is a symbolic link, refusing to traverse: %s", path),
+		)
 		return
 	}
 	if !info.IsDir() {

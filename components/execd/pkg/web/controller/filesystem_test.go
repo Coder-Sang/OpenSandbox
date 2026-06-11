@@ -236,6 +236,26 @@ func TestFilesystemControllerListDirectoryReturnsLexicalOrder(t *testing.T) {
 	}, paths)
 }
 
+func TestFilesystemControllerListDirectoryRejectsSymlinkRoot(t *testing.T) {
+	tmpDir := t.TempDir()
+	targetDir := filepath.Join(tmpDir, "real")
+	linkPath := filepath.Join(tmpDir, "link-to-real")
+	require.NoError(t, os.MkdirAll(targetDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(targetDir, "leak.txt"), []byte("leak"), 0o644))
+	if err := os.Symlink(targetDir, linkPath); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	rawURL := fmt.Sprintf("/directories/list?path=%s", url.QueryEscape(linkPath))
+	ctrl, rec := newFilesystemController(t, http.MethodGet, rawURL, nil)
+
+	ctrl.ListDirectory()
+
+	require.Equal(t, http.StatusBadRequest, rec.Code, "symlink as root should be rejected per spec")
+	// Make sure the response body does not leak the target directory contents.
+	require.NotContains(t, rec.Body.String(), "leak.txt")
+}
+
 func TestFilesystemControllerListDirectoryRejectsInvalidRequests(t *testing.T) {
 	tmpDir := t.TempDir()
 	filePath := filepath.Join(tmpDir, "file.txt")

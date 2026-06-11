@@ -916,7 +916,9 @@ paths:
 
         Symbolic links are reported with `type=symlink` and are not traversed:
         the listing never descends into a link target, even when `depth` would
-        otherwise allow it.
+        otherwise allow it. For the same reason, when `path` itself resolves to
+        a symbolic link the request is rejected with `400`; callers must pass
+        the real directory path they want listed.
 
         Entries are returned in lexical order by entry name within each
         directory. Descendants reported via `depth>1` follow their parent in
