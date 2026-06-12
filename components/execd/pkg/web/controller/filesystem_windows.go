@@ -374,7 +374,7 @@ func (c *FilesystemController) SearchFiles() {
 
 	files := make([]model.FileInfo, 0, 16)
 	err = filepath.Walk(path, func(filePath string, info os.FileInfo, err error) error {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return nil
 		}
 		if err != nil {
