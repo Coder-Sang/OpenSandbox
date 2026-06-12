@@ -20,6 +20,7 @@ package controller
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -40,7 +41,7 @@ func DeleteFile(filePath string) error {
 
 	fileInfo, err := os.Stat(absPath)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return nil
 		}
 		return err
@@ -213,7 +214,7 @@ func GetFileInfo(filePath string) (model.FileInfo, error) {
 
 	fileInfo, err := os.Lstat(absPath)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return model.FileInfo{}, fmt.Errorf("file not found: %s: %w", filePath, err)
 		}
 		return model.FileInfo{}, fmt.Errorf("error accessing file %s: %w", filePath, err)
