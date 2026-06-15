@@ -402,11 +402,18 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
         except DockerException as exc:
             logger.warning("Failed to remove expired sandbox %s: %s", sandbox_id, exc)
 
+        managed_volumes_raw = labels.get(SANDBOX_MANAGED_VOLUMES_LABEL, "[]")
+        try:
+            managed_volumes: list[str] = json.loads(managed_volumes_raw)
+        except (TypeError, json.JSONDecodeError):
+            managed_volumes = []
+
         self._remove_expiration_tracking(sandbox_id)
         # Ensure sidecar is also cleaned up on expiration
         self._cleanup_egress_sidecar(sandbox_id)
         self._cleanup_windows_oem_volume(sandbox_id, labels)
         self._release_ossfs_mounts(mount_keys)
+        self._cleanup_managed_volumes(sandbox_id, managed_volumes)
         self._metadata_store.delete(sandbox_id)
 
     def _restore_existing_sandboxes(self) -> None:
@@ -891,9 +898,13 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
 
             # Inject volume bind mounts into Docker host config
             if runtime_volume_name:
-                volume_binds.append(
-                    f"{runtime_volume_name}:{OPENSANDBOX_RUNTIME_MOUNT_PATH}:rw"
+                has_runtime_mount = any(
+                    f":{OPENSANDBOX_RUNTIME_MOUNT_PATH}" in bind for bind in volume_binds
                 )
+                if not has_runtime_mount:
+                    volume_binds.append(
+                        f"{runtime_volume_name}:{OPENSANDBOX_RUNTIME_MOUNT_PATH}:rw"
+                    )
             if volume_binds:
                 host_config_kwargs["binds"] = volume_binds
             if requested_windows_profile:
