@@ -669,3 +669,24 @@ class TestEgressRuntimeCompatibility:
 
     def test_allows_gvisor_without_network_policy(self):
         ensure_egress_runtime_compatible(None, self._secure_runtime("gvisor"))
+
+    def test_rejects_template_gvisor_with_network_policy(self):
+        with pytest.raises(HTTPException) as exc_info:
+            ensure_egress_runtime_compatible(
+                self._network_policy(), None, effective_runtime_class="gvisor"
+            )
+        assert exc_info.value.status_code == 400
+        assert "gVisor" in exc_info.value.detail["message"]
+
+    def test_allows_template_kata_with_network_policy(self):
+        ensure_egress_runtime_compatible(
+            self._network_policy(), None, effective_runtime_class="kata-qemu"
+        )
+
+    def test_secure_runtime_takes_precedence_over_template(self):
+        with pytest.raises(HTTPException):
+            ensure_egress_runtime_compatible(
+                self._network_policy(),
+                self._secure_runtime("gvisor"),
+                effective_runtime_class="kata-qemu",
+            )
