@@ -64,6 +64,7 @@ class Sandboxes(Protocol):
         secure_access: bool = False,
         snapshot_id: str | None = None,
         credential_proxy: CredentialProxyConfig | None = None,
+        resource_requests: dict[str, str] | None = None,
     ) -> SandboxCreateResponse:
         """
         Create a new sandbox with the specified configuration.

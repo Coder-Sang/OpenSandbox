@@ -455,6 +455,7 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
                 entrypoint=request.entrypoint,
                 env=request.env or {},
                 resource_limits=context.resource_limits,
+                resource_requests=context.resource_requests or None,
                 labels=context.labels,
                 annotations=context.annotations or None,
                 expires_at=context.expires_at,

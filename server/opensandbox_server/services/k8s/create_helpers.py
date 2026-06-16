@@ -36,6 +36,7 @@ class _CreateWorkloadContext:
     annotations: Dict[str, str]
     expires_at: Optional[datetime]
     resource_limits: Dict[str, str]
+    resource_requests: Dict[str, str]
     egress_mode: str
     egress_image: Optional[str]
     egress_auth_token: Optional[str]
@@ -84,11 +85,16 @@ def _build_create_workload_context(
     if request.resource_limits and request.resource_limits.root:
         resource_limits = request.resource_limits.root
 
+    resource_requests = {}
+    if request.resource_requests and request.resource_requests.root:
+        resource_requests = request.resource_requests.root
+
     return _CreateWorkloadContext(
         labels=labels,
         annotations=annotations,
         expires_at=expires_at,
         resource_limits=resource_limits,
+        resource_requests=resource_requests,
         egress_mode=egress_mode,
         egress_image=egress_image,
         egress_auth_token=egress_auth_token,

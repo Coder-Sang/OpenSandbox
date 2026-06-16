@@ -91,6 +91,15 @@ class CreateSandboxRequest:
 
                 New resource types can be added without API changes.
                  Example: {'cpu': '500m', 'memory': '512Mi', 'gpu': '1'}.
+            resource_requests (ResourceLimits | Unset): Runtime resource constraints as key-value pairs. Similar to
+                Kubernetes resource specifications,
+                allows flexible definition of resource limits. Common resource types include:
+                - `cpu`: CPU allocation in millicores (e.g., "250m" for 0.25 CPU cores)
+                - `memory`: Memory allocation in bytes or human-readable format (e.g., "512Mi", "1Gi")
+                - `gpu`: Number of GPU devices (e.g., "1")
+
+                New resource types can be added without API changes.
+                 Example: {'cpu': '500m', 'memory': '512Mi', 'gpu': '1'}.
             env (CreateSandboxRequestEnv | Unset): Environment variables to inject into the sandbox runtime. Example:
                 {'API_KEY': 'secret-key', 'DEBUG': 'true', 'LOG_LEVEL': 'info'}.
             metadata (CreateSandboxRequestMetadata | Unset): Custom key-value metadata for management, filtering, and
@@ -158,6 +167,7 @@ class CreateSandboxRequest:
     platform: PlatformSpec | Unset = UNSET
     timeout: int | None | Unset = UNSET
     resource_limits: ResourceLimits | Unset = UNSET
+    resource_requests: ResourceLimits | Unset = UNSET
     env: CreateSandboxRequestEnv | Unset = UNSET
     metadata: CreateSandboxRequestMetadata | Unset = UNSET
     entrypoint: list[str] | Unset = UNSET
@@ -188,6 +198,10 @@ class CreateSandboxRequest:
         resource_limits: dict[str, Any] | Unset = UNSET
         if not isinstance(self.resource_limits, Unset):
             resource_limits = self.resource_limits.to_dict()
+
+        resource_requests: dict[str, Any] | Unset = UNSET
+        if not isinstance(self.resource_requests, Unset):
+            resource_requests = self.resource_requests.to_dict()
 
         env: dict[str, Any] | Unset = UNSET
         if not isinstance(self.env, Unset):
@@ -235,6 +249,8 @@ class CreateSandboxRequest:
             field_dict["timeout"] = timeout
         if resource_limits is not UNSET:
             field_dict["resourceLimits"] = resource_limits
+        if resource_requests is not UNSET:
+            field_dict["resourceRequests"] = resource_requests
         if env is not UNSET:
             field_dict["env"] = env
         if metadata is not UNSET:
@@ -299,6 +315,13 @@ class CreateSandboxRequest:
         else:
             resource_limits = ResourceLimits.from_dict(_resource_limits)
 
+        _resource_requests = d.pop("resourceRequests", UNSET)
+        resource_requests: ResourceLimits | Unset
+        if isinstance(_resource_requests, Unset):
+            resource_requests = UNSET
+        else:
+            resource_requests = ResourceLimits.from_dict(_resource_requests)
+
         _env = d.pop("env", UNSET)
         env: CreateSandboxRequestEnv | Unset
         if isinstance(_env, Unset):
@@ -353,6 +376,7 @@ class CreateSandboxRequest:
             platform=platform,
             timeout=timeout,
             resource_limits=resource_limits,
+            resource_requests=resource_requests,
             env=env,
             metadata=metadata,
             entrypoint=entrypoint,

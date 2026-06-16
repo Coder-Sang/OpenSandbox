@@ -1054,12 +1054,21 @@ export interface components {
              */
             timeout?: number | null;
             /**
-             * @description Runtime resource constraints for the sandbox instance.
+             * @description Runtime resource constraints (hard caps) for the sandbox instance.
              *     Required when `extensions.poolRef` is not set.
              *     Optional when using pool mode (resource limits are defined by the Pool CRD template).
              *     SDK clients should provide sensible defaults (e.g., cpu: "500m", memory: "512Mi").
              */
             resourceLimits?: components["schemas"]["ResourceLimits"];
+            /**
+             * @description Resource reservations (guaranteed minimums) for the sandbox instance.
+             *     When provided, these values are used as Kubernetes resource `requests`,
+             *     enabling Burstable QoS class (where `requests < limits`).
+             *     When omitted, `resourceLimits` values are used for both limits and requests,
+             *     resulting in Guaranteed QoS class.
+             *     Only meaningful for Kubernetes-based runtimes; ignored by Docker runtime.
+             */
+            resourceRequests?: components["schemas"]["ResourceLimits"];
             /**
              * @description Environment variables to inject into the sandbox runtime.
              * @example {

@@ -132,6 +132,31 @@ class TestAgentSandboxProvider:
         assert selector["kubernetes.io/os"] == "linux"
         assert selector["kubernetes.io/arch"] == "arm64"
 
+    def test_create_workload_uses_separate_resource_requests(self, mock_k8s_client):
+        provider = AgentSandboxProvider(mock_k8s_client, _app_config())
+        mock_k8s_client.create_custom_object.return_value = {
+            "metadata": {"name": "test-id", "uid": "test-uid"}
+        }
+
+        provider.create_workload(
+            sandbox_id="test-id",
+            namespace="test-ns",
+            image_spec=ImageSpec(uri="python:3.11"),
+            entrypoint=["/bin/bash"],
+            env={},
+            resource_limits={"cpu": "2", "memory": "2Gi"},
+            resource_requests={"cpu": "500m", "memory": "512Mi"},
+            labels={"opensandbox.io/id": "test-id"},
+            expires_at=None,
+            execd_image="execd:latest",
+        )
+
+        body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
+        resources = body["spec"]["podTemplate"]["spec"]["containers"][0]["resources"]
+
+        assert resources["limits"] == {"cpu": "2", "memory": "2Gi"}
+        assert resources["requests"] == {"cpu": "500m", "memory": "512Mi"}
+
     def test_create_workload_translates_gpu_to_nvidia_extended_resource(self, mock_k8s_client):
         provider = AgentSandboxProvider(mock_k8s_client, _app_config())
         mock_k8s_client.create_custom_object.return_value = {

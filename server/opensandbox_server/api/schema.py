@@ -424,7 +424,16 @@ class CreateSandboxRequest(BaseModel):
     resource_limits: Optional[ResourceLimits] = Field(
         None,
         alias="resourceLimits",
-        description="Runtime resource constraints for the sandbox instance. Optional when poolRef is provided.",
+        description="Runtime resource constraints (hard caps) for the sandbox instance. Optional when poolRef is provided.",
+    )
+    resource_requests: Optional[ResourceLimits] = Field(
+        None,
+        alias="resourceRequests",
+        description=(
+            "Resource reservations (guaranteed minimums) for the sandbox instance. "
+            "When provided, used as Kubernetes resource requests, enabling Burstable QoS. "
+            "When omitted, resourceLimits values are used for both limits and requests."
+        ),
     )
     env: Optional[Dict[str, Optional[str]]] = Field(
         None,

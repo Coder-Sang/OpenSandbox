@@ -118,6 +118,7 @@ class BatchSandboxProvider(WorkloadProvider):
         egress_auth_token: Optional[str] = None,
         egress_mode: str = EGRESS_MODE_DNS,
         credential_proxy_enabled: bool = False,
+        resource_requests: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         """Create a BatchSandbox in template mode or pool mode."""
         extensions = extensions or {}
@@ -175,6 +176,7 @@ class BatchSandboxProvider(WorkloadProvider):
             resource_limits=resource_limits,
             has_network_policy=network_policy is not None,
             image_pull_policy=self.image_pull_policy,
+            resource_requests=resource_requests or None,
         )
         
         containers = [_container_to_dict(main_container)]
@@ -195,6 +197,7 @@ class BatchSandboxProvider(WorkloadProvider):
                 env=env,
                 resource_limits=resource_limits,
                 disable_ipv6_for_egress=disable_ipv6_for_egress,
+                resource_requests=resource_requests or None,
             )
             template = self.template_manager.get_base_template()
             template_spec = (

@@ -433,6 +433,7 @@ export interface CreateSandboxRequest extends Record<string, unknown> {
    */
   timeout?: number | null;
   resourceLimits: ResourceLimits;
+  resourceRequests?: ResourceLimits;
   env?: Record<string, string>;
   metadata?: Record<string, string>;
   /**

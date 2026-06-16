@@ -331,6 +331,7 @@ class Sandbox internal constructor(
             extensions: Map<String, String>,
             skipHealthCheck: Boolean,
             volumes: List<Volume>?,
+            resourceRequests: Map<String, String>? = null,
         ): Sandbox {
             val timeoutLabel = if (timeout != null) "${timeout.seconds}s" else "manual-cleanup"
             return initializeSandbox(
@@ -356,6 +357,7 @@ class Sandbox internal constructor(
                         platform = platform,
                         secureAccess = secureAccess,
                         snapshotId = snapshotId,
+                        resourceRequests = resourceRequests,
                     )
                 InitializationResult.NewSandbox(response.id)
             }
@@ -892,6 +894,11 @@ class Sandbox internal constructor(
         private val resource = mutableMapOf("cpu" to "1", "memory" to "2Gi")
 
         /**
+         * Resource requests (guaranteed minimums) for Burstable QoS.
+         */
+        private var resourceRequests: MutableMap<String, String>? = null
+
+        /**
          * Env
          */
         private val env = mutableMapOf<String, String>()
@@ -1038,6 +1045,30 @@ class Sandbox internal constructor(
         fun resource(resource: Map<String, String>): Builder {
             this.resource.clear()
             this.resource.putAll(resource)
+            return this
+        }
+
+        /**
+         * Sets resource requests (guaranteed minimums) for Burstable QoS.
+         *
+         * @param resourceRequests Resource requests map
+         * @return This builder for method chaining
+         */
+        fun resourceRequests(resourceRequests: Map<String, String>): Builder {
+            this.resourceRequests = resourceRequests.toMutableMap()
+            return this
+        }
+
+        /**
+         * Sets resource requests using a fluent configuration block.
+         *
+         * @param configure Configuration block for resource requests
+         * @return This builder for method chaining
+         */
+        fun resourceRequests(configure: MutableMap<String, String>.() -> Unit): Builder {
+            val requests = this.resourceRequests ?: mutableMapOf()
+            requests.configure()
+            this.resourceRequests = requests
             return this
         }
 
@@ -1399,6 +1430,7 @@ class Sandbox internal constructor(
                 healthCheck = healthCheck,
                 skipHealthCheck = skipHealthCheck,
                 volumes = if (volumes.isEmpty()) null else volumes.toList(),
+                resourceRequests = resourceRequests,
             )
         }
     }

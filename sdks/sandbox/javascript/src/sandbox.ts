@@ -156,6 +156,12 @@ export interface SandboxCreateOptions {
    */
   resource?: Record<string, string>;
   /**
+   * Resource requests (guaranteed minimums) for the sandbox container.
+   * When set, enables Kubernetes Burstable QoS (requests < limits).
+   * Only meaningful for Kubernetes runtimes.
+   */
+  resourceRequests?: Record<string, string>;
+  /**
    * Sandbox timeout in seconds. Set to `null` to require explicit cleanup.
    */
   timeoutSeconds?: number | null;
@@ -359,6 +365,7 @@ export class Sandbox {
       snapshotId: opts.snapshotId,
       entrypoint: opts.entrypoint ?? DEFAULT_ENTRYPOINT,
       resourceLimits: opts.resource ?? DEFAULT_RESOURCE_LIMITS,
+      resourceRequests: opts.resourceRequests,
       secureAccess: opts.secureAccess ?? false,
       env: opts.env ?? {},
       metadata: opts.metadata ?? {},

@@ -657,6 +657,31 @@ spec:
         assert resources["limits"] == {"cpu": "1", "memory": "1Gi"}
         assert resources["requests"] == {"cpu": "1", "memory": "1Gi"}
 
+    def test_create_workload_uses_separate_resource_requests(self, mock_k8s_client):
+        provider = BatchSandboxProvider(mock_k8s_client)
+        mock_k8s_client.create_custom_object.return_value = {
+            "metadata": {"name": "sandbox-test", "uid": "uid"}
+        }
+
+        provider.create_workload(
+            sandbox_id="test-id",
+            namespace="test-ns",
+            image_spec=ImageSpec(uri="python:3.11"),
+            entrypoint=["/bin/bash"],
+            env={},
+            resource_limits={"cpu": "2", "memory": "2Gi"},
+            resource_requests={"cpu": "500m", "memory": "512Mi"},
+            labels={},
+            expires_at=datetime(2025, 12, 31, tzinfo=timezone.utc),
+            execd_image="execd:latest",
+        )
+
+        body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
+        resources = body["spec"]["template"]["spec"]["containers"][0]["resources"]
+
+        assert resources["limits"] == {"cpu": "2", "memory": "2Gi"}
+        assert resources["requests"] == {"cpu": "500m", "memory": "512Mi"}
+
     def test_create_workload_handles_empty_resource_limits(self, mock_k8s_client):
         provider = BatchSandboxProvider(mock_k8s_client)
         mock_k8s_client.create_custom_object.return_value = {

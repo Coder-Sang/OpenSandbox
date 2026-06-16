@@ -168,6 +168,7 @@ class SandboxModelConverter:
         secure_access: bool = False,
         snapshot_id: str | None = None,
         credential_proxy: CredentialProxyConfig | None = None,
+        resource_requests: dict[str, str] | None = None,
     ) -> CreateSandboxRequest:
         """Convert domain parameters to API CreateSandboxRequest."""
         from opensandbox.api.lifecycle.models.create_sandbox_request import (
@@ -282,6 +283,10 @@ class SandboxModelConverter:
             if spec is not None
             else UNSET
         )
+        api_resource_requests = UNSET
+        if resource_requests:
+            api_resource_requests = ResourceLimits.from_dict(resource_requests)
+
         request = CreateSandboxRequest(
             image=image,
             snapshot_id=snapshot_id if snapshot_id is not None else UNSET,
@@ -289,6 +294,7 @@ class SandboxModelConverter:
             env=api_env,
             metadata=api_metadata,
             resource_limits=api_resource_limits,
+            resource_requests=api_resource_requests,
             platform=api_platform,
             network_policy=api_network_policy,
             credential_proxy=api_credential_proxy,

@@ -790,6 +790,13 @@ public class CreateSandboxRequest
     public required IReadOnlyDictionary<string, string> ResourceLimits { get; set; }
 
     /// <summary>
+    /// Gets or sets the resource requests (guaranteed minimums).
+    /// When set, enables Kubernetes Burstable QoS (requests &lt; limits).
+    /// </summary>
+    [JsonPropertyName("resourceRequests")]
+    public IReadOnlyDictionary<string, string>? ResourceRequests { get; set; }
+
+    /// <summary>
     /// Gets or sets the environment variables.
     /// </summary>
     [JsonPropertyName("env")]

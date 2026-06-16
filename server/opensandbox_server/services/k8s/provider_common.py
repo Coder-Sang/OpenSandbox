@@ -156,6 +156,7 @@ def _build_main_container(
     *,
     has_network_policy: bool = False,
     image_pull_policy: Optional[str] = None,
+    resource_requests: Optional[Dict[str, str]] = None,
 ) -> V1Container:
     env_vars = [V1EnvVar(name=k, value=v) for k, v in env.items()]
     env_vars.append(V1EnvVar(name="EXECD", value="/opt/opensandbox/execd"))
@@ -163,9 +164,14 @@ def _build_main_container(
     translated_limits = _translate_resource_limits_for_k8s(resource_limits)
     resources = None
     if translated_limits:
+        translated_requests = (
+            _translate_resource_limits_for_k8s(resource_requests)
+            if resource_requests
+            else translated_limits
+        )
         resources = V1ResourceRequirements(
             limits=translated_limits,
-            requests=translated_limits,
+            requests=translated_requests,
         )
 
     volume_mounts = [

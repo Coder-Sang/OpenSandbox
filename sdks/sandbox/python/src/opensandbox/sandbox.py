@@ -486,6 +486,7 @@ class Sandbox:
         env: dict[str, str] | None = None,
         metadata: dict[str, str] | None = None,
         resource: dict[str, str] | None = None,
+        resource_requests: dict[str, str] | None = None,
         platform: PlatformSpec | None = None,
         network_policy: NetworkPolicy | None = None,
         credential_proxy: CredentialProxyConfig | None = None,
@@ -569,6 +570,7 @@ class Sandbox:
                 platform=platform,
                 secure_access=secure_access,
                 snapshot_id=snapshot_id,
+                resource_requests=resource_requests,
             )
             sandbox_id = response.id
 
