@@ -200,11 +200,39 @@ func TestFilesystem_ReplaceInFiles(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 3, resp["/tmp/replace-multi.txt"].ReplacedCount)
 
-	// Verify original ReplaceInFiles (error-only) still works
+	// Batch replace across multiple files
+	_, err = sb.RunCommand(ctx, `echo "hello world" > /tmp/replace-batch-a.txt`, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = sb.DeleteFiles(context.Background(), []string{"/tmp/replace-batch-a.txt"}) })
+	_, err = sb.RunCommand(ctx, `echo "hello hello" > /tmp/replace-batch-b.txt`, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = sb.DeleteFiles(context.Background(), []string{"/tmp/replace-batch-b.txt"}) })
+
+	resp, err = sb.ReplaceInFilesDetailed(ctx, opensandbox.ReplaceRequest{
+		"/tmp/replace-batch-a.txt": {Old: "hello", New: "hi"},
+		"/tmp/replace-batch-b.txt": {Old: "hello", New: "hi"},
+	})
+	require.NoError(t, err)
+	require.Equal(t, 1, resp["/tmp/replace-batch-a.txt"].ReplacedCount)
+	require.Equal(t, 2, resp["/tmp/replace-batch-b.txt"].ReplacedCount)
+
+	execA, err := sb.RunCommand(ctx, "cat /tmp/replace-batch-a.txt", nil)
+	require.NoError(t, err)
+	require.Contains(t, execA.Text(), "hi world")
+
+	execB, err := sb.RunCommand(ctx, "cat /tmp/replace-batch-b.txt", nil)
+	require.NoError(t, err)
+	require.Contains(t, execB.Text(), "hi hi")
+
+	// Verify original ReplaceInFiles (verbose=false, error-only return) still works
 	err = sb.ReplaceInFiles(ctx, opensandbox.ReplaceRequest{
 		"/tmp/replace-multi.txt": {Old: "qux", New: "done"},
 	})
 	require.NoError(t, err)
+	execDone, err := sb.RunCommand(ctx, "cat /tmp/replace-multi.txt", nil)
+	require.NoError(t, err)
+	require.Contains(t, execDone.Text(), "done")
+	require.NotContains(t, execDone.Text(), "qux")
 }
 
 func TestFilesystem_DownloadFileLineReading(t *testing.T) {
