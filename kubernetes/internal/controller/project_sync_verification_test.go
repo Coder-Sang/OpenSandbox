@@ -16,7 +16,9 @@ package controller
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -51,6 +53,28 @@ func Test_PROJECT_File_Resource_Registration(t *testing.T) {
 	// Sanity: existing types that were already correct.
 	require.True(t, kinds["BatchSandbox"], "PROJECT must contain 'BatchSandbox'")
 	require.True(t, kinds["Pool"], "PROJECT must contain 'Pool'")
+}
+
+// Test_PROJECT_Resource_Paths_Are_Importable verifies every registered resource
+// points at a real Go API package.
+func Test_PROJECT_Resource_Paths_Are_Importable(t *testing.T) {
+	projectPath := filepath.Join("..", "..", "PROJECT")
+	data, err := os.ReadFile(projectPath)
+	require.NoError(t, err, "PROJECT file must be readable")
+
+	var project ProjectConfig
+	err = yaml.Unmarshal(data, &project)
+	require.NoError(t, err, "PROJECT file must be valid YAML")
+
+	for _, res := range project.Resources {
+		require.NotEmpty(t, res.Path, "PROJECT resource %s must define path", res.Kind)
+
+		cmd := exec.Command("go", "list", res.Path)
+		cmd.Dir = filepath.Join("..", "..")
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "PROJECT resource %s path %q must resolve with go list: %s", res.Kind, res.Path, string(out))
+		require.Equal(t, res.Path, strings.TrimSpace(string(out)))
+	}
 }
 
 // Test_SandboxSnapshot_RBAC_Roles_Exist verifies the admin/editor/viewer
@@ -111,6 +135,7 @@ type ResourceEntry struct {
 	Domain     string `yaml:"domain"`
 	Group      string `yaml:"group"`
 	Kind       string `yaml:"kind"`
+	Path       string `yaml:"path"`
 	Version    string `yaml:"version"`
 }
 
