@@ -56,6 +56,9 @@ class ConnectionConfigSync(BaseModel):
         default="OpenSandbox-Python-SDK/0.1.12", description="User agent string"
     )
     headers: dict[str, str] = Field(default_factory=dict, description="User defined headers")
+    follow_redirects: bool = Field(
+        default=False, description="Whether HTTP clients should follow redirects"
+    )
 
     transport: httpx.BaseTransport | None = Field(
         default=None,

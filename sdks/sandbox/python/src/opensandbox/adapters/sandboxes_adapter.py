@@ -99,6 +99,7 @@ class SandboxesAdapter(Sandboxes):
             prefix="",  # No prefix, just the token
             auth_header_name="OPEN-SANDBOX-API-KEY",  # Custom header name
             timeout=timeout,
+            follow_redirects=self.connection_config.follow_redirects,
         )
 
         # Inject httpx client (adapter-owned)
@@ -107,6 +108,7 @@ class SandboxesAdapter(Sandboxes):
             headers=headers,
             timeout=timeout,
             transport=self.connection_config.transport,
+            follow_redirects=self.connection_config.follow_redirects,
         )
         self._client.set_async_httpx_client(self._httpx_client)
 

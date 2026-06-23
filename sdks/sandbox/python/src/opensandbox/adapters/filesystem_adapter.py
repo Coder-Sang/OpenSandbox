@@ -119,12 +119,14 @@ class FilesystemAdapter(Filesystem):
             headers=headers,
             timeout=timeout,
             transport=self.connection_config.transport,
+            follow_redirects=self.connection_config.follow_redirects,
         )
 
         # Execd API does not require authentication
         self._client = Client(
             base_url=base_url,
             timeout=timeout,
+            follow_redirects=self.connection_config.follow_redirects,
         )
         self._client.set_async_httpx_client(self._httpx_client)
 

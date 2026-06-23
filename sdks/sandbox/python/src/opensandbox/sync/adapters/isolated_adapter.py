@@ -151,6 +151,7 @@ class IsolatedSessionsAdapterSync(IsolationServiceSync):
             headers=headers,
             timeout=timeout,
             transport=self.connection_config.transport,
+            follow_redirects=self.connection_config.follow_redirects,
         )
 
         sse_headers = {
@@ -167,6 +168,7 @@ class IsolatedSessionsAdapterSync(IsolationServiceSync):
                 pool=None,
             ),
             transport=self.connection_config.transport,
+            follow_redirects=self.connection_config.follow_redirects,
         )
 
     def _get_url(self, path: str) -> str:

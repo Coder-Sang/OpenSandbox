@@ -80,6 +80,7 @@ class MetricsAdapter(Metrics):
         self._client = Client(
             base_url=base_url,
             timeout=timeout,
+            follow_redirects=self.connection_config.follow_redirects,
         )
 
         self._httpx_client = httpx.AsyncClient(
@@ -87,6 +88,7 @@ class MetricsAdapter(Metrics):
             headers=headers,
             timeout=timeout,
             transport=self.connection_config.transport,
+            follow_redirects=self.connection_config.follow_redirects,
         )
         self._client.set_async_httpx_client(self._httpx_client)
 

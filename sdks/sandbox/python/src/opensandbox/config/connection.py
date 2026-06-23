@@ -70,6 +70,9 @@ class ConnectionConfig(BaseModel):
     headers: dict[str, str] = Field(
         default_factory=dict, description="User defined headers"
     )
+    follow_redirects: bool = Field(
+        default=False, description="Whether HTTP clients should follow redirects"
+    )
     transport: httpx.AsyncBaseTransport | None = Field(
         default=None,
         description=(

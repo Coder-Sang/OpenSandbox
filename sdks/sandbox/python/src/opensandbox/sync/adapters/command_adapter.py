@@ -151,13 +151,18 @@ class CommandsAdapterSync(CommandsSync):
             **self.execd_endpoint.headers,
         }
 
-        self._client = Client(base_url=base_url, timeout=timeout)
+        self._client = Client(
+            base_url=base_url,
+            timeout=timeout,
+            follow_redirects=self.connection_config.follow_redirects,
+        )
 
         self._httpx_client = httpx.Client(
             base_url=base_url,
             headers=headers,
             timeout=timeout,
             transport=self.connection_config.transport,
+            follow_redirects=self.connection_config.follow_redirects,
         )
         self._client.set_httpx_client(self._httpx_client)
 
@@ -176,6 +181,7 @@ class CommandsAdapterSync(CommandsSync):
                 pool=None,
             ),
             transport=self.connection_config.transport,
+            follow_redirects=self.connection_config.follow_redirects,
         )
 
     def _get_execd_url(self, path: str) -> str:

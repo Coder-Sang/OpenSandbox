@@ -78,6 +78,7 @@ class SandboxesAdapterSync(SandboxesSync):
             prefix="",
             auth_header_name="OPEN-SANDBOX-API-KEY",
             timeout=timeout,
+            follow_redirects=self.connection_config.follow_redirects,
         )
 
         self._httpx_client = httpx.Client(
@@ -85,6 +86,7 @@ class SandboxesAdapterSync(SandboxesSync):
             headers=headers,
             timeout=timeout,
             transport=self.connection_config.transport,
+            follow_redirects=self.connection_config.follow_redirects,
         )
         self._client.set_httpx_client(self._httpx_client)
 
