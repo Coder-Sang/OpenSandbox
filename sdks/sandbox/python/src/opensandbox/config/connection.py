@@ -71,7 +71,11 @@ class ConnectionConfig(BaseModel):
         default_factory=dict, description="User defined headers"
     )
     follow_redirects: bool = Field(
-        default=False, description="Whether HTTP clients should follow redirects"
+        default=False,
+        description=(
+            "Whether HTTP clients should follow redirects. WARNING: enabling this may forward API credentials "
+            "(e.g. OPEN-SANDBOX-API-KEY) to redirect targets."
+        ),
     )
     transport: httpx.AsyncBaseTransport | None = Field(
         default=None,
