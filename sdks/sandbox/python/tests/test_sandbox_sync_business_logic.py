@@ -232,6 +232,9 @@ def test_sync_create_resolves_egress_endpoint_and_builds_service(
         def create_isolated_session_service(self, endpoint):
             return _Noop()
 
+        def create_pty_service(self, endpoint):
+            return _Noop()
+
     sandbox_service = _SandboxServiceCreateStub()
     monkeypatch.setattr("opensandbox.sync.sandbox.AdapterFactorySync", _FactoryStub)
 
@@ -326,6 +329,9 @@ def test_sync_create_passes_new_signature_keywords_even_when_unused(
         def create_isolated_session_service(self, endpoint):
             return _Noop()
 
+        def create_pty_service(self, endpoint):
+            return _Noop()
+
     monkeypatch.setattr("opensandbox.sync.sandbox.AdapterFactorySync", _FactoryStub)
     SandboxSync.create(
         "python:3.11",
@@ -385,6 +391,9 @@ def test_sync_create_preserves_manual_cleanup_timeout(
             return _DiagnosticsServiceStub()
 
         def create_isolated_session_service(self, endpoint):
+            return _Noop()
+
+        def create_pty_service(self, endpoint):
             return _Noop()
 
     sandbox_service = _SandboxServiceCreateStub()
@@ -476,6 +485,9 @@ def test_sync_create_restore_from_snapshot_passes_snapshot_id(
         def create_isolated_session_service(self, endpoint):
             return _Noop()
 
+        def create_pty_service(self, endpoint):
+            return _Noop()
+
     monkeypatch.setattr("opensandbox.sync.sandbox.AdapterFactorySync", _FactoryStub)
     SandboxSync.create(snapshot_id="snap-123", skip_health_check=True)
 
@@ -550,6 +562,9 @@ def test_sync_create_restore_from_snapshot_preserves_custom_entrypoint(
             return _DiagnosticsServiceStub()
 
         def create_isolated_session_service(self, endpoint):
+            return _Noop()
+
+        def create_pty_service(self, endpoint):
             return _Noop()
 
     monkeypatch.setattr("opensandbox.sync.sandbox.AdapterFactorySync", _FactoryStub)

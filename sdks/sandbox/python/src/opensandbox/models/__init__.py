@@ -50,6 +50,18 @@ from opensandbox.models.isolated import (
     IsolatedSessionState,
     IsolatedWorkspaceSpec,
 )
+from opensandbox.models.pty import (
+    PTY_BINARY_REPLAY,
+    PTY_BINARY_STDERR,
+    PTY_BINARY_STDIN,
+    PTY_BINARY_STDOUT,
+    CreatePTYSessionRequest,
+    CreatePTYSessionResponse,
+    PTYClientFrame,
+    PTYServerFrame,
+    PTYSessionStatus,
+    encode_pty_stdin,
+)
 from opensandbox.models.sandboxes import (
     PVC,
     Credential,
@@ -107,6 +119,17 @@ __all__ = [
     "IsolatedSessionInfo",
     "IsolatedSessionState",
     "IsolatedWorkspaceSpec",
+    # PTY models
+    "PTY_BINARY_REPLAY",
+    "PTY_BINARY_STDERR",
+    "PTY_BINARY_STDIN",
+    "PTY_BINARY_STDOUT",
+    "CreatePTYSessionRequest",
+    "CreatePTYSessionResponse",
+    "PTYClientFrame",
+    "PTYServerFrame",
+    "PTYSessionStatus",
+    "encode_pty_stdin",
     # Filesystem models
     "EntryInfo",
     "WriteEntry",

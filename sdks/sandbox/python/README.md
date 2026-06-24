@@ -323,7 +323,28 @@ result = await sandbox.commands.run(
 )
 ```
 
-### 4. Comprehensive File Operations
+### 4. Interactive PTY Sessions
+
+Use `sandbox.pty` for long-lived interactive shell sessions over WebSocket.
+
+```python
+from opensandbox.models.pty import encode_pty_stdin
+
+session_id = await sandbox.pty.create_session(command="bash", cwd="/workspace")
+connection = await sandbox.pty.connect_websocket(session_id, takeover=True)
+
+await connection.send(encode_pty_stdin("echo hello\n"))
+message = await connection.recv()
+print(message)
+
+await connection.close()
+await sandbox.pty.delete_session(session_id)
+```
+
+Pass `pty=False` to `connect_websocket()` to use pipe mode, or `since=<offset>`
+to replay output from a previous offset.
+
+### 5. Comprehensive File Operations
 
 Manage files and directories, including read, write, list, delete, and search.
 
@@ -357,7 +378,7 @@ for f in files:
 await sandbox.files.delete_files(["/tmp/hello.txt"])
 ```
 
-### 5. Sandbox Management (Admin)
+### 6. Sandbox Management (Admin)
 
 Use `SandboxManager` for administrative tasks and finding existing sandboxes.
 

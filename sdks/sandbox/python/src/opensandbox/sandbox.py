@@ -49,6 +49,7 @@ from opensandbox.models.sandboxes import (
     Volume,
 )
 from opensandbox.services import (
+    PTY,
     Commands,
     CredentialVault,
     Diagnostics,
@@ -125,6 +126,7 @@ class Sandbox:
         connection_config: ConnectionConfig,
         diagnostics_service: Diagnostics | None = None,
         isolated_service: IsolationService | None = None,
+        pty_service: PTY | None = None,
         custom_health_check: Callable[["Sandbox"], Awaitable[bool]] | None = None,
     ) -> None:
         """
@@ -143,15 +145,21 @@ class Sandbox:
         ).create_diagnostics_service()
         self._custom_health_check = custom_health_check
         self._isolated_service = isolated_service
+        self._pty_service = pty_service
 
     @property
     def isolation(self) -> IsolationService:
         """Provides access to namespace-isolated session operations (OSEP-0013)."""
         if self._isolated_service is None:
-            raise SandboxInternalException(
-                "isolated service not initialized"
-            )
+            raise SandboxInternalException("isolated service not initialized")
         return self._isolated_service
+
+    @property
+    def pty(self) -> PTY:
+        """Provides access to interactive PTY session operations."""
+        if self._pty_service is None:
+            raise SandboxInternalException("pty service not initialized")
+        return self._pty_service
 
     @property
     def files(self) -> Filesystem:
@@ -603,6 +611,7 @@ class Sandbox:
                 egress_service=factory.create_egress_service(egress_endpoint),
                 diagnostics_service=factory.create_diagnostics_service(),
                 isolated_service=factory.create_isolated_session_service(execd_endpoint),
+                pty_service=factory.create_pty_service(execd_endpoint),
                 connection_config=config,
                 custom_health_check=health_check,
             )
@@ -701,6 +710,7 @@ class Sandbox:
                 egress_service=factory.create_egress_service(egress_endpoint),
                 diagnostics_service=factory.create_diagnostics_service(),
                 isolated_service=factory.create_isolated_session_service(execd_endpoint),
+                pty_service=factory.create_pty_service(execd_endpoint),
                 connection_config=config,
                 custom_health_check=health_check,
             )
@@ -778,6 +788,7 @@ class Sandbox:
                 egress_service=factory.create_egress_service(egress_endpoint),
                 diagnostics_service=factory.create_diagnostics_service(),
                 isolated_service=factory.create_isolated_session_service(execd_endpoint),
+                pty_service=factory.create_pty_service(execd_endpoint),
                 connection_config=config,
                 custom_health_check=health_check,
             )
