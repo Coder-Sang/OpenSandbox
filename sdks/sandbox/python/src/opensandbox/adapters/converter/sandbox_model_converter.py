@@ -23,7 +23,7 @@ This converter is designed to work with openapi-python-client generated models,
 which use attrs for model definitions.
 """
 from datetime import datetime, timedelta, timezone
-from typing import Literal, cast
+from typing import Any, Literal, Protocol, cast
 
 from opensandbox.api.lifecycle.models import (
     CreateSandboxResponse,
@@ -65,6 +65,23 @@ from opensandbox.models.sandboxes import (
     SnapshotStatus,
     Volume,
 )
+
+
+class _ApiSerializable(Protocol):
+    def to_dict(self) -> dict[str, Any]: ...
+
+
+class _ApiModelWithExtraFields:
+    def __init__(
+        self, base_model: _ApiSerializable, extra_fields: dict[str, Any]
+    ) -> None:
+        self._base_model = base_model
+        self._extra_fields = extra_fields
+
+    def to_dict(self) -> dict[str, Any]:
+        data = self._base_model.to_dict()
+        data.update(self._extra_fields)
+        return data
 
 
 class SandboxModelConverter:
@@ -127,6 +144,20 @@ class SandboxModelConverter:
                 storage=volume.pvc.storage,
                 access_modes=volume.pvc.access_modes,
             )
+            if volume.pvc.pv is not None:
+                api_pvc = cast(
+                    ApiPVC,
+                    _ApiModelWithExtraFields(
+                        api_pvc,
+                        {
+                            "pv": volume.pvc.pv.model_dump(
+                                by_alias=True,
+                                mode="json",
+                                exclude_none=True,
+                            )
+                        },
+                    ),
+                )
 
         api_ossfs = UNSET
         if volume.ossfs is not None and volume.ossfs.access_key_id is not None and volume.ossfs.access_key_secret is not None:

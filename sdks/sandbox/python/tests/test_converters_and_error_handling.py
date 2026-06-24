@@ -48,11 +48,15 @@ from opensandbox.exceptions import (
 )
 from opensandbox.models.execd import RunCommandOpts
 from opensandbox.models.sandboxes import (
+    PVC,
     CredentialProxyConfig,
+    CSIPersistentVolumeSource,
     NetworkPolicy,
     NetworkRule,
+    PersistentVolume,
     PlatformSpec,
     SandboxImageSpec,
+    Volume,
 )
 
 
@@ -265,6 +269,62 @@ def test_sandbox_model_converter_to_api_create_request_and_renew_tz() -> None:
 
     renew = SandboxModelConverter.to_api_renew_request(datetime(2025, 1, 1))
     assert renew.expires_at.tzinfo is timezone.utc
+
+
+def test_sandbox_model_converter_preserves_pvc_pv() -> None:
+    req = SandboxModelConverter.to_api_create_sandbox_request(
+        spec=SandboxImageSpec("python:3.11"),
+        entrypoint=["tail", "-f", "/dev/null"],
+        env={},
+        metadata={},
+        timeout=timedelta(seconds=3600),
+        resource={"cpu": "500m", "memory": "512Mi"},
+        platform=None,
+        network_policy=None,
+        extensions={},
+        volumes=[
+            Volume(
+                name="data-volume",
+                pvc=PVC(
+                    claimName="abc-pvc",
+                    createIfNotExists=True,
+                    deleteOnSandboxTermination=True,
+                    storageClass="",
+                    accessModes=["ReadWriteMany"],
+                    pv=PersistentVolume(
+                        mountOptions=[
+                            "region us-east-1",
+                            "prefix janusdi/trial/",
+                        ],
+                        csi=CSIPersistentVolumeSource(
+                            driver="s3.csi.aws.com",
+                            volumeHandle="uuid1",
+                            volumeAttributes={
+                                "bucketName": "s3-web-dev-cluster",
+                            },
+                        ),
+                    ),
+                ),
+                mountPath="/mnt/data",
+            )
+        ],
+    )
+
+    dumped = req.to_dict()
+
+    assert dumped["volumes"][0]["pvc"]["pv"] == {
+        "mountOptions": [
+            "region us-east-1",
+            "prefix janusdi/trial/",
+        ],
+        "csi": {
+            "driver": "s3.csi.aws.com",
+            "volumeHandle": "uuid1",
+            "volumeAttributes": {
+                "bucketName": "s3-web-dev-cluster",
+            },
+        },
+    }
 
 
 def test_platform_spec_accepts_windows() -> None:

@@ -65,6 +65,7 @@ from opensandbox.models.sandboxes import (
     CredentialProxyConfig,
     CredentialVaultPatchRequest,
     CredentialVaultState,
+    CSIPersistentVolumeSource,
     CustomHeaderEntry,
     Host,
     InlineCredentialSource,
@@ -72,6 +73,7 @@ from opensandbox.models.sandboxes import (
     NetworkRule,
     PagedSandboxInfos,
     PaginationInfo,
+    PersistentVolume,
     PlatformSpec,
     SandboxCreateResponse,
     SandboxEndpoint,
@@ -148,4 +150,6 @@ __all__ = [
     "Volume",
     "Host",
     "PVC",
+    "PersistentVolume",
+    "CSIPersistentVolumeSource",
 ]

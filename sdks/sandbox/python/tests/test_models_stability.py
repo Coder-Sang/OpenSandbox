@@ -41,7 +41,9 @@ from opensandbox.models.filesystem import (
 from opensandbox.models.sandboxes import (
     OSSFS,
     PVC,
+    CSIPersistentVolumeSource,
     Host,
+    PersistentVolume,
     SandboxFilter,
     SandboxImageAuth,
     SandboxImageSpec,
@@ -322,6 +324,47 @@ def test_volume_serialization_uses_aliases() -> None:
     assert "subPath" in dumped
     assert dumped["pvc"]["claimName"] == "my-pvc"
     assert dumped["readOnly"] is True
+
+
+def test_pvc_pv_serialization_uses_aliases() -> None:
+    pvc = PVC(
+        claimName="abc-pvc",
+        createIfNotExists=True,
+        deleteOnSandboxTermination=True,
+        storageClass="",
+        accessModes=["ReadWriteMany"],
+        pv=PersistentVolume(
+            mountOptions=[
+                "region us-east-1",
+                "prefix janusdi/trial/",
+            ],
+            csi=CSIPersistentVolumeSource(
+                driver="s3.csi.aws.com",
+                volumeHandle="uuid1",
+                volumeAttributes={
+                    "bucketName": "s3-web-dev-cluster",
+                },
+            ),
+        ),
+    )
+
+    dumped = pvc.model_dump(by_alias=True, mode="json", exclude_none=True)
+
+    assert dumped["claimName"] == "abc-pvc"
+    assert dumped["storageClass"] == ""
+    assert dumped["pv"] == {
+        "mountOptions": [
+            "region us-east-1",
+            "prefix janusdi/trial/",
+        ],
+        "csi": {
+            "driver": "s3.csi.aws.com",
+            "volumeHandle": "uuid1",
+            "volumeAttributes": {
+                "bucketName": "s3-web-dev-cluster",
+            },
+        },
+    }
 
 
 def test_volume_rejects_no_backend() -> None:

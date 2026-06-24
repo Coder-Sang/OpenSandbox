@@ -362,6 +362,56 @@ class Host(BaseModel):
         return v
 
 
+class CSIPersistentVolumeSource(BaseModel):
+    """
+    Kubernetes CSI persistent volume source.
+
+    This mirrors the CSI portion of a Kubernetes PersistentVolume spec and is
+    passed through to runtimes that support server-side PV provisioning.
+    """
+
+    driver: str = Field(description="CSI driver name.")
+    volume_handle: str = Field(
+        description="Unique volume handle for the CSI driver.",
+        alias="volumeHandle",
+    )
+    volume_attributes: dict[str, str] | None = Field(
+        default=None,
+        description="Driver-specific CSI volume attributes.",
+        alias="volumeAttributes",
+    )
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    @field_validator("driver", "volume_handle")
+    @classmethod
+    def required_string_must_not_be_empty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("CSI persistent volume fields cannot be blank")
+        return v
+
+
+class PersistentVolume(BaseModel):
+    """
+    Kubernetes PersistentVolume provisioning hints for an auto-created PVC.
+
+    This is only used by runtimes that support creating a matching PV together
+    with the PVC. Other runtimes may reject or ignore it server-side.
+    """
+
+    mount_options: list[str] | None = Field(
+        default=None,
+        description="PersistentVolume mount options.",
+        alias="mountOptions",
+    )
+    csi: CSIPersistentVolumeSource | None = Field(
+        default=None,
+        description="CSI persistent volume source.",
+    )
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class PVC(BaseModel):
     """
     Platform-managed named volume backend.
@@ -413,6 +463,13 @@ class PVC(BaseModel):
         description=(
             "Access modes for auto-created PVCs (e.g. ['ReadWriteOnce']). "
             "Ignored for Docker."
+        ),
+    )
+    pv: PersistentVolume | None = Field(
+        default=None,
+        description=(
+            "Optional Kubernetes PersistentVolume provisioning hints for runtimes "
+            "that support creating a PV together with an auto-created PVC."
         ),
     )
 
