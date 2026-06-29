@@ -30,6 +30,8 @@ import com.alibaba.opensandbox.sandbox.domain.pool.PoolLifecycleState
 import com.alibaba.opensandbox.sandbox.domain.pool.PoolSnapshot
 import com.alibaba.opensandbox.sandbox.domain.pool.PoolState
 import com.alibaba.opensandbox.sandbox.domain.pool.PoolStateStore
+import com.alibaba.opensandbox.sandbox.domain.pool.PooledSandboxCreateContext
+import com.alibaba.opensandbox.sandbox.domain.pool.PooledSandboxCreator
 import com.alibaba.opensandbox.sandbox.domain.pool.SandboxPreparer
 import com.alibaba.opensandbox.sandbox.infrastructure.pool.PoolReconciler
 import com.alibaba.opensandbox.sandbox.infrastructure.pool.ReconcileState
@@ -91,6 +93,7 @@ class SandboxPool internal constructor(
     private val stateStore: PoolStateStore = config.stateStore
     private val connectionConfig: ConnectionConfig = config.connectionConfig
     private val creationSpec: PoolCreationSpec = config.creationSpec
+    private val sandboxCreator: PooledSandboxCreator? = config.sandboxCreator
     private val reconcileState = ReconcileState(config.degradedThreshold)
 
     @Volatile
@@ -520,17 +523,17 @@ class SandboxPool internal constructor(
     }
 
     /**
-     * Creates one sandbox via [Sandbox.builder], waits for readiness (no skipHealthCheck),
-     * then returns its id. Caller must put the id into the store; the created [Sandbox]
-     * is closed immediately so only the id is kept in the pool.
+     * Creates one sandbox, waits for readiness, then returns its id. Caller must put the
+     * id into the store; the created [Sandbox] is closed immediately so only the id is
+     * kept in the pool.
      */
     private fun createOneSandbox(): String? {
         beginOperation()
         return try {
-            val sandbox = buildSandboxFromSpec()
+            val sandbox = buildWarmupSandbox()
             try {
                 config.warmupSandboxPreparer?.prepare(sandbox)
-                // The server-side TTL has been ticking since `buildSandboxFromSpec()`; readiness
+                // The server-side TTL has been ticking since sandbox creation; readiness
                 // wait and `warmupSandboxPreparer` can both consume meaningful time (think
                 // initialization scripts). Renew right before handing the id back to the
                 // reconciler so the store's stamped expiry (now + idleTimeout) actually matches
@@ -562,7 +565,19 @@ class SandboxPool internal constructor(
         }
     }
 
-    private fun buildSandboxFromSpec(): Sandbox {
+    private fun buildWarmupSandbox(): Sandbox {
+        sandboxCreator?.let {
+            return buildSandboxFromCreator(
+                creator = it,
+                idleTimeout = config.idleTimeout,
+                reason = PooledSandboxCreateContext.Reason.WARMUP,
+                readyTimeout = config.warmupReadyTimeout,
+                healthCheckPollingInterval = config.warmupHealthCheckPollingInterval,
+                skipHealthCheck = config.warmupSkipHealthCheck,
+                customHealthCheck = config.warmupHealthCheck,
+            )
+        }
+
         val builder =
             creationSpec.applyToBuilder(
                 Sandbox.builder()
@@ -577,6 +592,32 @@ class SandboxPool internal constructor(
     }
 
     private fun directCreate(sandboxTimeout: Duration?): Sandbox {
+        sandboxCreator?.let {
+            val sandbox =
+                buildSandboxFromCreator(
+                    creator = it,
+                    idleTimeout = config.idleTimeout,
+                    reason = PooledSandboxCreateContext.Reason.DIRECT_CREATE,
+                    readyTimeout = config.acquireReadyTimeout,
+                    healthCheckPollingInterval = config.acquireHealthCheckPollingInterval,
+                    skipHealthCheck = config.acquireSkipHealthCheck,
+                    customHealthCheck = config.acquireHealthCheck,
+                )
+            sandboxTimeout?.let { timeout ->
+                try {
+                    sandbox.renew(timeout)
+                } catch (e: Exception) {
+                    try {
+                        sandbox.kill()
+                    } finally {
+                        sandbox.close()
+                    }
+                    throw e
+                }
+            }
+            return sandbox
+        }
+
         val builder =
             creationSpec.applyToBuilder(
                 Sandbox.builder()
@@ -590,6 +631,30 @@ class SandboxPool internal constructor(
         val sandbox = builder.build()
         sandboxTimeout?.let { sandbox.renew(it) }
         return sandbox
+    }
+
+    private fun buildSandboxFromCreator(
+        creator: PooledSandboxCreator,
+        idleTimeout: Duration,
+        reason: PooledSandboxCreateContext.Reason,
+        readyTimeout: Duration,
+        healthCheckPollingInterval: Duration,
+        skipHealthCheck: Boolean,
+        customHealthCheck: ((Sandbox) -> Boolean)?,
+    ): Sandbox {
+        val context =
+            PooledSandboxCreateContext(
+                poolName = config.poolName,
+                ownerId = config.ownerId,
+                idleTimeout = idleTimeout,
+                reason = reason,
+                readyTimeout = readyTimeout,
+                healthCheckPollingInterval = healthCheckPollingInterval,
+                skipHealthCheck = skipHealthCheck,
+                healthCheck = customHealthCheck,
+                connectionConfig = connectionConfig,
+            )
+        return creator.create(context)
     }
 
     private fun killSandboxBestEffort(sandboxId: String) {
@@ -773,6 +838,11 @@ class SandboxPool internal constructor(
 
         fun creationSpec(creationSpec: PoolCreationSpec): Builder {
             configBuilder.creationSpec(creationSpec)
+            return this
+        }
+
+        fun sandboxCreator(sandboxCreator: PooledSandboxCreator): Builder {
+            configBuilder.sandboxCreator(sandboxCreator)
             return this
         }
 

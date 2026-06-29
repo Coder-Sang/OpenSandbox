@@ -35,6 +35,17 @@ The egress control is implemented as a **Sidecar** that shares the network names
     - Uses `nftables` to enforce IP-level allow/deny. Resolved IPs for allowed domains are added to dynamic allow sets with TTL (dynamic DNS).
     - At startup, the sidecar whitelists **127.0.0.1** (redirect target for the proxy) and **nameserver IPs** from `/etc/resolv.conf` so DNS resolution and proxy upstream work (including private DNS). Nameserver count is capped and invalid IPs are filtered.
 
+### Kubernetes Service Access Under `defaultAction: deny`
+
+In Kubernetes deployments that use `defaultAction: deny`, reaching an in-cluster Service usually needs two separate allowances:
+
+- allow the Service DNS name so the DNS proxy resolves it
+- allow the Service CIDR (or a narrower ClusterIP range) so `dns+nft` does not drop the TCP connection after resolution
+
+Allowing only `postgres.opensandbox.svc.cluster.local` is not sufficient if the resolved ClusterIP still belongs to a denied range such as `10.96.0.0/12`. Likewise, allowing only the CIDR is not sufficient if the DNS proxy still denies the hostname.
+
+See [Network Isolation](/architecture/network-isolation#allowing-legitimate-in-cluster-services) for operator guidance and examples.
+
 ## Requirements
 
 - **Runtime**: Docker or Kubernetes.

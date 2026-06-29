@@ -26,21 +26,29 @@ from ...client import AuthenticatedClient, Client
 from ...models.error_response import ErrorResponse
 from ...models.isolated_replace_content_body import IsolatedReplaceContentBody
 from ...models.isolated_replace_content_response_200 import IsolatedReplaceContentResponse200
-from ...types import Response
+from ...types import UNSET, Response, Unset
 
 
 def _get_kwargs(
     session_id: UUID,
     *,
     body: IsolatedReplaceContentBody,
+    verbose: bool | Unset = UNSET,
 ) -> dict[str, Any]:
     headers: dict[str, Any] = {}
+
+    params: dict[str, Any] = {}
+
+    params["verbose"] = verbose
+
+    params = {k: v for k, v in params.items() if v is not UNSET and v is not None}
 
     _kwargs: dict[str, Any] = {
         "method": "post",
         "url": "/v1/isolated/session/{session_id}/files/replace".format(
             session_id=quote(str(session_id), safe=""),
         ),
+        "params": params,
     }
 
     _kwargs["json"] = body.to_dict()
@@ -86,11 +94,13 @@ def sync_detailed(
     *,
     client: AuthenticatedClient | Client,
     body: IsolatedReplaceContentBody,
+    verbose: bool | Unset = UNSET,
 ) -> Response[ErrorResponse | IsolatedReplaceContentResponse200]:
     """Replace file content
 
     Args:
         session_id (UUID):
+        verbose (bool | Unset):
         body (IsolatedReplaceContentBody):
 
     Raises:
@@ -104,6 +114,7 @@ def sync_detailed(
     kwargs = _get_kwargs(
         session_id=session_id,
         body=body,
+        verbose=verbose,
     )
 
     response = client.get_httpx_client().request(
@@ -118,11 +129,13 @@ def sync(
     *,
     client: AuthenticatedClient | Client,
     body: IsolatedReplaceContentBody,
+    verbose: bool | Unset = UNSET,
 ) -> ErrorResponse | IsolatedReplaceContentResponse200 | None:
     """Replace file content
 
     Args:
         session_id (UUID):
+        verbose (bool | Unset):
         body (IsolatedReplaceContentBody):
 
     Raises:
@@ -137,6 +150,7 @@ def sync(
         session_id=session_id,
         client=client,
         body=body,
+        verbose=verbose,
     ).parsed
 
 
@@ -145,11 +159,13 @@ async def asyncio_detailed(
     *,
     client: AuthenticatedClient | Client,
     body: IsolatedReplaceContentBody,
+    verbose: bool | Unset = UNSET,
 ) -> Response[ErrorResponse | IsolatedReplaceContentResponse200]:
     """Replace file content
 
     Args:
         session_id (UUID):
+        verbose (bool | Unset):
         body (IsolatedReplaceContentBody):
 
     Raises:
@@ -163,6 +179,7 @@ async def asyncio_detailed(
     kwargs = _get_kwargs(
         session_id=session_id,
         body=body,
+        verbose=verbose,
     )
 
     response = await client.get_async_httpx_client().request(**kwargs)
@@ -175,11 +192,13 @@ async def asyncio(
     *,
     client: AuthenticatedClient | Client,
     body: IsolatedReplaceContentBody,
+    verbose: bool | Unset = UNSET,
 ) -> ErrorResponse | IsolatedReplaceContentResponse200 | None:
     """Replace file content
 
     Args:
         session_id (UUID):
+        verbose (bool | Unset):
         body (IsolatedReplaceContentBody):
 
     Raises:
@@ -195,5 +214,6 @@ async def asyncio(
             session_id=session_id,
             client=client,
             body=body,
+            verbose=verbose,
         )
     ).parsed

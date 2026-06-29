@@ -2605,7 +2605,10 @@ export interface operations {
     };
     isolatedReplaceContent: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description When true, return per-file replacement counts */
+                verbose?: boolean;
+            };
             header?: never;
             path: {
                 sessionId: string;

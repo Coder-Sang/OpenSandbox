@@ -14,12 +14,22 @@
 
 package assign
 
-func init() {
-	registerPredicate("image", newImagePredicate)
-	registerPredicate("resource", newResourcePredicate)
-	registerPredicate("nodeselector", newNodeSelectorPredicate)
-	registerPredicate("labelselector", newLabelSelectorPredicate)
-	registerPredicate("capacity", newCapacityPredicate)
+import (
+	"context"
 
-	registerScorer("resbalance", newResBalanceScorer)
+	sandboxv1alpha1 "github.com/alibaba/OpenSandbox/sandbox-k8s/apis/sandbox/v1alpha1"
+)
+
+type capacityPredicate struct{}
+
+func newCapacityPredicate(_ map[string]interface{}) (Predicate, error) {
+	return &capacityPredicate{}, nil
+}
+
+func (p *capacityPredicate) Predicate(_ context.Context, sbx *sandboxv1alpha1.BatchSandbox, pool *sandboxv1alpha1.Pool) bool {
+	desired := int32(1)
+	if sbx.Spec.Replicas != nil {
+		desired = *sbx.Spec.Replicas
+	}
+	return pool.Spec.CapacitySpec.PoolMax-pool.Status.Allocated >= desired
 }

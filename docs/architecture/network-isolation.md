@@ -109,6 +109,31 @@ After this configuration is applied, all newly created sandboxes will use the eg
 - **Forced access path**: legitimate cross-sandbox communication must go through the `GetEndpoint()` API, which returns an external access endpoint proxied by OpenSandbox Ingress with authentication and authorization.
 - **Transparent to users**: users do not need to declare any additional parameters in SDK calls. Isolation is enforced automatically at the platform level.
 
+## Allowing Legitimate In-Cluster Services
+
+When `defaultAction: deny` is enabled, allowing a sandbox to reach a Kubernetes Service requires **both** layers of the egress sidecar to agree:
+
+1. **DNS layer**: allow the service hostname so the DNS proxy does not return `NXDOMAIN`.
+2. **Network layer** (`dns+nft` mode): allow the Service CIDR (or a narrower ClusterIP range) so nftables does not drop the resolved TCP connection.
+
+For example, if a sandbox should reach `postgres.opensandbox.svc.cluster.local`, this is not enough by itself:
+
+```json
+{ "action": "allow", "target": "postgres.opensandbox.svc.cluster.local" }
+```
+
+The request can still fail after DNS resolution if the Service ClusterIP falls inside a denied CIDR such as `10.96.0.0/12`. In `dns+nft` mode you must also allow the Service CIDR (or the specific ClusterIP range you want exposed):
+
+```json
+{ "action": "allow", "target": "10.96.0.0/12" }
+```
+
+### Recommended Patterns
+
+- **Platform-managed allowlist**: if many sandboxes need the same internal services, keep the Service CIDR allowance in `allow.always` and let users request only the DNS names they should reach.
+- **Per-sandbox allowlist**: if access should be tightly scoped, include both the service FQDN and the required Service CIDR in the sandbox's `network_policy` / `networkPolicy`.
+- **Avoid assuming CoreDNS exemptions are enough**: the sidecar automatically allows nameserver IPs so DNS forwarding works, but it does **not** automatically allow arbitrary Service ClusterIPs for application traffic.
+
 ## Approach 2: On-Demand Isolation via Per-Sandbox NetworkPolicy
 
 If global enforced isolation is not desired, or if specific sandboxes need more permissive access, you can explicitly deny internal network access at sandbox creation time via the `network_policy` parameter:
