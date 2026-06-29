@@ -21,6 +21,7 @@ import logging
 
 import httpx
 
+from opensandbox._httpx import build_api_key_redirect_event_hooks
 from opensandbox.adapters.converter.response_handler import handle_api_error
 from opensandbox.config.connection_sync import ConnectionConfigSync
 from opensandbox.models.sandboxes import SandboxEndpoint
@@ -54,6 +55,9 @@ class HealthAdapterSync(HealthSync):
             timeout=timeout,
             transport=self.connection_config.transport,
             follow_redirects=self.connection_config.follow_redirects,
+            event_hooks=build_api_key_redirect_event_hooks(
+                base_url, self.connection_config.event_hooks
+            ),
         )
         self._client.set_httpx_client(self._httpx_client)
 

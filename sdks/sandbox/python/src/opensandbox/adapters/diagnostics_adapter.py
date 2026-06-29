@@ -19,6 +19,7 @@ import logging
 
 import httpx  # type: ignore[reportMissingImports]
 
+from opensandbox._httpx import build_async_api_key_redirect_event_hooks
 from opensandbox.adapters.converter.diagnostic_model_converter import (
     DiagnosticModelConverter,
 )
@@ -67,6 +68,10 @@ class DiagnosticsAdapter(Diagnostics):
             timeout=timeout,
             transport=self.connection_config.transport,
             follow_redirects=self.connection_config.follow_redirects,
+            event_hooks=build_async_api_key_redirect_event_hooks(
+                self.connection_config.get_base_url(),
+                self.connection_config.event_hooks,
+            ),
         )
         self._client.set_async_httpx_client(self._httpx_client)
 

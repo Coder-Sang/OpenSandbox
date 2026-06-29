@@ -27,6 +27,7 @@ from datetime import timedelta
 
 import httpx
 
+from opensandbox._httpx import build_async_api_key_redirect_event_hooks
 from opensandbox.adapters.converter.command_model_converter import to_command_status
 from opensandbox.adapters.converter.event_node import EventNode
 from opensandbox.adapters.converter.exception_converter import (
@@ -179,6 +180,9 @@ class CommandsAdapter(Commands):
             timeout=timeout,
             transport=self.connection_config.transport,
             follow_redirects=self.connection_config.follow_redirects,
+            event_hooks=build_async_api_key_redirect_event_hooks(
+                base_url, self.connection_config.event_hooks
+            ),
         )
         self._client.set_async_httpx_client(self._httpx_client)
 
@@ -198,6 +202,9 @@ class CommandsAdapter(Commands):
             ),
             transport=self.connection_config.transport,
             follow_redirects=self.connection_config.follow_redirects,
+            event_hooks=build_async_api_key_redirect_event_hooks(
+                base_url, self.connection_config.event_hooks
+            ),
         )
 
     async def _get_client(self):

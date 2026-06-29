@@ -20,7 +20,9 @@ This mirrors ConnectionConfig (async) but uses httpx sync transports.
 """
 
 import os
+from collections.abc import Callable
 from datetime import timedelta
+from typing import Any
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator
@@ -57,7 +59,18 @@ class ConnectionConfigSync(BaseModel):
     )
     headers: dict[str, str] = Field(default_factory=dict, description="User defined headers")
     follow_redirects: bool = Field(
-        default=False, description="Whether HTTP clients should follow redirects"
+        default=False,
+        description=(
+            "Whether HTTP clients should follow redirects. Cross-origin redirects strip "
+            "OPEN-SANDBOX-API-KEY, but other sensitive custom headers may still be forwarded."
+        ),
+    )
+    event_hooks: dict[str, list[Callable[..., Any]]] = Field(
+        default_factory=dict,
+        description=(
+            "Additional httpx event hooks for SDK-created sync clients. SDK security "
+            "hooks run after configured request hooks."
+        ),
     )
 
     transport: httpx.BaseTransport | None = Field(

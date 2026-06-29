@@ -24,6 +24,7 @@ import logging
 
 import httpx
 
+from opensandbox._httpx import build_async_api_key_redirect_event_hooks
 from opensandbox.config import ConnectionConfig
 from opensandbox.models.sandboxes import SandboxEndpoint
 from opensandbox.services.health import Health
@@ -80,6 +81,9 @@ class HealthAdapter(Health):
             timeout=timeout,
             transport=self.connection_config.transport,
             follow_redirects=self.connection_config.follow_redirects,
+            event_hooks=build_async_api_key_redirect_event_hooks(
+                base_url, self.connection_config.event_hooks
+            ),
         )
         self._client.set_async_httpx_client(self._httpx_client)
 

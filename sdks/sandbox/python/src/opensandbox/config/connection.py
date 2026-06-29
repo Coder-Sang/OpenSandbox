@@ -18,7 +18,9 @@ Connection configuration for OpenSandbox operations.
 """
 
 import os
+from collections.abc import Callable
 from datetime import timedelta
+from typing import Any
 
 import httpx  # type: ignore[reportMissingImports]
 from pydantic import (  # type: ignore[reportMissingImports]
@@ -73,8 +75,15 @@ class ConnectionConfig(BaseModel):
     follow_redirects: bool = Field(
         default=False,
         description=(
-            "Whether HTTP clients should follow redirects. WARNING: enabling this may forward API credentials "
-            "(e.g. OPEN-SANDBOX-API-KEY) to redirect targets."
+            "Whether HTTP clients should follow redirects. Cross-origin redirects strip "
+            "OPEN-SANDBOX-API-KEY, but other sensitive custom headers may still be forwarded."
+        ),
+    )
+    event_hooks: dict[str, list[Callable[..., Any]]] = Field(
+        default_factory=dict,
+        description=(
+            "Additional httpx event hooks for SDK-created async clients. SDK security "
+            "hooks run after configured request hooks."
         ),
     )
     transport: httpx.AsyncBaseTransport | None = Field(

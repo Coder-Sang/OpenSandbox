@@ -27,6 +27,7 @@ from typing import TypedDict
 
 import httpx
 
+from opensandbox._httpx import build_api_key_redirect_event_hooks
 from opensandbox.adapters.converter.exception_converter import (
     ExceptionConverter,
 )
@@ -98,6 +99,9 @@ class FilesystemAdapterSync(FilesystemSync):
             timeout=timeout,
             transport=self.connection_config.transport,
             follow_redirects=self.connection_config.follow_redirects,
+            event_hooks=build_api_key_redirect_event_hooks(
+                base_url, self.connection_config.event_hooks
+            ),
         )
         self._client = Client(
             base_url=base_url,

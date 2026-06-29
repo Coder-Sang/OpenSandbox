@@ -22,6 +22,7 @@ import logging
 
 import httpx
 
+from opensandbox._httpx import build_api_key_redirect_event_hooks
 from opensandbox.adapters.converter.event_node import EventNode
 from opensandbox.adapters.converter.exception_converter import ExceptionConverter
 from opensandbox.adapters.converter.response_handler import extract_request_id
@@ -152,6 +153,9 @@ class IsolatedSessionsAdapterSync(IsolationServiceSync):
             timeout=timeout,
             transport=self.connection_config.transport,
             follow_redirects=self.connection_config.follow_redirects,
+            event_hooks=build_api_key_redirect_event_hooks(
+                base_url, self.connection_config.event_hooks
+            ),
         )
 
         sse_headers = {
@@ -169,6 +173,9 @@ class IsolatedSessionsAdapterSync(IsolationServiceSync):
             ),
             transport=self.connection_config.transport,
             follow_redirects=self.connection_config.follow_redirects,
+            event_hooks=build_api_key_redirect_event_hooks(
+                base_url, self.connection_config.event_hooks
+            ),
         )
 
     def _get_url(self, path: str) -> str:
