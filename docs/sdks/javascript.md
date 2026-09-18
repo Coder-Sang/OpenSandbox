@@ -52,12 +52,16 @@ try {
     timeoutSeconds: 10 * 60,
   });
 
-  const execution = await sandbox.commands.run("echo 'Hello Sandbox!'");
-  console.log(execution.logs.stdout[0]?.text);
-
-  // Optional but recommended: terminate the remote instance when you are done.
-  await sandbox.kill();
-  await sandbox.close();
+  try {
+    const execution = await sandbox.commands.run("echo 'Hello Sandbox!'");
+    console.log(execution.logs.stdout[0]?.text);
+  } finally {
+    try {
+      await sandbox.kill();
+    } finally {
+      await sandbox.close();
+    }
+  }
 } catch (err) {
   if (err instanceof SandboxException) {
     console.error(
@@ -97,60 +101,18 @@ const sandbox = await Sandbox.create({
 
 The Server validates `timeoutSeconds`; `preStart` accepts 1–10800 seconds, while `periodic` accepts 1–300 seconds. Both default to 60 seconds when omitted. See [Lifecycle Hooks](/guides/lifecycle-hooks) for timing, failure behavior, and provider limitations.
 
-## Client-Side Sandbox Pool
+## Client Pool and observability
 
-`SandboxPool` keeps a best-effort idle buffer of clean, ready sandboxes. Acquiring removes a sandbox from the pool permanently; the caller kills it after use instead of returning it to the pool.
+`SandboxPool` provides in-memory and Redis-backed stores, four acquire policies,
+and staged warmup controls. The Redis store is exported from
+`@alibaba-group/opensandbox/pool-redis`. See [Client Pool](/guides/client-pool)
+for examples, configuration, and namespace retirement.
 
-```ts
-import {
-  AcquirePolicy,
-  InMemoryPoolStateStore,
-  SandboxPool,
-} from "@alibaba-group/opensandbox";
-
-const pool = SandboxPool.create({
-  poolName: "workers",
-  maxIdle: 2,
-  stateStore: new InMemoryPoolStateStore(),
-  connectionConfig: config,
-  creationSpec: { image: "ubuntu:24.04" },
-});
-
-await pool.start();
-const sandbox = await pool.acquire({
-  sandboxTimeoutSeconds: 3600,
-  policy: AcquirePolicy.DIRECT_CREATE,
-});
-
-try {
-  await sandbox.commands.run("echo ready");
-} finally {
-  await sandbox.kill();
-  await sandbox.close();
-  await pool.shutdown();
-}
-```
-
-The built-in `InMemoryPoolStateStore` is limited to one JavaScript process. To share a pool across processes, provide a distributed `PoolStateStore` whose idle-take, membership, and primary-lock operations are atomic.
-
-`acquireReadyTimeoutSeconds` and `warmupReadyTimeoutSeconds` bound each sandbox's
-health-check phase, including in-flight probes and polling delays. They do not
-bound the entire acquire or warmup operation, such as sandbox creation or
-preparation. Pass an `AbortSignal` to `pool.acquire({ signal })` to cancel an
-in-flight readiness check. SDK health probes receive the cancellation signal.
-Custom health-check callbacks, and `isHealthy()` probes on custom creator objects
-without `waitUntilReady()`, may continue running after timeout or cancellation,
-but their late results are ignored. The pool attempts to kill a sandbox that
-fails readiness and does not hand it to a caller or add it to the idle buffer.
-
-`SandboxPoolManager.destroy(poolName)` first writes a shared `DESTROYING` fence,
-then drains and best-effort kills visible idle sandboxes before clearing pool
-state and writing a `DESTROYED` tombstone. `drainTimeoutSeconds` is checked
-before each drain attempt and bounds in-flight sandbox deletion; `0` disables
-that bound. State-store calls remain subject to the store client's own request
-timeout. If drain or persistent-state cleanup fails, the namespace remains
-fenced as `DESTROYING`. Retry `destroy()` with the same pool name to complete
-cleanup.
+Set `enableTracing: true` in `ConnectionConfig` to enable [pool warmup tracing](/guides/sdk-tracing).
+JavaScript emits phase spans but fewer diagnostic attributes than Python/JVM.
+Create-latency [telemetry](/guides/sdk-telemetry) has a separate opt-out setting.
+Remote diagnostic logs/events are available through [CLI or HTTP](/guides/diagnostics),
+not through the JavaScript SDK.
 
 ## Usage Examples
 
@@ -165,6 +127,13 @@ console.log("Created:", info.createdAt);
 console.log("Expires:", info.expiresAt); // null when manual cleanup mode is used
 
 await sandbox.pause();
+```
+
+Pause returns after the request is accepted. Poll sandbox info until the state is
+`Paused` before resuming; also handle `Failed` and set a polling deadline. Runtime
+behavior is described in [Pause and Resume](/guides/pause-resume). Then resume:
+
+```ts
 
 // Resume returns a fresh, connected Sandbox instance.
 const resumed = await sandbox.resume();
@@ -184,6 +153,10 @@ const manual = await Sandbox.create({
 ```
 
 ### 2. Custom Health Check
+
+Resolving an endpoint confirms that a route exists; it does not confirm that the
+application on that port is healthy. For service readiness, make a bounded request
+to the application's health endpoint and include the returned endpoint headers.
 
 Define custom logic to determine whether the sandbox is ready/healthy. This overrides the default ping check. Checks must not block the event loop and may continue running after timeout.
 
@@ -302,6 +275,23 @@ console.log(list.items.map((s) => s.id));
 await manager.close();
 ```
 
+## Snapshots, templates, and metadata
+
+| Operation | Public API |
+| --- | --- |
+| Snapshot a sandbox | `manager.createSnapshot(sandboxId, { name })` |
+| Inspect/list/delete snapshots | `manager.getSnapshot`, `listSnapshots`, `deleteSnapshot` |
+| Restore a snapshot | `Sandbox.create({ snapshotId, connectionConfig })` |
+| Manage Fsb templates | `manager.createTemplate`, `getTemplate`, `listTemplates`, `deleteTemplate` |
+| Create from a published template | `Sandbox.createFromTemplate({ templateId, timeoutSeconds, connectionConfig })` |
+| Patch metadata | `sandbox.patchMetadata` or `manager.patchSandboxMetadata` |
+
+Poll snapshot status before restoring. Template builds are asynchronous; wait
+for `status.phase === "Succeeded"` before use. Template-backed creation requires
+a TTL and inherits workload configuration from the published template.
+Metadata patch values add/replace keys; `null` deletes a key.
+See the [lifecycle contract](/api/#1-sandbox-lifecycle-yml) for backend constraints.
+
 ## Configuration
 
 ### 1. Connection Configuration
@@ -322,6 +312,7 @@ The `ConnectionConfig` class manages API server connection settings.
 | `debug`                 | Enable basic HTTP debug logging                                                                              | `false`          | -                      |
 | `headers`               | Extra headers applied to every request                                                                       | `{}`             | -                      |
 | `useServerProxy`        | Use sandbox server as proxy for execd/endpoint requests (e.g. when client cannot reach the sandbox directly) | `false`          | -                      |
+| `enableTracing` | Enable [pool warmup tracing](/guides/sdk-tracing) | `false` | - |
 | `disableMetrics`        | Disable SDK create-latency telemetry (see [SDK Telemetry](/guides/sdk-telemetry))                          | `false`          | `OPENSANDBOX_DISABLE_METRICS` |
 
 ```ts
@@ -348,7 +339,7 @@ const config2 = new ConnectionConfig({
 
 | Parameter                    | Description                                      | Default                      |
 | ---------------------------- | ------------------------------------------------ | ---------------------------- |
-| `image`                      | Docker image to use                              | Required                     |
+| `image`                      | Docker image to use                              | One of image or snapshot ID |
 | `timeoutSeconds`             | Automatic termination timeout (server-side TTL)  | 10 minutes                   |
 | `entrypoint`                 | Container entrypoint command                     | `["tail","-f","/dev/null"]`  |
 | `resource`                   | CPU and memory limits (string map)               | `{"cpu":"1","memory":"2Gi"}` |
@@ -361,6 +352,12 @@ const config2 = new ConnectionConfig({
 | `healthCheck`                | Custom readiness check                           | -                            |
 | `readyTimeoutSeconds`        | Max time to wait for readiness                   | 30 seconds                   |
 | `healthCheckPollingInterval` | Poll interval while waiting (milliseconds)       | 200 ms                       |
+| `snapshotId` | Restore a snapshot instead of passing `image` | - |
+| `resourceRequests` | Kubernetes resource requests; must not exceed limits | - |
+| `lifecycle` | Pre-start and periodic hooks | - |
+| `platform` | OS/architecture constraint | - |
+| `volumes` | Host, PVC, or OSSFS mounts | - |
+| `secureAccess` | Require endpoint access credentials | `false` |
 
 ::: warning
 Metadata keys under `opensandbox.io/` are reserved for system-managed labels and will be rejected by the server.
@@ -379,8 +376,11 @@ const sandbox = await Sandbox.create({
 
 ### 3. Runtime Egress Policy Updates
 
-Runtime egress reads and patches go directly to the sandbox egress sidecar.
-The SDK first resolves the sandbox endpoint on port `18080`, then calls the sidecar `/policy` API.
+Runtime egress policy routing depends on the sandbox origin.
+For image-backed sandboxes, the SDK resolves port `18080` and calls the sidecar
+`/policy` API. For template-backed sandboxes (including restored template snapshots),
+the SDK detects `OPEN-SANDBOX-ORIGIN: template` and routes policy operations through
+the lifecycle `/sandboxes/{sandboxId}/networkpolicy` API.
 
 Patch uses merge semantics:
 - Incoming rules take priority over existing rules with the same `target`.
@@ -399,7 +399,8 @@ await sandbox.patchEgressRules([
 
 ### 4. Credential Vault
 
-Credential Vault injects outbound credentials from the egress sidecar while
+Credential Vault requires a sandbox-side egress service and is unavailable for
+template-backed sandboxes. It injects outbound credentials from the egress sidecar while
 keeping real secrets out of sandbox environment variables, commands, files, and
 logs. Create the sandbox with `credentialProxy` enabled, then write credentials
 and bindings through `sandbox.credentialVault`.

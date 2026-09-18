@@ -9,8 +9,8 @@ The OpenSandbox SDKs ship an experimental **client-side sandbox pool** that keep
 buffer of ready sandboxes warm on the server so that `acquire()` returns quickly instead
 of paying the full sandbox creation latency on the hot path.
 
-Available in the Python, Kotlin/Java, and Go sandbox SDKs. The JavaScript/TypeScript and
-C# SDKs do not currently ship a client pool.
+Available in Python (async and sync), JavaScript/TypeScript, Kotlin/Java, and Go.
+C# does not currently ship a client pool.
 
 ::: warning Experimental
 The client pool API is marked experimental and may change between minor releases. Pin
@@ -22,23 +22,16 @@ your SDK version if you rely on it in production.
 The pool does **not** pool SDK `Sandbox` objects. It pools the **IDs of
 pre-warmed, ready sandboxes** running on the OpenSandbox server.
 
-The **Python and Kotlin/Java** SDKs additionally give each pool a pool-wide
-shared HTTP connection pool/transport. When `ConnectionConfig` carries no
-custom transport or connection pool, the pool creates one sized by
-`warmup_concurrency` (5-minute keep-alive) and uses it for every sandbox it
-creates — warmup, direct create, and idle connect — so concurrent warmups reuse
-TCP connections instead of each opening fresh ones. At high
-`warmup_concurrency`, per-sandbox connection churn otherwise causes intermittent
-connection resets and retry amplification. The pool closes its owned transport
-on shutdown; a user-provided transport or connection pool is never touched. Go
-pools do not share HTTP connections across sandboxes today.
+Use a pool for latency-sensitive workers that repeatedly need a fresh sandbox.
+The pool keeps remote sandboxes ready; it is separate from an HTTP connection pool.
+Borrowed sandboxes still consume server resources and must be explicitly cleaned up.
 
 ![Client pool architecture](../public/images/client-pool-architecture.svg)
 
 Two flows happen concurrently:
 
 - **Warmup (leader-only).** A background reconcile loop runs on every node. Whichever
-  node holds the primary lock computes the idle deficit and replenishes it. Python and
+  node holds the primary lock computes the idle deficit and replenishes it. Python, JavaScript, and
   Kotlin reconcile once per second, admit at most `warmup_create_qps` new creates per
   tick, and independently limit post-create readiness and preparation work with
   `warmup_concurrency`. Go uses a configurable `reconcile_interval` and caps each tick
@@ -63,7 +56,7 @@ because it is the only part of the pool that is gated by a distributed lock:
 Each pool instance moves through `NOT_STARTED → STARTING → RUNNING → DRAINING → STOPPED`.
 Health is tracked separately as `HEALTHY | DEGRADED | DRAINING | STOPPED`; after
 `degraded_threshold` consecutive create failures the pool enters `DEGRADED`. Go applies
-exponential replenish backoff while degraded. Python and Kotlin continue their fixed
+exponential replenish backoff while degraded. Python, JavaScript, and Kotlin continue their fixed
 one-second admission cadence: `warmup_create_qps` is their pressure control, and
 `snapshot().backoff_active` / `snapshot().backoffActive` is retained only for
 compatibility and is always `false`.
@@ -90,20 +83,25 @@ sandboxes borrowed by application code and not the number of sandboxes produced 
 
 ## Empty-buffer behavior: `AcquirePolicy`
 
-`AcquirePolicy` controls what happens when the idle buffer is empty, or when the first
-idle candidate fails its readiness check:
+All four pool SDKs expose these policies. Acquire consumes a candidate; it does not
+wait for future warmup work to fill an empty buffer.
 
-| Policy                    | Fallback on exhaustion                     |
-| ------------------------- | ------------------------------------------ |
-| `FAIL_FAST`               | raise `PoolEmptyException` / `PoolAcquireFailedException` |
-| `DIRECT_CREATE` (default) | create a new sandbox via the lifecycle API |
+| Policy | Idle candidates attempted | When candidates are exhausted |
+| --- | --- | --- |
+| `FAIL_FAST` | At most one | Return a pool-empty/acquire error |
+| `DIRECT_CREATE` (default) | At most one | Create a fresh sandbox |
+| `RETRY_NEXT_IDLE` | Up to `max_acquire_retries` | Return a pool-empty/acquire error |
+| `RETRY_NEXT_IDLE_THEN_CREATE` | Up to `max_acquire_retries` | Create a fresh sandbox |
 
-Under both policies `acquire()` tries **one** idle candidate. If that candidate fails
-its readiness check, `FAIL_FAST` raises and `DIRECT_CREATE` falls back to creating a
-brand-new sandbox via the lifecycle API. A failed candidate still pays up to
-`acquire_ready_timeout`.
+`max_acquire_retries` / `maxAcquireRetries` / `MaxAcquireRetries` defaults to `3`.
+It bounds the **total candidate attempts**, not three additional retries after the
+first. Each candidate can consume the acquire-readiness budget; direct creation
+adds its own startup latency.
 
-![Acquire decision flow](../public/images/client-pool-acquire-decision.svg)
+`start()` begins background replenishment and does not wait for a full buffer.
+Use `DIRECT_CREATE` during startup, or observe the idle count before using
+`FAIL_FAST`. A pool is not a concurrency limit: direct creation and already
+borrowed sandboxes can exceed `max_idle`.
 
 ## Configuration
 
@@ -128,7 +126,7 @@ camelCase / snake_case naming.
 | `acquire_ready_timeout` | `30 s` | `30 s` | Max wait for the returned sandbox to become ready |
 | `acquire_health_check_polling_interval` | `200 ms` | `200 ms` | Ready-poll interval during acquire |
 | `acquire_health_check` | `null` | `null` | Custom readiness predicate for acquire |
-| `acquire_skip_health_check` | `false` | `false` | Skip the readiness check on acquire |
+| `acquire_skip_health_check` | `false` | per-acquire option | Skip the readiness check on acquire |
 | `acquire_min_remaining_ttl` | `min(60 s, idle_timeout / 2)` | `min(60 s, idle_timeout / 2)` | Discard idles closer to expiry than this on acquire |
 | `warmup_ready_timeout` | `30 s` | `30 s` | Max readiness-check window for a warmed sandbox |
 | `warmup_health_check_initial_delay` | `0 s` | not available | Delay between successful create and the first readiness check |
@@ -140,6 +138,31 @@ camelCase / snake_case naming.
 | `warmup_skip_health_check` | `false` | `false` | Skip the pre-prepare readiness stage during warmup |
 | `idle_timeout` | `24 h` | `24 h` | Server-side TTL for pool-created sandboxes |
 | `drain_timeout` | `30 s` | `30 s` | Max wait for in-flight ops during graceful shutdown |
+
+### JavaScript settings and creator coverage
+
+JavaScript uses the Python/JVM scheduling defaults above: `warmupCreateQps: 10`,
+`warmupConcurrency: 128`, a fixed one-second reconcile tick, 500 ms warmup polling,
+and 30-second readiness windows. Its store defaults to `InMemoryPoolStateStore`;
+`creationSpec` can be omitted when `sandboxCreator` is supplied. Time settings
+include units in their names, such as `idleTimeoutSeconds` and
+`warmupHealthCheckInitialDelayMillis`.
+
+Default pool creators expose fewer options than standalone sandbox creation:
+
+| Creation field | Python | JavaScript | Kotlin/Java | Go |
+| --- | --- | --- | --- | --- |
+| Snapshot restore | No | Yes | No | Yes |
+| Resource requests | No | Yes | No | No |
+| Lifecycle hooks | No | Yes | No | No |
+| Credential Proxy | No | Yes | Yes | Yes |
+
+All four standalone sandbox creation APIs accept these fields. Use a custom
+`sandbox_creator` / `sandboxCreator` when the default pool spec is insufficient,
+and honor the supplied connection config, readiness controls, and timeout.
+
+JavaScript and Go also accept minimum remaining TTL and skip-health-check overrides
+on each acquire. Python and Kotlin expose these as pool-level configuration.
 
 ### Python and Kotlin staged warmup
 
@@ -172,7 +195,8 @@ health-check and preparation capacity.
   and single-instance workers. Not process-wide for gunicorn/uvicorn workers, Celery, or
   Kubernetes replicas.
 - **Redis-backed store** (`RedisPoolStateStore`, `AsyncRedisPoolStateStore`,
-  `sandbox-pool-redis` on the JVM, `poolredis` in Go) — required for multi-process or
+  `sandbox-pool-redis` on the JVM, `poolredis` in Go,
+  `@alibaba-group/opensandbox/pool-redis` in JavaScript) — required for multi-process or
   multi-pod deployments. All nodes in one logical pool must share the same `pool_name`
   and Redis `key_prefix`, and each process must use a **unique** `owner_id`.
 
@@ -221,7 +245,7 @@ pool.start()
 try:
     sandbox = pool.acquire(
         sandbox_timeout=timedelta(minutes=30),
-        policy=AcquirePolicy.FAIL_FAST,
+        policy=AcquirePolicy.DIRECT_CREATE,
     )
     try:
         result = sandbox.commands.run("echo pool-ok")
@@ -257,7 +281,7 @@ async with SandboxPoolAsync(
 ) as pool:
     sandbox = await pool.acquire(
         sandbox_timeout=timedelta(minutes=30),
-        policy=AcquirePolicy.FAIL_FAST,
+        policy=AcquirePolicy.DIRECT_CREATE,
     )
     try:
         result = await sandbox.commands.run("echo pool-ok")
@@ -283,12 +307,15 @@ SandboxPool pool = SandboxPool.builder()
 
 pool.start();
 try {
-    Sandbox sb = pool.acquire(Duration.ofMinutes(10), AcquirePolicy.FAIL_FAST);
+    Sandbox sb = pool.acquire(Duration.ofMinutes(10), AcquirePolicy.DIRECT_CREATE);
     try {
         sb.commands().run("echo pool-ok");
     } finally {
-        sb.kill();
-        sb.close();
+        try {
+            sb.kill();
+        } finally {
+            sb.close();
+        }
     }
 } finally {
     pool.shutdown(true);
@@ -296,6 +323,9 @@ try {
 ```
 
 ### Go
+
+Inside a function returning `error`, with `ctx` and the usual `context`, `fmt`,
+`time`, and `opensandbox` imports:
 
 ```go
 pool, err := opensandbox.NewSandboxPoolBuilder().
@@ -307,30 +337,92 @@ pool, err := opensandbox.NewSandboxPoolBuilder().
     StateStore(opensandbox.NewInMemoryPoolStateStore()).
     Build()
 if err != nil {
-    log.Fatal(err)
+    return err
 }
 if err := pool.Start(ctx); err != nil {
-    log.Fatal(err)
+    return err
 }
 defer pool.Shutdown(context.Background(), true)
 
-failFast := opensandbox.AcquirePolicyFailFast
+policy := opensandbox.AcquirePolicyDirectCreate
 sb, err := pool.Acquire(ctx, opensandbox.AcquireOptions{
     SandboxTimeout: 10 * time.Minute,
-    Policy:         &failFast,
+    Policy:         &policy,
 })
 if err != nil {
-    log.Fatal(err)
+    return err
 }
+defer sb.Close()
 defer sb.Kill(context.Background())
 
-result, _ := sb.RunCommand(ctx, "echo pool-ok", nil)
-_ = result
+result, err := sb.RunCommand(ctx, "echo pool-ok", nil)
+if err != nil {
+    return err
+}
+fmt.Println(result.Logs.Stdout)
+return nil
 ```
 
-## Diagnostics
+### JavaScript / TypeScript
 
-Every SDK exposes read-only accessors:
+```ts
+import { AcquirePolicy, SandboxPool } from "@alibaba-group/opensandbox";
+
+const pool = SandboxPool.create({
+  poolName: "demo-pool",
+  maxIdle: 2,
+  connectionConfig: { domain: "localhost:8080", useServerProxy: true },
+  creationSpec: { image: "python:3.12" },
+  warmupCreateQps: 10,
+  warmupConcurrency: 128,
+});
+
+await pool.start();
+try {
+  const sandbox = await pool.acquire({
+    sandboxTimeoutSeconds: 600,
+    policy: AcquirePolicy.DIRECT_CREATE,
+  });
+  try {
+    const result = await sandbox.commands.run("echo pool-ok");
+    console.log(result.logs.stdout);
+  } finally {
+    try {
+      await sandbox.kill();
+    } finally {
+      await sandbox.close();
+    }
+  }
+} finally {
+  await pool.shutdown(true);
+}
+```
+
+To share state across processes, install `redis`, connect it in the application,
+and pass this store as `stateStore`:
+
+```ts
+import { createClient } from "redis";
+import { RedisPoolStateStore } from "@alibaba-group/opensandbox/pool-redis";
+
+const redis = createClient({ url: process.env.REDIS_URL });
+await redis.connect();
+const stateStore = new RedisPoolStateStore({
+  client: redis,
+  keyPrefix: "opensandbox:pool:prod",
+});
+// Pass stateStore to SandboxPool.create(...).
+// After all pools/managers using it are shut down:
+// await redis.quit();
+```
+
+The caller owns the Redis connection. Custom JavaScript preparers and health
+checks must bound their own work: cancellation can stop waiting for a callback
+without stopping the callback itself.
+
+## Diagnostics and operations
+
+Each pool SDK exposes these operations (names follow language conventions):
 
 - `snapshot()` — pool phase, health, counters (idle size, in-flight warmups,
   consecutive failures, last error).
@@ -346,25 +438,26 @@ Every SDK exposes read-only accessors:
 The existing cleanup methods retain their original execution behavior. For opt-in
 bounded parallel cleanup, use Python's
 `release_all_idle_parallel(max_workers=50)`, Kotlin's
-`releaseAllIdle(concurrency)`, or Go's concrete
+`releaseAllIdle(concurrency)`, JavaScript's `releaseAllIdle(concurrency)`, or Go's concrete
 `(*DefaultSandboxPool).ReleaseAllIdleParallel(ctx, maxWorkers)`. These methods
 validate a positive concurrency value and wait for every drained ID to receive a
 best-effort kill attempt. The Go method is intentionally outside the
 `SandboxPool` interface to preserve compatibility with third-party implementors.
 
-### Tracing warmups (Python and Kotlin)
+### Tracing warmups
 
-The Python and Kotlin SDKs can emit an OpenTelemetry trace per warmup task (`pool.warmup`
-root span plus `create` / `readiness_check` / `prepare` /
-`post_prepare_check` / `renew` / `commit` phases) when
-`ConnectionConfig(enable_tracing=True)` or
-`ConnectionConfig.enableTracing(true)` is set and an OpenTelemetry SDK +
-exporter is installed. Kotlin also publishes `trace_id` / `span_id` to the
-SLF4J MDC. See [SDK Tracing (Pool Warmup)](/guides/sdk-tracing).
+Python, JavaScript, and Kotlin/Java emit opt-in OpenTelemetry warmup spans. Set
+`enable_tracing=True` in Python or `enableTracing: true` / `.enableTracing(true)`
+in JavaScript/JVM connection configuration. The application supplies its
+OpenTelemetry provider and exporter. See [SDK Tracing](/guides/sdk-tracing)
+for phase names and language-specific attributes.
+
+Pool `shutdown` stops that local pool instance; it does not terminate sandboxes
+already handed to callers. To retire a shared namespace, use the manager below.
 
 ### Retiring an old pool namespace
 
-Every SDK exposes a `SandboxPoolManager` with a `destroy` operation that applies the
+Each supported pool SDK exposes a `SandboxPoolManager` with a `destroy` operation that applies the
 same `DESTROYING → DESTROYED` protocol:
 
 1. Write a `DESTROYING` fence into the state store, so any still-running peer instance
@@ -381,6 +474,9 @@ incomplete; retrying is safe and picks up where it left off.
 
 **Python / Kotlin** — `SandboxPoolManager.destroy(poolName, options)`, configured
 through `PoolDestroyOptions` (`strategy`, `drain_timeout`, `tombstone_ttl`).
+
+**JavaScript** — `SandboxPoolManager.create({ stateStore, connectionConfig })`,
+then `await manager.destroy(poolName, options)`.
 
 **Go** — `(*SandboxPoolManager).Destroy(ctx, poolName, options)`:
 
@@ -433,5 +529,6 @@ it any more.
 ## Further reading
 
 - Python: [`/sdks/python`](/sdks/python) &mdash; `SandboxPoolSync`, `SandboxPoolAsync`, Redis store.
+- JavaScript: [SDK entry point](/sdks/javascript) — `SandboxPool` and the `/pool-redis` export.
 - Kotlin: [`/sdks/kotlin`](/sdks/kotlin) &mdash; `SandboxPool` builder, `sandbox-pool-redis` module.
 - Go: [`/sdks/go`](/sdks/go) &mdash; `SandboxPool` interface, `RedisPoolStateStore`, distributed deployment notes.

@@ -5,7 +5,8 @@ description: What sandbox create latency metrics the SDKs report, when they fire
 
 # SDK Telemetry
 
-OpenSandbox SDKs optionally report sandbox creation latency to the lifecycle server. Reporting is best-effort: failures never affect `Sandbox.create`, and the payload contains no user content.
+OpenSandbox SDKs report sandbox creation latency to the configured lifecycle server
+by default. This reporting is separate from opt-in [pool warmup tracing](/guides/sdk-tracing). Reporting is best-effort: failures never affect `Sandbox.create`, and the payload contains no user content.
 
 ## Requirements
 
@@ -22,9 +23,10 @@ The `POST /v1/metrics/events` endpoint and the SDK reporters described below req
 
 ### Version skew
 
-Reporting is fire-and-forget in every SDK: the POST runs on a background task/thread, and any exception or non-2xx response is caught and logged at debug level. This means you can upgrade the SDK and the server independently:
+Reporting is fire-and-forget in every SDK: the POST runs on a background task/thread, and reporting failures are ignored. Debug logging varies by SDK; JavaScript, for example,
+does not log these failures. This means you can upgrade the SDK and the server independently:
 
-- **New SDK, old server (`< 0.2.2`)**: the server returns `404` for `/v1/metrics/events`. The SDK ignores the response. `Sandbox.create` behavior is unchanged and no user-visible error is raised. The only side effect is one debug-level log line per create call.
+- **New SDK, old server (`< 0.2.2`)**: the server returns `404` for `/v1/metrics/events`. The SDK ignores the response. `Sandbox.create` behavior is unchanged and no user-visible error is raised. A debug message may be emitted depending on the SDK.
 - **Old SDK, new server**: the SDK does not emit events. The server histogram simply records nothing for that client.
 - **Network errors, TLS failures, timeouts**: same behavior as the `404` case — swallowed, `Sandbox.create` unaffected.
 
@@ -85,7 +87,8 @@ export OPENSANDBOX_DISABLE_METRICS=1
 ::: code-group
 
 ```python [Python]
-from opensandbox import ConnectionConfig, Sandbox
+from opensandbox import Sandbox
+from opensandbox.config import ConnectionConfig
 
 config = ConnectionConfig(disable_metrics=True)
 sandbox = await Sandbox.create("python:3.12", connection_config=config)
@@ -138,4 +141,5 @@ val sandbox = Sandbox.builder()
 
 :::
 
-Use opt-out for air-gapped / on-prem environments that must not emit extra HTTP traffic, or when corporate egress logging should not include telemetry requests.
+These requests go to your configured lifecycle server. Use opt-out when you do
+not want this additional traffic or create-latency data recorded there.

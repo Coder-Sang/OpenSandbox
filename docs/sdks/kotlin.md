@@ -3,7 +3,7 @@ title: Kotlin/Java SDK
 description: Kotlin SDK for creating, managing, and interacting with secure OpenSandbox environments.
 ---
 
-# OpenSandbox SDK for Kotlin
+# OpenSandbox SDK for Kotlin/Java
 
 A Kotlin SDK for low-level interaction with OpenSandbox. It provides capabilities to create, manage, and interact with secure sandbox environments, including executing shell commands, managing files, and monitoring resources.
 
@@ -55,17 +55,13 @@ public class QuickStart {
                 .image("ubuntu")
                 .build()) {
 
-            // 3. Execute a shell command
-            Execution execution = sandbox
-                    .commands()
-                    .run("echo 'Hello Sandbox!'");
+            try {
+                Execution execution = sandbox.commands().run("echo 'Hello Sandbox!'");
+                System.out.println(execution.getLogs().getStdout().get(0).getText());
+            } finally {
+                sandbox.kill();
+            } // try-with-resources closes the client even if kill() fails.
 
-            // 4. Print output
-            System.out.println(execution.getLogs().getStdout().get(0).getText());
-
-            // 5. Cleanup (sandbox.close() called automatically)
-            // Note: kill() must be called explicitly if you want to terminate the remote sandbox instance immediately
-            sandbox.kill();
         } catch (SandboxException e) {
             // Handle Sandbox specific exceptions
             System.err.println("Sandbox Error: [" + e.getError().getCode() + "] " + e.getError().getMessage());
@@ -119,8 +115,15 @@ Manage the sandbox lifecycle, including renewal, pausing, and resuming.
 // This resets the expiration time to (current time + duration)
 sandbox.renew(Duration.ofMinutes(30));
 
-// Pause execution (suspends all processes)
+// Request pause (runtime-dependent)
 sandbox.pause();
+```
+
+Pause returns after the request is accepted. Poll sandbox info until the state is
+`Paused` before resuming; also handle `Failed` and set a polling deadline. Runtime
+behavior is described in [Pause and Resume](/guides/pause-resume). Then resume:
+
+```java
 
 // Resume execution
 // There is no Sandbox.resume() instance method: resuming re-attaches to an
@@ -147,6 +150,10 @@ Sandbox manual = Sandbox.builder()
 ```
 
 ### 2. Custom Health Check
+
+Resolving an endpoint confirms that a route exists; it does not confirm that the
+application on that port is healthy. For service readiness, make a bounded request
+to the application's health endpoint and include the returned endpoint headers.
 
 Define custom logic to determine if the sandbox is healthy. This overrides the default ping check. Set timeouts within custom checks; the SDK cannot interrupt them.
 
@@ -267,135 +274,29 @@ sandboxes.getSandboxInfos().forEach(info -> {
 // manager.close();
 ```
 
-### 6. Sandbox Pool (Client-Side)
+### 6. Client Pool and observability
 
-Use `SandboxPool` to keep an idle buffer of ready sandboxes and reduce acquire latency.
+`SandboxPool` provides four acquire policies and staged warmup controls. Use
+`InMemoryPoolStateStore` in one process, or the optional
+`com.alibaba.opensandbox:sandbox-pool-redis` module with a caller-managed Jedis
+client for distributed deployments. See [Client Pool](/guides/client-pool)
+for configuration, examples, cleanup, and namespace retirement.
 
-::: warning Experimental
-`SandboxPool` is still evolving based on production feedback and may introduce breaking changes in future releases.
-:::
+Set `ConnectionConfig.builder().enableTracing(true)` to emit [pool warmup traces](/guides/sdk-tracing).
+The JVM SDK also adds trace IDs to SLF4J MDC. For remote logs/events, use
+`SandboxManager.getDiagnosticLogs` / `getDiagnosticEvents`; see [Diagnostics](/guides/diagnostics).
+Create-latency reporting is controlled separately by [SDK Telemetry](/guides/sdk-telemetry).
 
-```java
-import com.alibaba.opensandbox.sandbox.pool.SandboxPool;
-import com.alibaba.opensandbox.sandbox.pool.SandboxPoolManager;
-import com.alibaba.opensandbox.sandbox.domain.pool.PoolCreationSpec;
-import com.alibaba.opensandbox.sandbox.domain.pool.PoolDestroyOptions;
-import com.alibaba.opensandbox.sandbox.domain.pool.AcquirePolicy;
-import com.alibaba.opensandbox.sandbox.infrastructure.pool.InMemoryPoolStateStore;
+## Snapshots and metadata
 
-SandboxPool pool = SandboxPool.builder()
-    .poolName("demo-pool")
-    .ownerId("worker-1")
-    .maxIdle(3)
-    .warmupCreateQps(10)
-    .warmupConcurrency(128)
-    .warmupReadyTimeout(Duration.ofSeconds(45))
-    .warmupHealthCheckInitialDelay(Duration.ofSeconds(2))
-    .stateStore(new InMemoryPoolStateStore()) // single-node store
-    .connectionConfig(config)
-    .creationSpec(
-        PoolCreationSpec.builder()
-            .image("ubuntu:22.04")
-            .entrypoint(java.util.List.of("tail", "-f", "/dev/null"))
-            .extension("storage.id", "dataset-001")
-            .build()
-    )
-    .build();
+Create a snapshot with `sandbox.createSnapshot` or `manager.createSnapshot`.
+`SandboxManager` exposes `getSnapshot`, `listSnapshots`, `deleteSnapshot`, and
+`waitForSnapshotReady` to wait for asynchronous snapshot completion. Restore with
+`Sandbox.builder().snapshotId(snapshotId).connectionConfig(config).build()`.
 
-pool.start();
-Sandbox sb = pool.acquire(Duration.ofMinutes(10), AcquirePolicy.FAIL_FAST);
-try {
-    sb.commands().run("echo pool-ok");
-} finally {
-    sb.kill();
-    sb.close();
-}
-pool.shutdown(true);
-```
-
-::: warning Staged warmup scheduling
-Kotlin reconciles on a fixed one-second cadence; `reconcileInterval(...)` has been
-removed. `warmupCreateQps(...)` (default `10`) caps new warmup creates admitted per
-tick, while `warmupConcurrency(...)` (default `128`) independently limits concurrent
-post-create health-check and prepare work. Built-in warmup creates make one HTTP attempt
-and do not honor the normal transport retry policy or a special HTTP-429 throttle. A
-custom `PooledSandboxCreator` must use `context.createConnectionConfig` and honor
-`context.skipHealthCheck` to preserve those semantics. Direct creates made by
-`acquire()` are unchanged.
-:::
-
-The post-create pipeline is staged:
-
-1. Create a sandbox without the builder's inline readiness loop.
-2. Wait `warmupHealthCheckInitialDelay` (default zero), then check readiness every
-   `warmupHealthCheckPollingInterval` (default `500 ms`) until
-   `warmupReadyTimeout` (default `30 s`). The deadline receives one final check.
-3. Run `warmupSandboxPreparer` once. If `warmupPostPrepareHealthCheck` is configured,
-   retry it at the same polling interval until
-   `warmupPostPrepareHealthCheckTimeout` (default `30 s`) without rerunning the
-   preparer.
-4. Renew the sandbox TTL and commit its ID to the idle buffer.
-
-`degradedThreshold` (default `3`) still controls the `HEALTHY → DEGRADED` diagnostic
-state, but Kotlin no longer pauses replenish with exponential backoff;
-`snapshot().backoffActive` is always `false`.
-
-::: tip AcquirePolicy
-`AcquirePolicy` controls what happens when the idle buffer is empty **or** the first idle candidate fails its readiness check:
-
-| Policy | Retry across idles | Fallback on exhaustion |
-|---|---|---|
-| `FAIL_FAST` | no | throw `PoolEmptyException` / `PoolAcquireFailedException` |
-| `DIRECT_CREATE` (default) | no | create a new sandbox via lifecycle API |
-| `RETRY_NEXT_IDLE` | up to `maxAcquireRetries` idles | throw |
-| `RETRY_NEXT_IDLE_THEN_CREATE` | up to `maxAcquireRetries` idles | create a new sandbox |
-
-Use the `RETRY_NEXT_IDLE*` variants when the pool may contain a mix of healthy and stale idle sandboxes (e.g. custom templates with long cold-start; a network flap left a few unreachable idles). Each failed candidate still pays up to `acquireReadyTimeout`, so bound the retry with `maxAcquireRetries` (default `3`).
-:::
-
-Use `SandboxPoolManager` for release or operations workflows that need to destroy an old
-pool namespace without constructing the old `SandboxPool` object:
-
-```java
-SandboxPoolManager poolManager = SandboxPoolManager.builder()
-    .stateStore(redisStore)
-    .connectionConfig(config)
-    .ownerId("deploy-job-123")
-    .build();
-
-poolManager.destroy(
-    "old-pool",
-    new PoolDestroyOptions()
-);
-```
-
-::: info Pool Lifecycle Semantics
-- `acquire()` is only allowed when pool state is `RUNNING`.
-- In `DRAINING` / `STOPPED`, `acquire()` throws `PoolNotRunningException`.
-- When a pool namespace is being destroyed or has been destroyed, `acquire()` throws `PoolDestroyedException` and does not fall back to direct create.
-- `maxIdle` is the target/cap for ready idle sandboxes. It is not a global limit on borrowed sandboxes or sandboxes created by `AcquirePolicy.DIRECT_CREATE`.
-- `ownerId` is the lock owner identity (node/process id), not the pool identifier. If omitted, SDK auto-generates a UUID-based default.
-- Use `warmupSandboxPreparer(...)` if you need to prepare a sandbox after warmup readiness succeeds and before it is put into the idle pool. Add `warmupPostPrepareHealthCheck(...)` when the prepared service needs a separate validation window; retries never rerun the preparer.
-:::
-
-::: tip Observing warmup performance
-To trace the warmup path, enable `ConnectionConfig.builder().enableTracing(true)` and add an
-OpenTelemetry SDK + exporter to your application. Each warmup becomes one trace
-(`pool.warmup` root span plus `create` / `readiness_check` / `prepare` /
-`post_prepare_check` / `renew` / `commit` phases) with
-`trace_id` / `span_id` published to the SLF4J MDC, so you can look up a sandbox's
-warmup by searching logs for its `sandbox_id`. See [SDK Tracing (Pool Warmup)](/guides/sdk-tracing).
-:::
-
-::: tip Distributed Deployment
-For distributed deployment, use the optional `com.alibaba.opensandbox:sandbox-pool-redis` module or provide a custom `PoolStateStore` implementation. The Redis module accepts a caller-managed Jedis client, so your application keeps ownership of Redis connection configuration and lifecycle. Nodes sharing the same pool namespace must use the same sandbox creation and warmup definition; use a new `poolName` or namespace when changing that definition. Kotlin renews the primary lease independently of staged warmup work, at an interval no greater than one third of `primaryLockTtl`; a task is discarded if the lease epoch changes before commit.
-
-In distributed mode, `resize(maxIdle)` can be called from any node. The call returns after the target is stored in the shared state store; the current primary applies replenish or shrink work during periodic reconcile. Use `resize(0)` and wait for `snapshot().idleCount == 0` when you need to drain the distributed idle buffer; `releaseAllIdle()` is only a best-effort cleanup pass.
-
-`releaseAllIdle()` preserves serial cleanup. Use `releaseAllIdle(concurrency)` for bounded parallel cleanup. `concurrency` must be positive, and the overload waits for every drained ID to receive a best-effort kill attempt.
-
-`SandboxPoolManager.destroy(poolName)` is a stronger administrative operation: it writes a `DESTROYING` fence, drains visible idle IDs, best-effort kills idle sandboxes, clears persistent pool state, and then writes a `DESTROYED` tombstone for the configured TTL to prevent old nodes from recreating the same pool namespace. If drain or persistent-state cleanup cannot complete, `destroy()` throws `PoolDestroyIncompleteException` and leaves the namespace fenced as `DESTROYING`; retry `destroy()` to finish cleanup.
-:::
+Use `sandbox.patchMetadata` or `manager.patchSandboxMetadata` to add/replace
+metadata keys; a `null` value removes a key. Runtime support is described by the
+[lifecycle contract](/api/#1-sandbox-lifecycle-yml).
 
 ## Configuration
 
@@ -405,8 +306,8 @@ The `ConnectionConfig` class manages API server connection settings.
 
 | Parameter        | Description                                | Default                      | Environment Variable   |
 | ---------------- | ------------------------------------------ | ---------------------------- | ---------------------- |
-| `apiKey`         | API Key for authentication                 | Required                     | `OPEN_SANDBOX_API_KEY` |
-| `domain`         | The endpoint domain of the sandbox service | Required (or localhost:8080) | `OPEN_SANDBOX_DOMAIN`  |
+| `apiKey`         | API Key for authentication                 | Optional; needed when server auth is enabled | `OPEN_SANDBOX_API_KEY` |
+| `domain`         | The endpoint domain of the sandbox service | `localhost:8080` | `OPEN_SANDBOX_DOMAIN`  |
 | `protocol`       | HTTP protocol (http/https)                 | `http`                       | -                      |
 | `requestTimeout` | Timeout for API requests                   | 30 seconds                   | -                      |
 | `debug`          | Enable debug logging for HTTP requests     | `false`                      | -                      |
@@ -510,7 +411,7 @@ The `Sandbox.builder()` allows configuring the sandbox environment.
 
 | Parameter      | Description                              | Default                         |
 | -------------- | ---------------------------------------- | ------------------------------- |
-| `image`        | Docker image to use                      | Required                        |
+| `image`        | Docker image to use                      | One of image or snapshot ID |
 | `timeout`      | Automatic termination timeout            | 10 minutes                      |
 | `entrypoint`   | Container entrypoint command             | `["tail", "-f", "/dev/null"]`   |
 | `resource`     | CPU and memory limits                    | `{"cpu": "1", "memory": "2Gi"}` |
@@ -520,6 +421,12 @@ The `Sandbox.builder()` allows configuring the sandbox environment.
 | `networkPolicy` | Optional outbound network policy (egress) | -                             |
 | `credentialProxy` | Optional Credential Vault proxy startup settings | -                     |
 | `readyTimeout` | Max time to wait for sandbox to be ready | 30 seconds                      |
+| `snapshotId` | Restore a snapshot instead of an image | - |
+| `resourceRequests` | Kubernetes resource requests; must not exceed limits | - |
+| `lifecycle` | Pre-start and periodic hooks | - |
+| `platform` | OS/architecture constraint | - |
+| `volumes` | Host, PVC, or OSSFS mounts | - |
+| `secureAccess` | Require endpoint access credentials | `false` |
 
 ::: warning
 Metadata keys under `opensandbox.io/` are reserved for system-managed labels and will be rejected by the server.

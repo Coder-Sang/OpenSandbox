@@ -1,12 +1,11 @@
 ---
 title: SDK Tracing (Pool Warmup)
-description: How to enable OpenTelemetry tracing for the Python and Kotlin SDK pool warmup path, what spans are produced, and how to query and drill down into warmup traces.
+description: How to enable OpenTelemetry tracing for the Python, JavaScript, and Kotlin/Java SDK pool warmup path, what spans are produced, and how to query and drill down into warmup traces.
 ---
 
 # SDK Tracing (Pool Warmup)
 
-The Python SDK (`opensandbox`) and Kotlin/Java SDK
-(`com.alibaba.opensandbox:sandbox`) can emit
+The Python, JavaScript/TypeScript, and Kotlin/Java SDKs can emit
 [OpenTelemetry](https://opentelemetry.io/) traces for the client-side
 `SandboxPool` warmup path. Each warmup task becomes one trace that covers the
 full lifecycle — from the moment the reconcile loop submits the task until the
@@ -14,27 +13,37 @@ warmed sandbox is committed to the idle buffer — with per-phase spans so you
 can find the actual warmup bottleneck.
 
 Tracing is **opt-in** (`enable_tracing=True` in Python or
-`enableTracing(true)` on the JVM) and **best-effort**: without an OpenTelemetry
+`enableTracing: true` in JavaScript, or `.enableTracing(true)` on the JVM) and **best-effort**: without an OpenTelemetry
 SDK + exporter in the application, all span calls are no-ops and nothing is
 exported. Tracing never affects pool behavior.
 
-## Requirements
+## SDK support
 
-| Component | Minimum version |
-|-----------|-----------------|
-| Python SDK (`opensandbox`) | next release |
-| Kotlin / Java SDK (`com.alibaba.opensandbox:sandbox`) | `1.0.19` |
+| SDK | Pool warmup tracing |
+| --- | --- |
+| Python async/sync | Phase spans, sandbox identity, terminal classification, readiness counters |
+| JavaScript/TypeScript | Phase spans, pool identity, success/failure and error type |
+| Kotlin/Java | Phase spans, sandbox identity, terminal classification, readiness counters, SLF4J MDC |
+| Go / C# | No built-in pool warmup tracing |
+
+This guide describes the default branch. Check your installed SDK's
+`ConnectionConfig` for `enable_tracing` / `enableTracing` before enabling it.
+Tracing defaults to **off**, independently of [create-latency telemetry](/guides/sdk-telemetry),
+which defaults to **on**.
 
 ## Enabling tracing
 
 ### 1. Add an OpenTelemetry SDK + exporter to your application
 
-Both SDKs depend only on the OpenTelemetry API (no-op by default). To actually
+These SDKs depend only on the OpenTelemetry API (no-op by default). To actually
 export traces you bring your own SDK and exporter. For Python:
 
 ```bash
 pip install opentelemetry-sdk opentelemetry-exporter-otlp-proto-http
 ```
+
+For Node.js, install an OpenTelemetry SDK and exporter compatible with your
+application. See the [OpenTelemetry Node.js setup](https://opentelemetry.io/docs/languages/js/getting-started/nodejs/).
 
 For Kotlin/Java:
 
@@ -49,10 +58,13 @@ dependencies {
 ### 2. Configure the global OpenTelemetry provider
 
 Warmup spans use the language's global provider. Configure it at application
-startup. For Python, use `opentelemetry.trace.set_tracer_provider(...)`; for
+startup, before creating or starting the pool. In JavaScript, register the provider,
+async context manager, and W3C propagator with the global `@opentelemetry/api`
+instance (a Node.js OpenTelemetry SDK can configure these together). For Python, use `opentelemetry.trace.set_tracer_provider(...)`; for
 Kotlin/Java, configure `GlobalOpenTelemetry`, for example:
 
 ```java
+import io.opentelemetry.api.GlobalOpenTelemetry;
 import io.opentelemetry.sdk.OpenTelemetrySdk;
 import io.opentelemetry.sdk.trace.SdkTracerProvider;
 import io.opentelemetry.sdk.trace.export.BatchSpanProcessor;
@@ -91,6 +103,15 @@ sampling keeps client and server spans consistent for the same warmup.
 
 ### 3. Turn tracing on for the pool
 
+JavaScript / TypeScript:
+
+```ts
+import { ConnectionConfig } from "@alibaba-group/opensandbox";
+
+const config = new ConnectionConfig({ enableTracing: true });
+// Pass config as connectionConfig when constructing SandboxPool.
+```
+
 Python:
 
 ```python
@@ -115,8 +136,9 @@ SandboxPool pool = SandboxPool.builder()
     .build();
 ```
 
-That is all. No environment variables are involved; tracing defaults to
-`false`.
+Pass this connection config to the pool. The SDK flag defaults to `false`;
+OpenTelemetry exporter and sampling configuration remain application-owned.
+Shut down the pool before flushing and closing the application tracer provider.
 
 ## What is traced
 
@@ -127,7 +149,7 @@ delayed attempts; optional stages are absent when they are not configured:
 
 | Span name | Covers |
 |-----------|--------|
-| `pool.warmup` (root) | Task submission → sandbox committed to idle. Backdated to submission time, so the queue wait before the first phase is visible as the gap before the first child span |
+| `pool.warmup` (root) | Warmup task, from admission through completion. Python/JVM backdate it to submission time to include queue wait |
 | `pool.warmup.create` | Sandbox creator invocation. The built-in lifecycle path makes one HTTP attempt; readiness is no longer part of this span |
 | `pool.warmup.readiness` | Complete pre-prepare readiness stage (`warmupHealthCheck` or `ping`), including all delayed attempts |
 | `pool.warmup.prepare` | The single invocation of `warmupSandboxPreparer` (user init script / setup work) |
@@ -135,7 +157,15 @@ delayed attempts; optional stages are absent when they are not configured:
 | `pool.warmup.renew` | TTL renewal right before committing the sandbox |
 | `pool.warmup.commit` | Primary-lock renewal + `putIdle` against the state store |
 
-Root span attributes (these are your drill-down dimensions):
+### Attributes by language
+
+All three SDKs emit `pool.name`, `pool.owner`, `pool.run.generation`, and
+`pool.leader.epoch`. JavaScript currently adds `warmup.result` (`success` or
+`failure`) and `warmup.error.type`; it does not emit the sandbox identity,
+terminal-stage classification, or readiness-attempt counters below. Its success
+flag alone does not prove that the sandbox was committed to idle.
+
+The following richer root attributes apply to **Python and Kotlin/Java**:
 
 | Attribute | Value |
 |-----------|-------|
@@ -151,7 +181,7 @@ Root span attributes (these are your drill-down dimensions):
 | `warmup.error.category` | Stable error category such as `rate_limit`, `http_4xx`, `http_5xx`, `timeout`, `connection`, `callback`, or `state_store` |
 | `warmup.error.type` | Exception class when an error is available |
 
-Readiness summary spans additionally expose
+Python/JVM readiness summary spans additionally expose
 `warmup.health.attempt_count`, `warmup.health.false_count`,
 `warmup.health.exception_count`, and `warmup.scheduler.delay_ms`. Failures are
 recorded with `recordException` on the affected phase span. The root span keeps
@@ -168,7 +198,7 @@ development snapshot.
 
 ## Correlating logs to traces
 
-While a warmup trace is in progress, the pool publishes the trace ids to the
+In Kotlin/Java, while a warmup trace is in progress, the pool publishes trace IDs to the
 SLF4J [MDC](https://www.slf4j.org/api/org/slf4j/MDC.html):
 
 | MDC key | Value |
@@ -188,7 +218,7 @@ your log pattern once, and every pool log line carries the trace context:
 The trace id is random, so a warmup trace cannot be looked up "by pool name"
 directly. The reliable paths are:
 
-1. **Log correlation (recommended).** The pool already logs `pool_name` and
+1. **JVM log correlation.** With MDC configured, the pool logs `pool_name` and
    `sandbox_id` on its warmup lines (e.g. `Pool warmup sandbox entered idle`).
    Search your logs for a `sandbox_id` — the matching log lines carry
    `trace_id`, which you can open directly in your trace backend.
@@ -202,6 +232,9 @@ directly. The reliable paths are:
    the backend are consistent for the same warmup.
 
 ### Bottleneck drill-down
+
+The readiness counters and backdated queue timing below apply to Python/JVM.
+For JavaScript, compare phase durations and the four pool identity attributes.
 
 ```
 pool.warmup root duration (p50/p95/p99) per pool.name
@@ -217,4 +250,5 @@ pool.warmup root duration (p50/p95/p99) per pool.name
 | Slow `pool.warmup.readiness` with a high `warmup.health.attempt_count` | Sandbox startup or the configured readiness predicate is the bottleneck |
 | `pool.warmup.prepare` slow | Your `warmupSandboxPreparer` work is the bottleneck |
 | Slow `pool.warmup.post_prepare_readiness` with a high attempt count | Prepared service is not yet healthy, or its validation predicate is slow |
-| `pool.warmup.renew` / `pool.warmup.commit` slow | State store (e.g. Redis) round-trips |
+| `pool.warmup.renew` slow | Lifecycle API TTL renewal |
+| `pool.warmup.commit` slow | State-store lease renewal or idle publication (for example Redis round-trips) |
