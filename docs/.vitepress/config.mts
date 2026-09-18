@@ -21,6 +21,10 @@ const sdkSidebar = [
     ],
   },
   {
+    text: "CLI",
+    items: [{ text: "CLI Reference", link: "/cli/" }],
+  },
+  {
     text: "MCP",
     collapsed: false,
     items: [{ text: "MCP Server", link: "/sdks/mcp" }],
@@ -65,7 +69,6 @@ export default defineConfig({
         items: [
           { text: "SDKs", link: "/sdks/" },
           { text: "API Specs", link: "/api/" },
-          { text: "CLI", link: "/cli/" },
           { text: "Components", link: "/components/" },
           { text: "Kubernetes", link: "/kubernetes/" },
           { text: "Migration Guides", link: "/reference/execd-path-migration" },
@@ -130,8 +133,6 @@ export default defineConfig({
             { text: "Pause & Resume", link: "/guides/pause-resume" },
             { text: "Lifecycle Hooks", link: "/guides/lifecycle-hooks" },
             { text: "Windows Sandbox", link: "/guides/windows-sandbox" },
-            { text: "Client Pool", link: "/guides/client-pool" },
-            { text: "SDK Observability", link: "/sdks/observability" },
           ],
         },
       ],
@@ -173,12 +174,7 @@ export default defineConfig({
         },
       ],
 
-      "/cli/": [
-        {
-          text: "CLI",
-          items: [{ text: "Reference", link: "/cli/" }],
-        },
-      ],
+      "/cli/": sdkSidebar,
 
       "/examples/": [
         {

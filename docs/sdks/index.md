@@ -89,6 +89,15 @@ they do not kill the remote sandbox. Kill it in a `finally`/`defer` block, or us
 Python's `destroy()` helper. Pool acquisitions are consumed once and are not returned
 to the idle buffer.
 
+## CLI
+
+Use the [CLI](/cli/) to manage sandboxes, run commands, and work with files from a
+terminal.
+
+```bash
+uv tool install opensandbox-cli
+```
+
 ## MCP server
 
 The [MCP server](/sdks/mcp) exposes sandbox operations to MCP-capable clients:
