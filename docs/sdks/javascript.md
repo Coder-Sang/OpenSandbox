@@ -108,10 +108,10 @@ and staged warmup controls. The Redis store is exported from
 `@alibaba-group/opensandbox/pool-redis`. See [Client Pool](/guides/client-pool)
 for examples, configuration, and namespace retirement.
 
-Set `enableTracing: true` in `ConnectionConfig` to enable [pool warmup tracing](/guides/sdk-tracing).
+Set `enableTracing: true` in `ConnectionConfig` to enable [pool warmup tracing](/sdks/observability#pool-warmup-tracing).
 JavaScript emits phase spans but fewer diagnostic attributes than Python/JVM.
-Create-latency [telemetry](/guides/sdk-telemetry) has a separate opt-out setting.
-Remote diagnostic logs/events are available through [CLI or HTTP](/guides/diagnostics),
+Create-latency [telemetry](/sdks/observability#creation-metrics) has a separate opt-out setting.
+Remote diagnostic logs/events are available through [CLI or HTTP](/api/#diagnostics),
 not through the JavaScript SDK.
 
 ## Usage Examples
@@ -312,8 +312,8 @@ The `ConnectionConfig` class manages API server connection settings.
 | `debug`                 | Enable basic HTTP debug logging                                                                              | `false`          | -                      |
 | `headers`               | Extra headers applied to every request                                                                       | `{}`             | -                      |
 | `useServerProxy`        | Use sandbox server as proxy for execd/endpoint requests (e.g. when client cannot reach the sandbox directly) | `false`          | -                      |
-| `enableTracing` | Enable [pool warmup tracing](/guides/sdk-tracing) | `false` | - |
-| `disableMetrics`        | Disable SDK create-latency telemetry (see [SDK Telemetry](/guides/sdk-telemetry))                          | `false`          | `OPENSANDBOX_DISABLE_METRICS` |
+| `enableTracing` | Enable [pool warmup tracing](/sdks/observability#pool-warmup-tracing) | `false` | - |
+| `disableMetrics`        | Disable SDK create-latency telemetry (see [SDK Telemetry](/sdks/observability#creation-metrics))                          | `false`          | `OPENSANDBOX_DISABLE_METRICS` |
 
 ```ts
 import { ConnectionConfig } from "@alibaba-group/opensandbox";

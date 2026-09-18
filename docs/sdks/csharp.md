@@ -317,7 +317,7 @@ The `ConnectionConfig` class manages API server connection settings.
 | `RequestTimeoutSeconds` | Request timeout applied to SDK HTTP calls | `30` | - |
 | `UseServerProxy` | Request server-proxied sandbox endpoint URLs | `false` | - |
 | `Headers` | Extra headers applied to every request | `{}` | - |
-| `DisableMetrics` | Disable SDK create-latency telemetry (see [SDK Telemetry](/guides/sdk-telemetry)) | `false` | `OPENSANDBOX_DISABLE_METRICS` |
+| `DisableMetrics` | Disable SDK create-latency telemetry (see [SDK Telemetry](/sdks/observability#creation-metrics)) | `false` | `OPENSANDBOX_DISABLE_METRICS` |
 
 ```csharp
 using OpenSandbox.Config;
@@ -344,14 +344,14 @@ var config2 = new ConnectionConfig(new ConnectionConfigOptions
 ```
 
 ::: tip SDK Telemetry
-`Sandbox.CreateAsync` reports create latency to `POST /v1/metrics/events` by default. Set `ConnectionConfigOptions.DisableMetrics = true` or export `OPENSANDBOX_DISABLE_METRICS=1` to opt out. See [SDK Telemetry](/guides/sdk-telemetry).
+`Sandbox.CreateAsync` reports create latency to `POST /v1/metrics/events` by default. Set `ConnectionConfigOptions.DisableMetrics = true` or export `OPENSANDBOX_DISABLE_METRICS=1` to opt out. See [SDK Telemetry](/sdks/observability#creation-metrics).
 :::
 
 ### 2. SDK Logging
 
 The SDK uses `Microsoft.Extensions.Logging` abstractions. `SdkDiagnosticsOptions`
 configures local logging; it does not retrieve remote sandbox diagnostic logs or
-events. Use the [CLI or HTTP API](/guides/diagnostics) for those. Client Pool and
+events. Use the [CLI or HTTP API](/api/#diagnostics) for those. Client Pool and
 built-in pool warmup tracing are not currently available in C#.
 
 ```csharp
