@@ -32,7 +32,7 @@ export default defineConfig({
 
     nav: [
       { text: "Getting Started", link: "/getting-started/" },
-      { text: "Guides", link: "/guides/credential-vault" },
+      { text: "Guides", link: "/guides/" },
       {
         text: "Reference",
         items: [
@@ -65,7 +65,7 @@ export default defineConfig({
           text: "Next Steps",
           items: [
             { text: "Architecture", link: "/architecture/" },
-            { text: "Guides", link: "/guides/credential-vault" },
+            { text: "Guides", link: "/guides/" },
             { text: "SDKs", link: "/sdks/" },
           ],
         },
@@ -92,6 +92,8 @@ export default defineConfig({
         {
           text: "Guides",
           items: [
+            { text: "Overview", link: "/guides/" },
+            { text: "Diagnostics", link: "/guides/diagnostics" },
             { text: "Credential Vault", link: "/guides/credential-vault" },
             { text: "Secure Access", link: "/guides/secure-access" },
             { text: "Secure Container", link: "/guides/secure-container" },
@@ -115,24 +117,21 @@ export default defineConfig({
             { text: "Overview", link: "/sdks/" },
             { text: "Python", link: "/sdks/python" },
             { text: "JavaScript", link: "/sdks/javascript" },
-            { text: "Kotlin", link: "/sdks/kotlin" },
+            { text: "Kotlin / Java", link: "/sdks/kotlin" },
             { text: "Go", link: "/sdks/go" },
             { text: "C#", link: "/sdks/csharp" },
           ],
         },
         {
-          text: "Code Interpreter SDKs",
-          collapsed: false,
+          text: "SDK Features",
           items: [
-            { text: "Python", link: "/sdks/code-interpreter/python" },
-            {
-              text: "JavaScript",
-              link: "/sdks/code-interpreter/javascript",
-            },
-            { text: "Kotlin", link: "/sdks/code-interpreter/kotlin" },
-            { text: "C#", link: "/sdks/code-interpreter/csharp" },
+            { text: "Client Pool", link: "/guides/client-pool" },
+            { text: "Tracing", link: "/guides/sdk-tracing" },
+            { text: "Diagnostics", link: "/guides/diagnostics" },
+            { text: "Telemetry", link: "/guides/sdk-telemetry" },
           ],
         },
+
         {
           text: "MCP",
           collapsed: false,

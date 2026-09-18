@@ -51,11 +51,15 @@ try
         TimeoutSeconds = 10 * 60,
     });
 
-    var execution = await sandbox.Commands.RunAsync("echo 'Hello Sandbox!'");
-    Console.WriteLine(execution.Logs.Stdout.FirstOrDefault()?.Text);
-
-    // Optional but recommended: terminate the remote instance when you are done.
-    await sandbox.KillAsync();
+    try
+    {
+        var execution = await sandbox.Commands.RunAsync("echo 'Hello Sandbox!'");
+        Console.WriteLine(execution.Logs.Stdout.FirstOrDefault()?.Text);
+    }
+    finally
+    {
+        await sandbox.KillAsync();
+    } // await using releases the client even if KillAsync fails.
 }
 catch (SandboxException ex)
 {
@@ -111,6 +115,13 @@ Console.WriteLine($"Created: {info.CreatedAt}");
 Console.WriteLine($"Expires: {info.ExpiresAt}"); // null when manual cleanup mode is used
 
 await sandbox.PauseAsync();
+```
+
+Pause returns after the request is accepted. Poll sandbox info until the state is
+`Paused` before resuming; also handle `Failed` and set a polling deadline. Runtime
+behavior is described in [Pause and Resume](/guides/pause-resume). Then resume:
+
+```csharp
 
 // Resume returns a fresh, connected Sandbox instance.
 var resumed = await sandbox.ResumeAsync();
@@ -147,6 +158,10 @@ var connected = await Sandbox.ConnectAsync(new SandboxConnectOptions
 ```
 
 ### 2. Custom Health Check
+
+Resolving an endpoint confirms that a route exists; it does not confirm that the
+application on that port is healthy. For service readiness, make a bounded request
+to the application's health endpoint and include the returned endpoint headers.
 
 Define custom logic to determine whether the sandbox is ready/healthy.
 
@@ -233,10 +248,8 @@ foreach (var file in files)
     Console.WriteLine(file.Path);
 }
 
-await sandbox.Files.DeleteDirectoriesAsync(new[] { "/tmp/demo" });
-
-// Delete one or more files directly.
 await sandbox.Files.DeleteFilesAsync(new[] { "/tmp/demo/hello.txt" });
+await sandbox.Files.DeleteDirectoriesAsync(new[] { "/tmp/demo" });
 ```
 
 ### 5. Endpoints
@@ -272,6 +285,23 @@ foreach (var s in list.Items)
     Console.WriteLine(s.Id);
 }
 ```
+
+## Snapshots, templates, and metadata
+
+| Operation | Public API |
+| --- | --- |
+| Snapshot a sandbox | `sandbox.CreateSnapshotAsync` or `manager.CreateSnapshotAsync` |
+| Inspect/list/delete snapshots | `manager.GetSnapshotAsync`, `ListSnapshotsAsync`, `DeleteSnapshotAsync` |
+| Restore a snapshot | `Sandbox.CreateAsync` with `SnapshotId` and no `Image`/`Entrypoint` |
+| Manage Fsb templates | `manager.CreateTemplateAsync`, `GetTemplateAsync`, `ListTemplatesAsync`, `DeleteTemplateAsync` |
+| Create from a published template | `Sandbox.CreateFromTemplateAsync` with `SandboxCreateFromTemplateOptions` |
+| Patch metadata | `sandbox.PatchMetadataAsync` or `manager.PatchSandboxMetadataAsync` |
+
+Poll snapshot status before restoring. Template builds are asynchronous; wait
+for `Succeeded` before use. Template-backed creation requires `TimeoutSeconds`
+and inherits workload configuration from the published template.
+Metadata patch values add/replace keys; `null` deletes a key.
+See the [lifecycle contract](/api/#1-sandbox-lifecycle-yml) for backend constraints.
 
 ## Configuration
 
@@ -317,9 +347,12 @@ var config2 = new ConnectionConfig(new ConnectionConfigOptions
 `Sandbox.CreateAsync` reports create latency to `POST /v1/metrics/events` by default. Set `ConnectionConfigOptions.DisableMetrics = true` or export `OPENSANDBOX_DISABLE_METRICS=1` to opt out. See [SDK Telemetry](/guides/sdk-telemetry).
 :::
 
-### 2. Diagnostics and Logging
+### 2. SDK Logging
 
-The SDK uses `Microsoft.Extensions.Logging` abstractions.
+The SDK uses `Microsoft.Extensions.Logging` abstractions. `SdkDiagnosticsOptions`
+configures local logging; it does not retrieve remote sandbox diagnostic logs or
+events. Use the [CLI or HTTP API](/guides/diagnostics) for those. Client Pool and
+built-in pool warmup tracing are not currently available in C#.
 
 ```csharp
 using Microsoft.Extensions.Logging;
@@ -348,7 +381,7 @@ var sandbox = await Sandbox.CreateAsync(new SandboxCreateOptions
 
 | Parameter | Description | Default |
 | --- | --- | --- |
-| `Image` | Docker image to use | Required |
+| `Image` | Docker image to use | One of image or snapshot ID |
 | `TimeoutSeconds` | Automatic termination timeout (server-side TTL) | 10 minutes |
 | `Entrypoint` | Container entrypoint command | `["tail","-f","/dev/null"]` |
 | `Resource` | CPU and memory limits (string map) | `{"cpu":"1","memory":"2Gi"}` |
@@ -356,12 +389,18 @@ var sandbox = await Sandbox.CreateAsync(new SandboxCreateOptions
 | `Metadata` | Custom metadata tags | `{}` |
 | `NetworkPolicy` | Optional outbound network policy (egress) | - |
 | `CredentialProxy` | Optional Credential Vault proxy startup settings | - |
-| `Volumes` | Optional storage mounts (`Host` / `PVC`, supports `ReadOnly` and `SubPath`) | - |
+| `Volumes` | Optional storage mounts (`Host` / `PVC` / `OSSFS`, supports `ReadOnly` and `SubPath`) | - |
 | `Extensions` | Extra server-defined fields | `{}` |
 | `SkipHealthCheck` | Skip readiness checks (`Running` + health check) | `false` |
 | `HealthCheck` | Custom readiness check | - |
 | `ReadyTimeoutSeconds` | Max time to wait for readiness | 30 seconds |
 | `HealthCheckPollingInterval` | Poll interval while waiting (milliseconds) | 200 ms |
+| `SnapshotId` | Restore a snapshot instead of passing `Image`; omit `Entrypoint` | - |
+| `ResourceRequests` | Kubernetes resource requests; must not exceed limits | - |
+| `Lifecycle` | Pre-start and periodic hooks | - |
+| `Platform` | OS/architecture constraint | - |
+| `SecureAccess` | Require endpoint access credentials | `false` |
+| `ManualCleanup` | Disable TTL expiration for image/snapshot creation | `false` |
 
 ::: warning
 Metadata keys under `opensandbox.io/` are reserved for system-managed labels and will be rejected by the server.
@@ -395,8 +434,11 @@ var sandbox = await Sandbox.CreateAsync(new SandboxCreateOptions
 
 ### 4. Runtime Egress Policy Updates
 
-Runtime egress reads and patches go directly to the sandbox egress sidecar.
-The SDK first resolves the sandbox endpoint on port `18080`, then calls the sidecar `/policy` API.
+Runtime egress policy routing depends on the sandbox origin.
+For image-backed sandboxes, the SDK resolves port `18080` and calls the sidecar
+`/policy` API. For template-backed sandboxes (including restored template snapshots),
+the SDK detects `OPEN-SANDBOX-ORIGIN: template` and routes policy operations through
+the lifecycle `/sandboxes/{sandboxId}/networkpolicy` API.
 
 Patch uses merge semantics:
 - Incoming rules take priority over existing rules with the same `Target`.
@@ -416,7 +458,8 @@ await sandbox.PatchEgressRulesAsync(new[]
 
 ### 5. Credential Vault
 
-Credential Vault injects outbound credentials from the egress sidecar while
+Credential Vault requires a sandbox-side egress service and is unavailable for
+template-backed sandboxes. It injects outbound credentials from the egress sidecar while
 keeping real secrets out of sandbox environment variables, commands, files, and
 logs. Create the sandbox with `CredentialProxy` enabled, then write credentials
 and bindings through `sandbox.CredentialVault` or the sandbox helper methods.

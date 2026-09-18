@@ -7,7 +7,7 @@ description: Go client library for the OpenSandbox API covering lifecycle, execd
 
 Go client library for the [OpenSandbox](https://github.com/opensandbox-group/OpenSandbox/) API.
 
-Covers all three OpenAPI specs:
+Provides high-level sandbox helpers and low-level clients for these API areas:
 - **Lifecycle** -- Create, manage, and destroy sandbox instances
 - **Execd** -- Execute commands, manage files, monitor metrics inside sandboxes
 - **Egress** -- Inspect and mutate sandbox network policy at runtime
@@ -23,6 +23,9 @@ go get github.com/alibaba/OpenSandbox/sdks/sandbox/go
 
 ### Create and manage a sandbox
 
+Use the high-level helper to create a sandbox, resolve its endpoint, and wait for
+readiness before running commands:
+
 ```go
 package main
 
@@ -31,47 +34,44 @@ import (
     "fmt"
     "log"
 
-    "github.com/alibaba/OpenSandbox/sdks/sandbox/go"
+    opensandbox "github.com/alibaba/OpenSandbox/sdks/sandbox/go"
 )
 
-func main() {
+func run() error {
     ctx := context.Background()
-
-    lc := opensandbox.NewLifecycleClient("http://localhost:8080/v1", "your-api-key")
-
-    sbx, err := lc.CreateSandbox(ctx, opensandbox.CreateSandboxRequest{
-        Image:      &opensandbox.ImageSpec{URI: "python:3.12"},
-        Entrypoint: []string{"/bin/sh"},
-        ResourceLimits: opensandbox.ResourceLimits{
-            "cpu":    "500m",
-            "memory": "512Mi",
-        },
+    ttl := 600
+    sandbox, err := opensandbox.CreateSandbox(ctx, opensandbox.ConnectionConfig{
+        Domain: "localhost:8080",
+        UseServerProxy: true,
+    }, opensandbox.SandboxCreateOptions{
+        Image: "python:3.12",
+        TimeoutSeconds: &ttl,
     })
     if err != nil {
-        log.Fatal(err)
+        return err
     }
-    fmt.Printf("Created sandbox: %s (state: %s)\n", sbx.ID, sbx.Status.State)
+    defer sandbox.Close()
+    defer sandbox.Kill(context.Background())
 
-    sbx, err = lc.GetSandbox(ctx, sbx.ID)
+    result, err := sandbox.RunCommand(ctx, "echo sandbox-ready", nil)
     if err != nil {
+        return err
+    }
+    fmt.Println(result.Logs.Stdout)
+    return nil
+}
+
+func main() {
+    if err := run(); err != nil {
         log.Fatal(err)
     }
-
-    list, err := lc.ListSandboxes(ctx, opensandbox.ListOptions{
-        States:   []opensandbox.SandboxState{opensandbox.StateRunning},
-        PageSize: 10,
-    })
-    if err != nil {
-        log.Fatal(err)
-    }
-    fmt.Printf("Running sandboxes: %d\n", list.Pagination.TotalItems)
-
-    _ = lc.PauseSandbox(ctx, sbx.ID)
-    _ = lc.ResumeSandbox(ctx, sbx.ID)
-
-    _ = lc.DeleteSandbox(ctx, sbx.ID)
 }
 ```
+
+`ConnectSandbox` and `ResumeSandbox` check health only when you pass the optional
+`ReadyOptions` argument (an empty `ReadyOptions{}` uses the default check).
+Omitting it resolves the endpoint without a health check. Pause is asynchronous:
+wait until sandbox info reports `Paused` before resuming.
 
 ### Run a command with streaming output
 
@@ -79,9 +79,17 @@ The low-level client exposes each event as JSON in `event.Data`. Import
 `encoding/json` and decode it before printing command output:
 
 ```go
-exec := opensandbox.NewExecdClient("http://localhost:9090", "your-execd-token")
+endpoint, err := sandbox.GetEndpoint(ctx, 44772)
+if err != nil {
+    return err
+}
+// Use the same protocol as the sandbox connection; this example uses HTTP.
+exec := opensandbox.NewExecdClient(
+    "http://" + endpoint.Endpoint, "",
+    opensandbox.WithHeaders(endpoint.Headers),
+)
 
-err := exec.RunCommand(ctx, opensandbox.RunCommandRequest{
+err = exec.RunCommand(ctx, opensandbox.RunCommandRequest{
     Command: "echo 'Hello from sandbox!'",
     Timeout: 30000,
 }, func(event opensandbox.StreamEvent) error {
@@ -100,6 +108,10 @@ err := exec.RunCommand(ctx, opensandbox.RunCommandRequest{
     return nil
 })
 ```
+
+`RunCommandRequest.Timeout` is in **milliseconds**. Use this low-level client for
+`InterruptCommand`, `GetCommandStatus`, and `GetCommandLogs`, which are not exposed
+as high-level `Sandbox` methods.
 
 For native execution, replace the request above with the following. On Linux,
 it prints literal `$HOME` and keeps `hello world` as one argument:
@@ -206,142 +218,17 @@ sandbox-side egress sidecar. `sandbox.CredentialVault(ctx)` returns an error
 for them.
 :::
 
-### Sandbox Pool (Client-Side)
+### Client Pool
 
-Use `SandboxPool` to keep an idle buffer of ready sandboxes and reduce acquire latency.
+Use `NewSandboxPoolBuilder` with an in-memory store or the Redis adapter in
+`github.com/alibaba/OpenSandbox/sdks/sandbox/go/poolredis`. Go supports all four
+acquire policies, namespace retirement, and per-acquire TTL/health-check overrides.
 
-::: warning Experimental
-`SandboxPool` is still evolving based on production feedback and may introduce breaking changes in future releases.
-:::
-
-```go
-package main
-
-import (
-    "context"
-    "fmt"
-    "log"
-    "time"
-
-    opensandbox "github.com/alibaba/OpenSandbox/sdks/sandbox/go"
-)
-
-func main() {
-    ctx := context.Background()
-
-    pool, err := opensandbox.NewSandboxPoolBuilder().
-        PoolName("demo-pool").
-        OwnerID("worker-1").
-        MaxIdle(3).
-        ConnectionConfig(opensandbox.ConnectionConfig{
-            Domain: "api.opensandbox.io",
-        }).
-        CreationSpec(opensandbox.PoolCreationSpec{
-            Image: "ubuntu:22.04",
-        }).
-        StateStore(opensandbox.NewInMemoryPoolStateStore()). // single-process only
-        Build()
-    if err != nil {
-        log.Fatal(err)
-    }
-
-    if err := pool.Start(ctx); err != nil {
-        log.Fatal(err)
-    }
-
-    failFast := opensandbox.AcquirePolicyFailFast
-    sb, err := pool.Acquire(ctx, opensandbox.AcquireOptions{
-        SandboxTimeout: 10 * time.Minute,
-        Policy:         &failFast,
-    })
-    if err != nil {
-        log.Fatal(err)
-    }
-
-    result, err := sb.RunCommand(ctx, "echo pool-ok", nil)
-    if err == nil {
-        fmt.Println(result.Text())
-    }
-
-    _ = sb.Kill(context.Background())
-    // Drain idle sandboxes before shutdown (single-process cleanup).
-    pool.ReleaseAllIdle(ctx)
-    _ = pool.Shutdown(ctx, true)
-}
-```
-
-::: tip AcquirePolicy
-`AcquirePolicy` controls what happens when the idle buffer is empty **or** the first idle candidate fails its readiness check:
-
-| Policy | Retry across idles | Fallback on exhaustion |
-|---|---|---|
-| `AcquirePolicyFailFast` | no | return `*PoolEmptyError` / `*PoolAcquireFailedError` |
-| `AcquirePolicyDirectCreate` (default) | no | create a new sandbox via lifecycle API |
-| `AcquirePolicyRetryNextIdle` | up to `MaxAcquireRetries` idles | return error |
-| `AcquirePolicyRetryNextIdleThenCreate` | up to `MaxAcquireRetries` idles | create a new sandbox |
-
-Use the `RetryNextIdle*` variants when the pool may contain a mix of healthy and stale idle sandboxes (custom templates with long cold-start; network flap left a few unreachable idles). Each failed candidate still pays up to `AcquireReadyTimeout`, so bound the retry with `MaxAcquireRetries` (default `3`) via `builder.MaxAcquireRetries(n)` or `PoolConfig.MaxAcquireRetries`.
-:::
-
-For distributed deployment with multiple processes or pods, use `RedisPoolStateStore`
-from the `poolredis` sub-package of the same module — no extra install step beyond
-`go get github.com/alibaba/OpenSandbox/sdks/sandbox/go`. The store accepts a
-caller-managed `redis.Client` and does not create or close Redis connections.
-
-```go
-import (
-    "github.com/redis/go-redis/v9"
-    opensandbox "github.com/alibaba/OpenSandbox/sdks/sandbox/go"
-    "github.com/alibaba/OpenSandbox/sdks/sandbox/go/poolredis"
-)
-
-redisClient := redis.NewClient(&redis.Options{
-    Addr: "redis.example.com:6379",
-})
-
-store, err := poolredis.NewRedisPoolStateStore(poolredis.RedisPoolStateStoreConfig{
-    Client:    redisClient,
-    KeyPrefix: "opensandbox:pool:prod",
-})
-if err != nil {
-    log.Fatal(err)
-}
-
-pool, err := opensandbox.NewSandboxPoolBuilder().
-    PoolName("prod-pool").
-    OwnerID("worker-1").
-    MaxIdle(10).
-    StateStore(store).
-    ConnectionConfig(opensandbox.ConnectionConfig{
-        Domain: "api.opensandbox.io",
-    }).
-    CreationSpec(opensandbox.PoolCreationSpec{
-        Image: "ubuntu:22.04",
-    }).
-    PrimaryLockTTL(60 * time.Second).
-    Build()
-```
-
-::: info Pool Lifecycle Semantics
-- `Acquire()` is only allowed when pool state is `RUNNING`.
-- In `DRAINING` / `STOPPED`, `Acquire()` returns `*PoolNotRunningError`.
-- `MaxIdle` is the target/cap for ready idle sandboxes. It is not a global limit on borrowed sandboxes or sandboxes created by `DirectCreate`.
-- `OwnerID` is the lock owner identity (node/process id), not the pool identifier. If omitted, SDK auto-generates a default.
-- Use `WarmupSandboxPreparer(...)` if you need to prepare a sandbox after warmup readiness succeeds and before it is put into the idle pool.
-:::
-
-::: tip Distributed Deployment
-- `InMemoryPoolStateStore` is for single-process development and tests.
-- For distributed deployment, all nodes in one logical pool must share the same Redis key prefix and `PoolName`.
-- All nodes sharing one pool must use the same creation and warmup definition. If that definition changes, use a new `PoolName` or key prefix and drain the old pool.
-- `Resize(ctx, maxIdle)` can be called from any node. The call returns after the target is stored in the shared state store; the current primary applies replenish or shrink work during periodic reconcile.
-- Use `Resize(ctx, 0)` and wait for `Snapshot().IdleCount == 0` to drain a distributed idle buffer. `ReleaseAllIdle()` is only a best-effort cleanup pass in distributed mode.
-- `ReleaseAllIdle(ctx)` preserves fire-and-forget kill scheduling. Call
-  `ReleaseAllIdleParallel(ctx, maxWorkers)` on `*DefaultSandboxPool` for bounded
-  parallel cleanup that waits for every drained ID to receive a kill attempt.
-  `maxWorkers` must be positive; the method is not part of the `SandboxPool` interface.
-- Configure `PrimaryLockTTL` greater than `WarmupReadyTimeout` plus expected warmup preparer time.
-:::
+Go uses `ReconcileInterval` and `WarmupConcurrency`; it does not expose the
+Python/JVM/JavaScript create-QPS, initial-delay, or post-prepare-check settings.
+See [Client Pool](/guides/client-pool) for defaults, examples, and cleanup.
+Go does not currently emit built-in pool warmup traces or expose stable remote
+diagnostics; use [CLI or HTTP diagnostics](/guides/diagnostics).
 
 ## Lifecycle Hooks
 
@@ -438,6 +325,14 @@ if err != nil {
 
 fmt.Println(sandbox.Origin()) // "template"
 ```
+
+## Snapshots and metadata
+
+`Sandbox.CreateSnapshot` and `SandboxManager.CreateSnapshot` start snapshot
+creation. Use manager `GetSnapshot`, `ListSnapshots`, and `DeleteSnapshot` to
+manage snapshots, then pass `SnapshotID` to `SandboxCreateOptions` to restore.
+Poll snapshot status before restore. Use `Sandbox.PatchMetadata` or
+`SandboxManager.PatchSandboxMetadata` to add/replace keys; nil values remove keys.
 
 ## API Reference
 
