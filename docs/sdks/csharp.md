@@ -23,7 +23,8 @@ Install-Package Alibaba.OpenSandbox
 
 ## Quick Start
 
-The following example shows how to create a sandbox and execute a shell command.
+Run this example in a .NET 8+ console project with implicit usings enabled. It
+creates a sandbox, runs a shell command, and releases remote and local resources.
 
 ::: tip
 Before running this example, ensure the OpenSandbox service is running. See the [Getting Started](/getting-started/) guide for startup instructions.
@@ -104,6 +105,11 @@ The Server validates `TimeoutSeconds`; `PreStart` accepts 1–10800 seconds, whi
 
 ## Usage Examples
 
+The snippets below use `config` and a live `sandbox` from the quick start. Run
+them before its cleanup block, with `using OpenSandbox.Models;` at the top of the
+file. Creation examples are alternatives. `await using` releases local clients;
+call `KillAsync()` to terminate sandboxes that are no longer needed.
+
 ### 1. Lifecycle Management
 
 Manage the sandbox lifecycle, including renewal, pausing, and resuming.
@@ -115,20 +121,25 @@ Console.WriteLine($"Created: {info.CreatedAt}");
 Console.WriteLine($"Expires: {info.ExpiresAt}"); // null when manual cleanup mode is used
 
 await sandbox.PauseAsync();
-```
 
-Pause returns after the request is accepted. Poll sandbox info until the state is
-`Paused` before resuming; also handle `Failed` and set a polling deadline. Runtime
-behavior is described in [Pause and Resume](/guides/pause-resume). Then resume:
+using var pauseBudget = new CancellationTokenSource(TimeSpan.FromMinutes(2));
+while (true)
+{
+    var current = await sandbox.GetInfoAsync(pauseBudget.Token);
+    if (current.Status.State == SandboxStates.Paused) break;
+    if (current.Status.State == "Failed")
+        throw new InvalidOperationException(current.Status.Message);
+    await Task.Delay(1000, pauseBudget.Token);
+}
 
-```csharp
-
-// Resume returns a fresh, connected Sandbox instance.
-var resumed = await sandbox.ResumeAsync();
+// Resume returns a fresh local handle.
+await using var resumed = await sandbox.ResumeAsync();
 
 // Renew: expiresAt = now + timeoutSeconds
 await resumed.RenewAsync(30 * 60);
 ```
+
+Pause is asynchronous and runtime-dependent. See [Pause and Resume](/guides/pause-resume).
 
 Create a non-expiring sandbox by setting `ManualCleanup = true`:
 
@@ -142,7 +153,8 @@ var manual = await Sandbox.CreateAsync(new SandboxCreateOptions
 ```
 
 ::: info
-Unlike the Python, JavaScript, and Kotlin SDKs, the C# SDK uses an explicit `ManualCleanup` flag instead of `TimeoutSeconds = null`. This is intentional: `int?` in the current options model cannot reliably distinguish "unset, use the default TTL" from "explicitly request manual cleanup" without making the default creation path ambiguous.
+`TimeoutSeconds = null` uses the default TTL. Set `ManualCleanup = true` to disable
+automatic expiration.
 :::
 
 ### Connect to an Existing Sandbox
@@ -150,7 +162,7 @@ Unlike the Python, JavaScript, and Kotlin SDKs, the C# SDK uses an explicit `Man
 Use `ConnectAsync` when you already have a sandbox ID and need a new SDK instance bound to it.
 
 ```csharp
-var connected = await Sandbox.ConnectAsync(new SandboxConnectOptions
+await using var connected = await Sandbox.ConnectAsync(new SandboxConnectOptions
 {
     SandboxId = "existing-sandbox-id",
     ConnectionConfig = config
@@ -166,15 +178,25 @@ to the application's health endpoint and include the returned endpoint headers.
 Define custom logic to determine whether the sandbox is ready/healthy.
 
 ```csharp
-var sandbox = await Sandbox.CreateAsync(new SandboxCreateOptions
+using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(2) };
+await using var sandbox = await Sandbox.CreateAsync(new SandboxCreateOptions
 {
     ConnectionConfig = config,
     Image = "nginx:latest",
+    Entrypoint = new[] { "nginx", "-g", "daemon off;" },
     HealthCheck = async (sbx) =>
     {
-        // Example: consider the sandbox healthy when port 80 endpoint becomes available
         var ep = await sbx.GetEndpointAsync(80);
-        return !string.IsNullOrEmpty(ep.EndpointAddress);
+        using var request = new HttpRequestMessage(HttpMethod.Get, await sbx.GetEndpointUrlAsync(80));
+        foreach (var header in ep.Headers)
+            request.Headers.TryAddWithoutValidation(header.Key, header.Value);
+        try
+        {
+            using var response = await http.SendAsync(request);
+            return response.StatusCode == System.Net.HttpStatusCode.OK;
+        }
+        catch (HttpRequestException) { return false; }
+        catch (TaskCanceledException) { return false; }
     },
 });
 ```
@@ -208,23 +230,69 @@ await sandbox.Commands.RunAsync(new[] { "printf", "%s\n", "$HOME", "hello world"
 
 Native argv execution requires an updated execd. See [command execution modes](/components/execd#command-execution) for executable lookup and platform behavior.
 
-For background commands, you can poll status and incremental logs:
+#### Background commands
+
+Poll status and incremental logs. Command timeout is separate from sandbox TTL.
 
 ```csharp
 var execution = await sandbox.Commands.RunAsync(
-    "python /app/server.py",
+    "for i in 1 2 3; do echo step-$i; sleep 1; done",
     options: new RunCommandOptions
     {
         Background = true,
-        TimeoutSeconds = 120,
+        TimeoutSeconds = 30,
     });
 
-var status = await sandbox.Commands.GetCommandStatusAsync(execution.Id!);
-var logs = await sandbox.Commands.GetBackgroundCommandLogsAsync(execution.Id!, cursor: 0);
-Console.WriteLine($"running={status.Running}, cursor={logs.Cursor}");
+var commandId = execution.Id ?? throw new InvalidOperationException("No command ID returned");
+long cursor = 0;
+using var budget = new CancellationTokenSource(TimeSpan.FromSeconds(45));
+try
+{
+    while (true)
+    {
+        var status = await sandbox.Commands.GetCommandStatusAsync(commandId, budget.Token);
+        var logs = await sandbox.Commands.GetBackgroundCommandLogsAsync(commandId, cursor, budget.Token);
+        Console.Write(logs.Content);
+        cursor = logs.Cursor ?? cursor;
+        if (status.Running == false)
+        {
+            if (status.ExitCode != 0)
+                throw new InvalidOperationException($"Command failed: {status.ExitCode}, {status.Error}");
+            break;
+        }
+        await Task.Delay(500, budget.Token);
+    }
+}
+catch (OperationCanceledException) when (budget.IsCancellationRequested)
+{
+    await sandbox.Commands.InterruptAsync(commandId);
+    throw;
+}
 ```
 
-### 4. Comprehensive File Operations
+#### Persistent shell sessions
+
+A Bash session preserves shell variables and the working directory across commands.
+
+```csharp
+var sessionId = await sandbox.Commands.CreateSessionAsync(
+    new CreateSessionOptions { WorkingDirectory = "/tmp" });
+try
+{
+    await sandbox.Commands.RunInSessionAsync(sessionId, "export DEMO=hello");
+    var result = await sandbox.Commands.RunInSessionAsync(sessionId, "echo \"$DEMO\"; pwd");
+    foreach (var message in result.Logs.Stdout) Console.Write(message.Text);
+}
+finally
+{
+    await sandbox.Commands.DeleteSessionAsync(sessionId);
+}
+```
+
+For filesystem/process isolation within a sandbox, see
+[Isolation Sessions](/guides/isolation-sessions). These are separate from Bash sessions.
+
+### 4. File Operations
 
 Manage files and directories, including read, write, list/search, and delete.
 
@@ -242,6 +310,9 @@ await sandbox.Files.WriteFilesAsync(new[]
 var content = await sandbox.Files.ReadFileAsync("/tmp/demo/hello.txt");
 Console.WriteLine($"Content: {content}");
 
+var entries = await sandbox.Files.ListDirectoryAsync("/tmp/demo", depth: 1);
+foreach (var entry in entries) Console.WriteLine(entry.Path);
+
 var files = await sandbox.Files.SearchAsync(new SearchEntry { Path = "/tmp/demo", Pattern = "*.txt" });
 foreach (var file in files)
 {
@@ -251,6 +322,9 @@ foreach (var file in files)
 await sandbox.Files.DeleteFilesAsync(new[] { "/tmp/demo/hello.txt" });
 await sandbox.Files.DeleteDirectoriesAsync(new[] { "/tmp/demo" });
 ```
+
+For binary data, use `byte[]` or `Stream` in `WriteEntry.Data`, and download with
+`ReadBytesAsync()` or `ReadBytesStreamAsync()`. Read options support partial downloads.
 
 ### 5. Endpoints
 
@@ -263,6 +337,10 @@ Console.WriteLine(endpoint.EndpointAddress);
 var url = await sandbox.GetEndpointUrlAsync(44772);
 Console.WriteLine(url); // e.g., "http://localhost:44772"
 ```
+
+Forward `endpoint.Headers` on requests to the sandbox service, including any
+secure-access credentials. The health-check example above shows an HTTP request
+to an application listening on the target port.
 
 ### 6. Sandbox Management (Admin)
 
@@ -277,6 +355,7 @@ await using var manager = SandboxManager.Create(new SandboxManagerOptions
 var list = await manager.ListSandboxInfosAsync(new SandboxFilter
 {
     States = new[] { SandboxStates.Running },
+    Page = 1, // First page only; increase for subsequent pages.
     PageSize = 10
 });
 
@@ -285,6 +364,11 @@ foreach (var s in list.Items)
     Console.WriteLine(s.Id);
 }
 ```
+
+### Resource metrics
+
+Read current sandbox resource usage with `await sandbox.Metrics.GetMetricsAsync()`.
+This is separate from [SDK creation telemetry](/sdks/observability#creation-metrics).
 
 ## Snapshots, templates, and metadata
 
@@ -302,6 +386,54 @@ for `Succeeded` before use. Template-backed creation requires `TimeoutSeconds`
 and inherits workload configuration from the published template.
 Metadata patch values add/replace keys; `null` deletes a key.
 See the [lifecycle contract](/api/#1-sandbox-lifecycle-yml) for backend constraints.
+
+Snapshot support depends on the runtime and server configuration. Renew the source
+sandbox first if its remaining TTL may expire during snapshot creation. This example
+waits up to 15 minutes and retains the snapshot for reuse:
+
+```csharp
+await using var manager = SandboxManager.Create(new SandboxManagerOptions { ConnectionConfig = config });
+var snapshot = await sandbox.CreateSnapshotAsync("demo");
+Console.WriteLine($"Snapshot: {snapshot.Id}");
+using var budget = new CancellationTokenSource(TimeSpan.FromMinutes(15));
+while (true)
+{
+    snapshot = await manager.GetSnapshotAsync(snapshot.Id, budget.Token);
+    if (snapshot.Status.State == "Ready") break;
+    if (snapshot.Status.State == "Failed")
+        throw new InvalidOperationException(snapshot.Status.Message);
+    await Task.Delay(2000, budget.Token);
+}
+await using var restored = await Sandbox.CreateAsync(new SandboxCreateOptions
+{
+    SnapshotId = snapshot.Id,
+    ConnectionConfig = config,
+});
+try { Console.WriteLine(restored.Id); }
+finally { await restored.KillAsync(); }
+// When no longer needed: await manager.DeleteSnapshotAsync(snapshot.Id);
+```
+
+Use an existing template after its build reaches `Succeeded`:
+
+```csharp
+await using var templated = await Sandbox.CreateFromTemplateAsync(new SandboxCreateFromTemplateOptions
+{
+    TemplateId = "your-published-template-id",
+    TimeoutSeconds = 600,
+    ConnectionConfig = config,
+});
+```
+
+Add/replace a metadata key and remove another:
+
+```csharp
+await sandbox.PatchMetadataAsync(new Dictionary<string, string?>
+{
+    ["project"] = "demo",
+    ["obsolete-key"] = null,
+});
+```
 
 ## Configuration
 
@@ -353,6 +485,7 @@ The SDK uses `Microsoft.Extensions.Logging` abstractions. `SdkDiagnosticsOptions
 configures local logging; it does not retrieve remote sandbox diagnostic logs or
 events. Use the [CLI or HTTP API](/api/#diagnostics) for those. Client Pool and
 built-in pool warmup tracing are not currently available in C#.
+Install `Microsoft.Extensions.Logging.Console` to use `AddConsole()` below.
 
 ```csharp
 using Microsoft.Extensions.Logging;
@@ -497,7 +630,6 @@ await sandbox.CreateCredentialVaultAsync(
             Match = new CredentialMatch
             {
                 Schemes = new[] { "https" },
-                Ports = new[] { 443 },
                 Hosts = new[] { "api.example.com" },
                 Paths = new[] { "/v1/*" }
             },
@@ -562,9 +694,9 @@ catch (SandboxException ex)
 
 - .NET Standard 2.0 (for maximum compatibility with .NET Framework 4.6.1+, .NET Core 2.0+, Mono, Xamarin, etc.)
 - .NET Standard 2.1
-- .NET 6.0 (LTS)
+- .NET 6.0
 - .NET 7.0
-- .NET 8.0 (LTS)
+- .NET 8.0
 - .NET 9.0
 - .NET 10.0
 

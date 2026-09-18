@@ -29,7 +29,8 @@ yarn add @alibaba-group/opensandbox
 
 ## Quick Start
 
-The following example shows how to create a sandbox and execute a shell command.
+This example uses Node.js 20+ with ES modules and top-level `await`. It creates a
+sandbox, runs a shell command, and releases both remote and local resources.
 
 ::: tip
 Before running this example, ensure the OpenSandbox service is running. See the [Getting Started](/getting-started/) guide for startup instructions.
@@ -116,6 +117,11 @@ not through the JavaScript SDK.
 
 ## Usage Examples
 
+The snippets below use `config` and a live `sandbox` from the quick start. Run
+them before its cleanup block. Examples use TypeScript with top-level `await` in
+Node.js; omit type annotations in JavaScript. Creation examples are alternatives.
+Terminate each sandbox with `kill()` and release its client with `close()` when done.
+
 ### 1. Lifecycle Management
 
 Manage the sandbox lifecycle, including renewal, pausing, and resuming.
@@ -127,20 +133,28 @@ console.log("Created:", info.createdAt);
 console.log("Expires:", info.expiresAt); // null when manual cleanup mode is used
 
 await sandbox.pause();
-```
 
-Pause returns after the request is accepted. Poll sandbox info until the state is
-`Paused` before resuming; also handle `Failed` and set a polling deadline. Runtime
-behavior is described in [Pause and Resume](/guides/pause-resume). Then resume:
+const deadline = Date.now() + 120_000;
+while (true) {
+  if (Date.now() >= deadline) throw new Error("Sandbox did not pause within 120 seconds");
+  const current = await sandbox.getInfo();
+  if (current.status.state === "Paused") break;
+  if (current.status.state === "Failed") throw new Error(current.status.message);
+  await new Promise((resolve) => setTimeout(resolve, 1000));
+}
 
-```ts
-
-// Resume returns a fresh, connected Sandbox instance.
+// Resume returns a fresh handle; close both handles when done.
 const resumed = await sandbox.resume();
-
-// Renew: expiresAt = now + timeoutSeconds
-await resumed.renew(30 * 60);
+try {
+  await resumed.renew(30 * 60); // expiresAt = now + timeoutSeconds
+} finally {
+  await resumed.close();
+}
 ```
+
+Pause is asynchronous and runtime-dependent. See [Pause and Resume](/guides/pause-resume).
+Attach to an already running sandbox with
+`Sandbox.connect({ sandboxId, connectionConfig: config })`.
 
 Create a non-expiring sandbox by passing `timeoutSeconds: null`:
 
@@ -164,10 +178,20 @@ Define custom logic to determine whether the sandbox is ready/healthy. This over
 const sandbox = await Sandbox.create({
   connectionConfig: config,
   image: "nginx:latest",
+  entrypoint: ["nginx", "-g", "daemon off;"],
   healthCheck: async (sbx) => {
-    // Example: consider the sandbox healthy when port 80 endpoint becomes available
     const ep = await sbx.getEndpoint(80);
-    return !!ep.endpoint;
+    const url = await sbx.getEndpointUrl(80);
+    try {
+      const response = await fetch(url, {
+        headers: ep.headers,
+        signal: AbortSignal.timeout(2000),
+      });
+      await response.body?.cancel();
+      return response.status === 200;
+    } catch {
+      return false;
+    }
   },
 });
 ```
@@ -202,7 +226,54 @@ await sandbox.commands.run(["printf", "%s\n", "$HOME", "hello world"]);
 
 Native argv execution requires an updated execd. See [command execution modes](/components/execd#command-execution) for executable lookup and platform behavior.
 
-### 4. Comprehensive File Operations
+#### Background commands
+
+Poll status and incremental logs. The command timeout is separate from sandbox TTL.
+
+```ts
+const execution = await sandbox.commands.run(
+  'for i in 1 2 3; do echo "step $i"; sleep 1; done',
+  { background: true, timeoutSeconds: 30 },
+);
+if (!execution.id) throw new Error("No command ID returned");
+let cursor = 0;
+const deadline = Date.now() + 45_000;
+while (true) {
+  if (Date.now() >= deadline) {
+    await sandbox.commands.interrupt(execution.id);
+    throw new Error("Command did not finish");
+  }
+  const status = await sandbox.commands.getCommandStatus(execution.id);
+  const logs = await sandbox.commands.getBackgroundCommandLogs(execution.id, cursor);
+  process.stdout.write(logs.content);
+  cursor = logs.cursor ?? cursor;
+  if (status.running === false) {
+    if (status.exitCode !== 0) throw new Error(`Command failed: ${status.exitCode}, ${status.error}`);
+    break;
+  }
+  await new Promise((resolve) => setTimeout(resolve, 500));
+}
+```
+
+#### Persistent shell sessions
+
+A Bash session preserves shell variables and the working directory across commands.
+
+```ts
+const sessionId = await sandbox.commands.createSession({ workingDirectory: "/tmp" });
+try {
+  await sandbox.commands.runInSession(sessionId, "export DEMO=hello");
+  const result = await sandbox.commands.runInSession(sessionId, 'echo "$DEMO"; pwd');
+  console.log(result.logs.stdout.map((message) => message.text).join(""));
+} finally {
+  await sandbox.commands.deleteSession(sessionId);
+}
+```
+
+For filesystem/process isolation within a sandbox, see
+[Isolation Sessions](/guides/isolation-sessions). These are separate from Bash sessions.
+
+### 4. File Operations
 
 Manage files and directories, including read, write, list/search, and delete.
 
@@ -216,6 +287,9 @@ await sandbox.files.writeFiles([
 const content = await sandbox.files.readFile("/tmp/demo/hello.txt");
 console.log("Content:", content);
 
+const entries = await sandbox.files.listDirectory({ path: "/tmp/demo", depth: 1 });
+console.log(entries.map((entry) => entry.path));
+
 const files = await sandbox.files.search({
   path: "/tmp/demo",
   pattern: "*.txt",
@@ -225,14 +299,22 @@ console.log(files.map((f) => f.path));
 await sandbox.files.deleteDirectories(["/tmp/demo"]);
 ```
 
+For binary files, pass a `Uint8Array` to `writeFiles()` and read with `readBytes()`
+or `readBytesStream()`. Read options support `offset` and `limit` for partial downloads.
+
 ### 5. Endpoints
 
 `getEndpoint()` returns an endpoint **without a scheme** (for example `"localhost:44772"`). Use `getEndpointUrl()` if you want a ready-to-use absolute URL (for example `"http://localhost:44772"`).
 
 ```ts
-const { endpoint } = await sandbox.getEndpoint(44772);
+const endpoint = await sandbox.getEndpoint(44772);
 const url = await sandbox.getEndpointUrl(44772);
+console.log(url, Object.keys(endpoint.headers ?? {}));
 ```
+
+When making an HTTP request to a sandbox service, forward `endpoint.headers`,
+including credentials required by secure access. The health-check example above
+shows a request to an application that is actually listening on the target port.
 
 ### 6. Volume Mounts
 
@@ -267,13 +349,21 @@ Use `SandboxManager` for administrative tasks and finding existing sandboxes.
 import { SandboxManager } from "@alibaba-group/opensandbox";
 
 const manager = SandboxManager.create({ connectionConfig: config });
-const list = await manager.listSandboxInfos({
-  states: ["Running"],
-  pageSize: 10,
-});
-console.log(list.items.map((s) => s.id));
-await manager.close();
+try {
+  // First page only; increase page for subsequent pages.
+  const list = await manager.listSandboxInfos({
+    states: ["Running"], pageSize: 10, page: 1,
+  });
+  console.log(list.items.map((s) => s.id));
+} finally {
+  await manager.close();
+}
 ```
+
+### Resource metrics
+
+Read current sandbox resource usage with `await sandbox.getMetrics()`. This is
+separate from [SDK creation telemetry](/sdks/observability#creation-metrics).
 
 ## Snapshots, templates, and metadata
 
@@ -291,6 +381,53 @@ for `status.phase === "Succeeded"` before use. Template-backed creation requires
 a TTL and inherits workload configuration from the published template.
 Metadata patch values add/replace keys; `null` deletes a key.
 See the [lifecycle contract](/api/#1-sandbox-lifecycle-yml) for backend constraints.
+
+Snapshot support depends on the runtime and server configuration. Renew the source
+sandbox first if its remaining TTL may expire during snapshot creation. Wait for
+`Ready` before restoring; the snapshot remains available after this example:
+
+```ts
+import { SandboxManager } from "@alibaba-group/opensandbox";
+
+const manager = SandboxManager.create({ connectionConfig: config });
+try {
+  let snapshot = await manager.createSnapshot(sandbox.id, { name: "demo" });
+  console.log("Snapshot:", snapshot.id);
+  const deadline = Date.now() + 900_000;
+  while (true) {
+    if (Date.now() >= deadline) throw new Error(`Snapshot ${snapshot.id} is not ready`);
+    snapshot = await manager.getSnapshot(snapshot.id);
+    if (snapshot.status.state === "Ready") break;
+    if (snapshot.status.state === "Failed") throw new Error(snapshot.status.message);
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+  }
+  const restored = await Sandbox.create({ snapshotId: snapshot.id, connectionConfig: config });
+  try {
+    console.log(restored.id);
+  } finally {
+    try { await restored.kill(); } finally { await restored.close(); }
+  }
+  // When no longer needed: await manager.deleteSnapshot(snapshot.id);
+} finally {
+  await manager.close();
+}
+```
+
+Use an existing template after its build reaches `Succeeded`:
+
+```ts
+const templated = await Sandbox.createFromTemplate({
+  templateId: "your-published-template-id",
+  timeoutSeconds: 600,
+  connectionConfig: config,
+});
+```
+
+Add/replace a metadata key and remove another:
+
+```ts
+await sandbox.patchMetadata({ project: "demo", "obsolete-key": null });
+```
 
 ## Configuration
 

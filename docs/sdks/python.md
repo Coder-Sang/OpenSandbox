@@ -5,7 +5,7 @@ description: Python SDK for creating, managing, and interacting with secure Open
 
 # OpenSandbox SDK for Python
 
-A Python SDK for low-level interaction with OpenSandbox. It provides capabilities to create, manage, and interact with secure sandbox environments, including executing shell commands, managing files, and monitoring resources.
+Create sandboxes, run commands, and manage files with async or synchronous Python APIs.
 
 ## Installation
 
@@ -146,11 +146,18 @@ The Server validates `timeout_seconds`; `pre_start` accepts 1–10800 seconds, w
 
 ## Usage Examples
 
+The snippets below use `config` and a live `sandbox` from the quick start. Run
+async snippets inside an async function, before its cleanup block. Creation
+examples are alternatives; call `destroy()` when each sandbox is no longer needed.
+For the synchronous API, use `SandboxSync` and `SandboxManagerSync`, and omit
+`await` / `async` from SDK calls and context managers.
+
 ### 1. Lifecycle Management
 
 Manage the sandbox lifecycle, including renewal, pausing, and resuming.
 
 ```python
+import time
 from datetime import timedelta
 
 # Renew the sandbox
@@ -159,25 +166,32 @@ await sandbox.renew(timedelta(minutes=30))
 
 # Request pause (runtime-dependent)
 await sandbox.pause()
-```
 
-Pause returns after the request is accepted. Poll sandbox info until the state is
-`Paused` before resuming; also handle `Failed` and set a polling deadline. Runtime
-behavior is described in [Pause and Resume](/guides/pause-resume). Then resume:
+deadline = time.monotonic() + 120
+while True:
+    if time.monotonic() >= deadline:
+        raise TimeoutError("Sandbox did not pause within 120 seconds")
+    info = await sandbox.get_info()
+    if info.status.state == "Paused":
+        break
+    if info.status.state == "Failed":
+        raise RuntimeError(info.status.message)
+    await asyncio.sleep(1)
 
-```python
-
-# Resume execution
-sandbox = await Sandbox.resume(
-    sandbox_id=sandbox.id,
-    connection_config=config,
-)
+# Resume creates a new local handle.
+resumed = await Sandbox.resume(sandbox_id=sandbox.id, connection_config=config)
+await sandbox.close()
+sandbox = resumed
 
 # Get current status
 info = await sandbox.get_info()
 print(f"State: {info.status.state}")
 print(f"Expires: {info.expires_at}")  # None when no automatic expiration is configured
 ```
+
+Pause is asynchronous and runtime-dependent. See [Pause and Resume](/guides/pause-resume).
+Use `await Sandbox.connect(sandbox_id, connection_config=config)` to attach to an
+already running sandbox without resuming it.
 
 Create a non-expiring sandbox by explicitly passing `timeout=None`. Omitting
 `timeout` uses the default 10-minute TTL:
@@ -196,8 +210,9 @@ Resolving an endpoint confirms that a route exists; it does not confirm that the
 application on that port is healthy. For service readiness, make a bounded request
 to the application's health endpoint and include the returned endpoint headers.
 
-Readiness checks during creation, connection, and resume fail immediately when the
-health endpoint returns HTTP 401 or 403. The SDK raises `SandboxApiException`
+With the built-in health probe, readiness checks during creation, connection, and
+resume fail immediately when the health endpoint returns HTTP 401 or 403.
+The SDK raises `SandboxApiException`
 with the original status, error details, and request ID instead of waiting for
 `SandboxReadyTimeoutException`. Check the endpoint credentials or permissions
 before retrying. Transient health failures retain their existing polling behavior;
@@ -206,21 +221,23 @@ before retrying. Transient health failures retain their existing polling behavio
 Define custom logic to determine if the sandbox is healthy. This overrides the default ping check. Synchronous checks must set their own timeouts because the SDK cannot interrupt them; asynchronous checks must not block the event loop or suppress cancellation.
 
 ```python
-async def custom_health_check(sbx: Sandbox) -> bool:
-    try:
-        # 1. Get the external mapped address for port 80
-        endpoint = await sbx.get_endpoint(80)
+import httpx
 
-        # 2. Perform your connection check (e.g. HTTP request, Socket connect)
-        # return await check_connection(endpoint.endpoint)
-        return True
-    except Exception:
+async def custom_health_check(sbx: Sandbox) -> bool:
+    endpoint = await sbx.get_endpoint(80)
+    url = f"{sbx.connection_config.protocol}://{endpoint.endpoint}/"
+    try:
+        async with httpx.AsyncClient(timeout=2) as client:
+            response = await client.get(url, headers=endpoint.headers)
+        return response.status_code == 200
+    except httpx.RequestError:
         return False
 
 sandbox = await Sandbox.create(
     "nginx:latest",
+    entrypoint=["nginx", "-g", "daemon off;"],
     connection_config=config,
-    health_check=custom_health_check  # Custom check: Wait for port 80 to be accessible
+    health_check=custom_health_check,
 )
 ```
 
@@ -264,12 +281,63 @@ result = await sandbox.commands.run(["printf", "%s\n", "$HOME", "hello world"])
 
 Native argv execution requires an updated execd. See [command execution modes](/components/execd#command-execution) for executable lookup and platform behavior.
 
-### 4. Comprehensive File Operations
+#### Background commands
+
+Start a bounded command, read incremental logs, and check its exit status.
+Command timeout and sandbox TTL are separate settings.
+
+```python
+import time
+from datetime import timedelta
+from opensandbox.models.execd import RunCommandOpts
+
+execution = await sandbox.commands.run(
+    'for i in 1 2 3; do echo "step $i"; sleep 1; done',
+    opts=RunCommandOpts(background=True, timeout=timedelta(seconds=30)),
+)
+if not execution.id:
+    raise RuntimeError("No command ID returned")
+cursor = 0
+deadline = time.monotonic() + 45
+while True:
+    if time.monotonic() >= deadline:
+        await sandbox.commands.interrupt(execution.id)
+        raise TimeoutError("Command did not finish")
+    status = await sandbox.commands.get_command_status(execution.id)
+    logs = await sandbox.commands.get_background_command_logs(execution.id, cursor)
+    print(logs.content, end="")
+    cursor = logs.cursor if logs.cursor is not None else cursor
+    if status.running is False:
+        if status.exit_code != 0:
+            raise RuntimeError(f"Command failed: {status.exit_code}, {status.error}")
+        break
+    await asyncio.sleep(0.5)
+```
+
+#### Persistent shell sessions
+
+Use a Bash session to preserve shell variables and the working directory across
+commands. Delete the session when finished.
+
+```python
+session_id = await sandbox.commands.create_session(working_directory="/tmp")
+try:
+    await sandbox.commands.run_in_session(session_id, "export DEMO=hello")
+    result = await sandbox.commands.run_in_session(session_id, 'echo "$DEMO"; pwd')
+    print("".join(message.text for message in result.logs.stdout))
+finally:
+    await sandbox.commands.delete_session(session_id)
+```
+
+For commands that need filesystem/process isolation within a sandbox, see
+[Isolation Sessions](/guides/isolation-sessions). These are separate from Bash sessions.
+
+### 4. File Operations
 
 Manage files and directories, including read, write, list, delete, and search.
 
 ```python
-from opensandbox.models.filesystem import WriteEntry, SearchEntry
+from opensandbox.models.filesystem import DirectoryListEntry, WriteEntry, SearchEntry
 
 # 1. Write file
 await sandbox.files.write_files([
@@ -284,7 +352,11 @@ await sandbox.files.write_files([
 content = await sandbox.files.read_file("/tmp/hello.txt")
 print(f"Content: {content}")
 
-# 3. List/Search files
+# List immediate children; search filters by a filename pattern.
+entries = await sandbox.files.list_directory(DirectoryListEntry(path="/tmp", depth=1))
+print([entry.path for entry in entries])
+
+# 3. Search files
 files = await sandbox.files.search(
     SearchEntry(
         path="/tmp",
@@ -298,6 +370,10 @@ for f in files:
 await sandbox.files.delete_files(["/tmp/hello.txt"])
 ```
 
+For binary data, pass `bytes` to `WriteEntry.data` and use `read_bytes()`;
+use `read_bytes_stream()` for large downloads. `read_file()` and `read_bytes()`
+also accept `offset` and `limit` for partial reads.
+
 ### 5. Sandbox Management (Admin)
 
 Use `SandboxManager` for administrative tasks and finding existing sandboxes.
@@ -309,7 +385,7 @@ from opensandbox.models.sandboxes import SandboxFilter
 # Create manager using async context manager
 async with await SandboxManager.create(connection_config=config) as manager:
 
-    # List running sandboxes
+    # First page only; increase page to retrieve subsequent pages.
     sandboxes = await manager.list_sandbox_infos(
         SandboxFilter(
             states=["Running"],
@@ -320,6 +396,11 @@ async with await SandboxManager.create(connection_config=config) as manager:
     for info in sandboxes.sandbox_infos:
         print(f"Found sandbox: {info.id}")
 ```
+
+### Resource metrics
+
+Read current sandbox resource usage with `await sandbox.get_metrics()`. This is
+separate from [SDK creation telemetry](/sdks/observability#creation-metrics).
 
 ## Snapshots, templates, and metadata
 
@@ -338,6 +419,53 @@ Templates must reach `Succeeded`; template-backed creation requires a TTL and
 inherits environment, resources, volumes, and lifecycle hooks from the template.
 Metadata patch values add/replace keys; `None` deletes a key.
 See the [lifecycle contract](/api/#1-sandbox-lifecycle-yml) for backend constraints.
+
+Snapshot support depends on the runtime and server configuration. Renew the source
+sandbox first if its remaining TTL may expire during snapshot creation. This example
+waits up to 15 minutes, restores a new sandbox, and retains the snapshot for reuse:
+
+```python
+import time
+from opensandbox.manager import SandboxManager
+
+async with await SandboxManager.create(connection_config=config) as manager:
+    snapshot = await sandbox.create_snapshot(name="demo")
+    print("Snapshot:", snapshot.id)
+    deadline = time.monotonic() + 900
+    while True:
+        if time.monotonic() >= deadline:
+            raise TimeoutError(f"Snapshot {snapshot.id} is not ready")
+        snapshot = await manager.get_snapshot(snapshot.id)
+        if snapshot.status.state == "Ready":
+            break
+        if snapshot.status.state == "Failed":
+            raise RuntimeError(snapshot.status.message)
+        await asyncio.sleep(2)
+    restored = await Sandbox.create(snapshot_id=snapshot.id, connection_config=config)
+    try:
+        print(restored.id)
+    finally:
+        await restored.destroy()
+    # When no longer needed: await manager.delete_snapshot(snapshot.id)
+```
+
+Create from an existing template after its build reaches `Succeeded`:
+
+```python
+from datetime import timedelta
+
+templated = await Sandbox.create_from_template(
+    "your-published-template-id",
+    timeout=timedelta(minutes=10),
+    connection_config=config,
+)
+```
+
+Add, replace, or remove metadata on a running sandbox:
+
+```python
+await sandbox.patch_metadata({"project": "demo", "obsolete-key": None})
+```
 
 ## Configuration
 
@@ -385,7 +513,7 @@ config = ConnectionConfig(
         limits=httpx.Limits(
             max_connections=100,
             max_keepalive_connections=50,
-        keepalive_expiry=30.0,
+            keepalive_expiry=30.0,
         )
     ),
 )
@@ -515,6 +643,8 @@ Patch uses merge semantics:
 - The current `defaultAction` is preserved.
 
 ```python
+from opensandbox.models.sandboxes import NetworkRule
+
 policy = await sandbox.get_egress_policy()
 
 await sandbox.patch_egress_rules(

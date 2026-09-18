@@ -5,7 +5,8 @@ description: Kotlin SDK for creating, managing, and interacting with secure Open
 
 # OpenSandbox SDK for Kotlin/Java
 
-A Kotlin SDK for low-level interaction with OpenSandbox. It provides capabilities to create, manage, and interact with secure sandbox environments, including executing shell commands, managing files, and monitoring resources.
+Create sandboxes, run commands, and manage files from Java or Kotlin. Both languages
+use the same JVM SDK and synchronous APIs.
 
 ## Installation
 
@@ -29,7 +30,8 @@ dependencies {
 
 ## Quick Start
 
-The following example shows how to create a sandbox and execute a shell command.
+The Java examples use Java 11+. The quick start creates a sandbox, runs a shell
+command, and releases both remote and local resources.
 
 ::: tip
 Before running this example, ensure the OpenSandbox service is running. See the [Getting Started](/getting-started/) guide for startup instructions.
@@ -73,6 +75,31 @@ public class QuickStart {
 }
 ```
 
+### Kotlin
+
+```kotlin
+import com.alibaba.opensandbox.sandbox.Sandbox
+import com.alibaba.opensandbox.sandbox.config.ConnectionConfig
+
+fun main() {
+    val config = ConnectionConfig.builder()
+        .domain("api.opensandbox.io")
+        .apiKey("your-api-key")
+        .build()
+    Sandbox.builder().image("ubuntu").connectionConfig(config).build().use { sandbox ->
+        try {
+            val result = sandbox.commands().run("echo 'Hello Sandbox!'")
+            result.logs.stdout.forEach { print(it.text) }
+        } finally {
+            sandbox.kill()
+        }
+    }
+}
+```
+
+`use` / try-with-resources releases the local client. `kill()` terminates the
+remote sandbox. The remaining examples use Java; Kotlin calls the same methods.
+
 ## Lifecycle Hooks
 
 Configure lifecycle hooks on `Sandbox.Builder`. `preStart` completes before the entrypoint starts, while `periodic` hooks run on their schedules after startup.
@@ -106,6 +133,22 @@ The Server validates `timeoutSeconds`; `preStart` accepts 1–10800 seconds, whi
 
 ## Usage Examples
 
+Use a live `sandbox` and `config` from the quick start, before cleanup. Java
+snippets belong inside a method that handles or declares checked exceptions;
+place imports at the top of the file. Common imports are:
+
+```java
+import java.time.Duration;
+import java.util.*;
+import com.alibaba.opensandbox.sandbox.SandboxManager;
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.*;
+import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.*;
+import com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.*;
+```
+
+Creation examples are alternatives. Close each client and kill sandboxes that
+are no longer needed.
+
 ### 1. Lifecycle Management
 
 Manage the sandbox lifecycle, including renewal, pausing, and resuming.
@@ -117,27 +160,30 @@ sandbox.renew(Duration.ofMinutes(30));
 
 // Request pause (runtime-dependent)
 sandbox.pause();
-```
 
-Pause returns after the request is accepted. Poll sandbox info until the state is
-`Paused` before resuming; also handle `Failed` and set a polling deadline. Runtime
-behavior is described in [Pause and Resume](/guides/pause-resume). Then resume:
+long deadline = System.nanoTime() + Duration.ofMinutes(2).toNanos();
+while (true) {
+    if (System.nanoTime() >= deadline) throw new IllegalStateException("Pause timed out");
+    SandboxInfo info = sandbox.getInfo();
+    if (SandboxState.PAUSED.equals(info.getStatus().getState())) break;
+    if (SandboxState.FAILED.equals(info.getStatus().getState())) {
+        throw new IllegalStateException(info.getStatus().getMessage());
+    }
+    Thread.sleep(1000);
+}
 
-```java
-
-// Resume execution
-// There is no Sandbox.resume() instance method: resuming re-attaches to an
-// existing sandbox by id and returns a new, connected handle.
-Sandbox resumed = Sandbox.resumer()
+// Resume returns a new local handle.
+try (Sandbox resumed = Sandbox.resumer()
     .sandboxId(sandbox.getId())
     .connectionConfig(config)
-    .resume();
-
-// Get current status
-SandboxInfo info = resumed.getInfo();
-System.out.println("State: " + info.getStatus().getState());
-System.out.println("Expires: " + info.getExpiresAt()); // null when manual cleanup mode is used
+    .resume()) {
+    System.out.println("State: " + resumed.getInfo().getStatus().getState());
+}
 ```
+
+Pause is asynchronous and runtime-dependent. See [Pause and Resume](/guides/pause-resume).
+To attach to a running sandbox, use
+`Sandbox.connector().sandboxId(id).connectionConfig(config).connect()`.
 
 Create a non-expiring sandbox by passing `timeout(null)`:
 
@@ -158,18 +204,28 @@ to the application's health endpoint and include the returned endpoint headers.
 Define custom logic to determine if the sandbox is healthy. This overrides the default ping check. Set timeouts within custom checks; the SDK cannot interrupt them.
 
 ```java
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+
+// This HTTP probe uses Java 11+.
+HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(2)).build();
 Sandbox sandbox = Sandbox.builder()
     .connectionConfig(config)
     .image("nginx:latest")
-    // Custom check: Wait for port 80 to be accessible
+    .entrypoint(List.of("nginx", "-g", "daemon off;"))
     .healthCheck(sbx -> {
         try {
-            // 1. Get the external mapped address for port 80
             SandboxEndpoint endpoint = sbx.getEndpoint(80);
-
-            // 2. Perform your connection check (e.g. HTTP request, Socket connect)
-            // return checkConnection(endpoint.getEndpoint());
-            return true;
+            HttpRequest.Builder request = HttpRequest.newBuilder()
+                .uri(URI.create(config.getProtocol() + "://" + endpoint.getEndpoint() + "/"))
+                .timeout(Duration.ofSeconds(2)).GET();
+            endpoint.getHeaders().forEach(request::header);
+            return http.send(request.build(), HttpResponse.BodyHandlers.discarding()).statusCode() == 200;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("Health check interrupted", e);
         } catch (Exception e) {
             return false;
         }
@@ -211,7 +267,57 @@ sandbox.commands().run(RunCommandRequest.builder()
 
 Native argv execution requires an updated execd. See [command execution modes](/components/execd#command-execution) for executable lookup and platform behavior.
 
-### 4. Comprehensive File Operations
+#### Background commands
+
+Poll incremental logs and status. Command timeout is separate from sandbox TTL.
+
+```java
+Execution execution = sandbox.commands().run(RunCommandRequest.builder()
+    .command("for i in 1 2 3; do echo step-$i; sleep 1; done")
+    .background(true).timeout(Duration.ofSeconds(30)).build());
+String commandId = Objects.requireNonNull(execution.getId(), "No command ID returned");
+Long cursor = 0L;
+long deadline = System.nanoTime() + Duration.ofSeconds(45).toNanos();
+while (true) {
+    if (System.nanoTime() >= deadline) {
+        sandbox.commands().interrupt(commandId);
+        throw new IllegalStateException("Command did not finish");
+    }
+    CommandStatus status = sandbox.commands().getCommandStatus(commandId);
+    CommandLogs logs = sandbox.commands().getBackgroundCommandLogs(commandId, cursor);
+    System.out.print(logs.getContent());
+    if (logs.getCursor() != null) cursor = logs.getCursor();
+    if (Boolean.FALSE.equals(status.getRunning())) {
+        if (!Integer.valueOf(0).equals(status.getExitCode())) {
+            throw new IllegalStateException("Command failed: " + status.getExitCode() + ", " + status.getError());
+        }
+        break;
+    }
+    Thread.sleep(500);
+}
+```
+
+#### Persistent shell sessions
+
+A Bash session preserves shell variables and the working directory across commands.
+
+```java
+String sessionId = sandbox.commands().createSession("/tmp");
+try {
+    sandbox.commands().runInSession(sessionId, RunInSessionRequest.builder()
+        .command("export DEMO=hello").build());
+    Execution result = sandbox.commands().runInSession(sessionId, RunInSessionRequest.builder()
+        .command("echo \"$DEMO\"; pwd").build());
+    result.getLogs().getStdout().forEach(message -> System.out.print(message.getText()));
+} finally {
+    sandbox.commands().deleteSession(sessionId);
+}
+```
+
+For filesystem/process isolation within a sandbox, see
+[Isolation Sessions](/guides/isolation-sessions). These are separate from Bash sessions.
+
+### 4. File Operations
 
 Manage files and directories, including read, write, list, delete, and search.
 
@@ -229,7 +335,10 @@ sandbox.files().write(List.of(
 String content = sandbox.files().readFile("/tmp/hello.txt", "UTF-8", null);
 System.out.println("Content: " + content);
 
-// 3. List/Search files
+// List immediate children; search filters by a filename pattern.
+sandbox.files().listDirectory("/tmp").forEach(entry -> System.out.println(entry.getPath()));
+
+// 3. Search files
 List<EntryInfo> files = sandbox.files().search(
     SearchEntry.builder()
         .path("/tmp")
@@ -247,32 +356,21 @@ sandbox.files().deleteFiles(List.of("/tmp/hello.txt"));
 Use `SandboxManager` for administrative tasks and finding existing sandboxes.
 
 ```java
-SandboxManager manager = SandboxManager.builder()
+try (SandboxManager manager = SandboxManager.builder()
     .connectionConfig(config)
-    .build();
-
-import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxState;
-
-// ...
-
-// List running sandboxes
-PagedSandboxInfos sandboxes = manager.listSandboxInfos(
-    SandboxFilter.builder()
-        .states(SandboxState.RUNNING)
-        .pageSize(10)
-        .page(1)
-        .build()
-);
-
-sandboxes.getSandboxInfos().forEach(info -> {
-    System.out.println("Found sandbox: " + info.getId());
-    // Perform admin actions
-    manager.killSandbox(info.getId());
-});
-
-// Try-with-resources will automatically call manager.close()
-// manager.close();
+    .build()) {
+    // First page only; increase page for subsequent pages.
+    PagedSandboxInfos sandboxes = manager.listSandboxInfos(
+        SandboxFilter.builder().states(SandboxState.RUNNING).pageSize(10).page(1).build()
+    );
+    sandboxes.getSandboxInfos().forEach(info -> System.out.println(info.getId()));
+}
 ```
+
+### Resource metrics
+
+Read current sandbox resource usage with `sandbox.getMetrics()`. This is separate
+from [SDK creation telemetry](/sdks/observability#creation-metrics).
 
 ### 6. Client Pool and observability
 
@@ -298,6 +396,37 @@ Use `sandbox.patchMetadata` or `manager.patchSandboxMetadata` to add/replace
 metadata keys; a `null` value removes a key. Runtime support is described by the
 [lifecycle contract](/api/#1-sandbox-lifecycle-yml).
 
+Snapshot support depends on the runtime and server configuration. Renew the source
+sandbox first if its remaining TTL may expire during snapshot creation. The JVM helper
+waits for `Ready` and raises an exception on failure or timeout:
+
+```java
+try (SandboxManager manager = SandboxManager.builder().connectionConfig(config).build()) {
+    SnapshotInfo snapshot = sandbox.createSnapshot("demo");
+    System.out.println("Snapshot: " + snapshot.getId());
+    manager.waitForSnapshotReady(snapshot.getId(), Duration.ofMinutes(15));
+    try (Sandbox restored = Sandbox.builder()
+            .snapshotId(snapshot.getId()).connectionConfig(config).build()) {
+        try {
+            System.out.println(restored.getId());
+        } finally {
+            restored.kill();
+        }
+    }
+    // The snapshot is retained. When no longer needed: manager.deleteSnapshot(snapshot.getId());
+}
+```
+
+Metadata updates can include both replacement values and removals. Use a map that
+accepts null values (`Map.of` does not):
+
+```java
+Map<String, String> patch = new HashMap<>();
+patch.put("project", "demo");
+patch.put("obsolete-key", null);
+sandbox.patchMetadata(patch);
+```
+
 ## Configuration
 
 ### 1. Connection Configuration
@@ -319,6 +448,9 @@ The `ConnectionConfig` class manages API server connection settings.
 | `enableTracing` | Enable OpenTelemetry tracing for pool warmup (see [SDK Tracing](/sdks/observability#pool-warmup-tracing)) | `false` | - |
 
 ```java
+import okhttp3.ConnectionPool;
+import java.util.concurrent.TimeUnit;
+
 // 1. Basic configuration
 ConnectionConfig config = ConnectionConfig.builder()
     .apiKey("your-key")
@@ -563,7 +695,10 @@ fsb (fast-sandbox microVM) golden-image templates are managed through
 `SandboxManager`. Template builds are asynchronous: `createTemplate` returns
 with `status.phase` set to `Pending`; poll `getTemplate` until the phase
 reaches `Succeeded` or `Failed`. Only a `Succeeded` template can create
-sandboxes.
+sandboxes. These operations require a configured Fsb runtime. Replace the example
+publish URI with a location configured for your server, and use an open
+`SandboxManager` created with `SandboxManager.builder().connectionConfig(config).build()`.
+Close the manager when finished.
 
 ```java
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CreateTemplateRequest;
@@ -577,17 +712,22 @@ CreateTemplateRequest request = CreateTemplateRequest.builder()
     .publish("s3://bucket/publish")
     .resourceLimits(Map.of("cpu", "1", "memory", "512Mi", "disk", "2Gi"))
     .readiness(TemplateReadiness.builder().probe("tcp://127.0.0.1:44772").build())
-    .metadata("team", "backend")
+    .metadata(Map.of("team", "backend"))
     .build();
 
 // Start the async build (starts at TemplatePhase.PENDING)
 TemplateInfo template = manager.createTemplate(request);
 
-// Poll until the build finishes
+// Poll for up to 15 minutes; adjust for the image and runtime.
+long deadline = System.nanoTime() + Duration.ofMinutes(15).toNanos();
 while (!template.getStatus().getPhase().equals(TemplatePhase.SUCCEEDED)
     && !template.getStatus().getPhase().equals(TemplatePhase.FAILED)) {
+    if (System.nanoTime() >= deadline) throw new IllegalStateException("Template build timed out");
     Thread.sleep(2000);
     template = manager.getTemplate(template.getTemplateId());
+}
+if (TemplatePhase.FAILED.equals(template.getStatus().getPhase())) {
+    throw new IllegalStateException("Template build failed: " + template.getTemplateId());
 }
 
 // List with metadata filters (1-indexed paging)
@@ -599,8 +739,7 @@ manager.listTemplates(
         .build()
 );
 
-// Delete a template. Sandboxes already created from it are unaffected.
-manager.deleteTemplate(template.getTemplateId());
+// When no longer needed: manager.deleteTemplate(template.getTemplateId());
 ```
 
 ### Creating a Sandbox from a Template
