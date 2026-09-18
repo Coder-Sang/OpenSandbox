@@ -171,9 +171,11 @@ and honor the supplied connection config, readiness controls, and timeout.
 JavaScript and Go also accept minimum remaining TTL and skip-health-check overrides
 on each acquire. Python and Kotlin expose these as pool-level configuration.
 
-### Python, JavaScript, and Kotlin staged warmup
+### Staged warmup
 
-Python, JavaScript, and Kotlin separate creation admission from post-create work:
+Staged warmup separates creation admission from post-create work:
+
+![Staged warmup flow](../public/images/client-pool-staged-warmup.svg)
 
 1. On each reconcile tick, the leader admits at most
    `min(max_idle - idle - warming, warmup_create_qps)` creates. The lifecycle create
