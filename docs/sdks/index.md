@@ -34,9 +34,9 @@ server runtime and the execd version installed in the sandbox.
 | Egress policy and Credential Vault | Yes | Yes | Yes | Yes | Yes |
 | Isolated sessions | Yes | Yes | Yes | Yes | Yes |
 | [Client Pool](/guides/client-pool), including Redis | Yes | Yes | Yes | Yes | No |
-| [Pool warmup tracing](/guides/sdk-tracing) | Yes | Yes, fewer attributes | Yes | No | No |
-| [Remote diagnostic logs/events](/guides/diagnostics) | Yes | No | Yes | No | No |
-| [Create-latency telemetry](/guides/sdk-telemetry) | Yes | Yes | Yes | Yes | Yes |
+| [Pool warmup tracing](/sdks/observability#pool-warmup-tracing) | Yes | Yes, fewer attributes | Yes | No | No |
+| [Remote diagnostic logs/events](/api/#diagnostics) | Yes | No | Yes | No | No |
+| [Create-latency telemetry](/sdks/observability#creation-metrics) | Yes | Yes | Yes | Yes | Yes |
 
 ### Differences that affect application code
 
@@ -62,12 +62,20 @@ the lifecycle API; they do not have a sandbox-side Credential Vault.
 
 - [Client Pool](/guides/client-pool): keep a ready buffer, select an acquire policy,
   share state through Redis, and retire a pool namespace.
-- [SDK Tracing](/guides/sdk-tracing): measure pool creation, readiness, preparation,
-  renewal, and commit phases.
-- [Diagnostics](/guides/diagnostics): retrieve logs and events through the control plane,
-  including when the sandbox has not become ready.
-- [SDK Telemetry](/guides/sdk-telemetry): understand the default create-latency reports
-  and opt out when needed. This is separate from opt-in tracing.
+- [Observability](/sdks/observability): configure pool warmup traces and creation
+  metrics, understand the default settings, and locate slow startup phases.
+
+## Diagnostics
+
+Python and Kotlin/Java expose remote logs/events on both `Sandbox` and
+`SandboxManager`. Use a manager when execd is not ready. Python methods are
+`get_diagnostic_logs` / `get_diagnostic_events`; JVM methods are
+`getDiagnosticLogs` / `getDiagnosticEvents`. Pass a sandbox ID to manager methods
+and an explicit scope such as `container` for logs or `runtime` for events.
+
+JavaScript, Go, and C# can use the [CLI](/cli/#collect-diagnostics) or
+[HTTP API](/api/#diagnostics). C# `SdkDiagnosticsOptions` controls local SDK
+logging. See the API reference for supported scopes and inline/URL delivery.
 
 ## Lifecycle and cleanup
 

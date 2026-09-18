@@ -107,9 +107,9 @@ and staged warmup controls. See [Client Pool](/guides/client-pool) for examples,
 configuration, cleanup, and distributed deployment.
 
 Enable `ConnectionConfig(enable_tracing=True)` or
-`ConnectionConfigSync(enable_tracing=True)` for [pool warmup traces](/guides/sdk-tracing).
-For remote logs/events, use the [Diagnostics](/guides/diagnostics) manager API.
-Create-latency reporting is controlled separately by [SDK Telemetry](/guides/sdk-telemetry).
+`ConnectionConfigSync(enable_tracing=True)` for [pool warmup traces](/sdks/observability#pool-warmup-tracing).
+For remote logs/events, use the [Diagnostics](/api/#diagnostics) manager API.
+Create-latency reporting is controlled separately by [SDK Telemetry](/sdks/observability#creation-metrics).
 
 ## Lifecycle Hooks
 
@@ -356,8 +356,8 @@ The `ConnectionConfig` class manages API server connection settings.
 | `transport`       | Shared httpx transport (pool/proxy/retry); custom transports must honor request timeouts  | SDK-created per instance     | -                      |
 | `retry_policy`    | Automatic retry policy for non-streaming requests (see [Automatic retries](#_2-automatic-retries)) | Enabled (`RetryPolicy()`) | -                 |
 | `use_server_proxy` | Use sandbox server as proxy for execd/endpoint requests (e.g. when client cannot reach the sandbox directly) | `False` | -                      |
-| `disable_metrics` | Disable SDK create-latency telemetry (see [SDK Telemetry](/guides/sdk-telemetry)) | `False` | `OPENSANDBOX_DISABLE_METRICS` |
-| `enable_tracing` | Enable OpenTelemetry tracing for pool warmup (see [SDK Tracing](/guides/sdk-tracing)) | `False` | - |
+| `disable_metrics` | Disable SDK create-latency telemetry (see [SDK Telemetry](/sdks/observability#creation-metrics)) | `False` | `OPENSANDBOX_DISABLE_METRICS` |
+| `enable_tracing` | Enable OpenTelemetry tracing for pool warmup (see [SDK Tracing](/sdks/observability#pool-warmup-tracing)) | `False` | - |
 
 ```python
 from datetime import timedelta

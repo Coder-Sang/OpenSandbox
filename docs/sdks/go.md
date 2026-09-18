@@ -228,7 +228,7 @@ Go uses `ReconcileInterval` and `WarmupConcurrency`; it does not expose the
 Python/JVM/JavaScript create-QPS, initial-delay, or post-prepare-check settings.
 See [Client Pool](/guides/client-pool) for defaults, examples, and cleanup.
 Go does not currently emit built-in pool warmup traces or expose stable remote
-diagnostics; use [CLI or HTTP diagnostics](/guides/diagnostics).
+diagnostics; use [CLI or HTTP diagnostics](/api/#diagnostics).
 
 ## Lifecycle Hooks
 
@@ -474,7 +474,7 @@ SDK-created HTTP clients enforce NIST 2030 minimum TLS certificate strength by d
 :::
 
 ::: tip SDK Telemetry
-`CreateSandbox` reports create latency to `POST /v1/metrics/events` by default. Set `ConnectionConfig.DisableMetrics` or `OPENSANDBOX_DISABLE_METRICS=1` to opt out. See [SDK Telemetry](/guides/sdk-telemetry).
+`CreateSandbox` reports create latency to `POST /v1/metrics/events` by default. Set `ConnectionConfig.DisableMetrics` or `OPENSANDBOX_DISABLE_METRICS=1` to opt out. See [SDK Telemetry](/sdks/observability#creation-metrics).
 :::
 
 ## Error Handling

@@ -282,10 +282,10 @@ sandboxes.getSandboxInfos().forEach(info -> {
 client for distributed deployments. See [Client Pool](/guides/client-pool)
 for configuration, examples, cleanup, and namespace retirement.
 
-Set `ConnectionConfig.builder().enableTracing(true)` to emit [pool warmup traces](/guides/sdk-tracing).
+Set `ConnectionConfig.builder().enableTracing(true)` to emit [pool warmup traces](/sdks/observability#pool-warmup-tracing).
 The JVM SDK also adds trace IDs to SLF4J MDC. For remote logs/events, use
-`SandboxManager.getDiagnosticLogs` / `getDiagnosticEvents`; see [Diagnostics](/guides/diagnostics).
-Create-latency reporting is controlled separately by [SDK Telemetry](/guides/sdk-telemetry).
+`SandboxManager.getDiagnosticLogs` / `getDiagnosticEvents`; see [Diagnostics](/api/#diagnostics).
+Create-latency reporting is controlled separately by [SDK Telemetry](/sdks/observability#creation-metrics).
 
 ## Snapshots and metadata
 
@@ -315,8 +315,8 @@ The `ConnectionConfig` class manages API server connection settings.
 | `connectionPool` | Shared OKHttp ConnectionPool               | SDK-created per instance     | -                      |
 | `retryPolicy`    | Automatic retry policy for non-streaming requests (see [Automatic retries](#_2-automatic-retries)) | Enabled (`RetryPolicy()`) | -                 |
 | `useServerProxy` | Use sandbox server as proxy for execd/endpoint requests (e.g. when client cannot reach the sandbox directly) | `false` | -                      |
-| `disableMetrics` | Disable SDK create-latency telemetry (see [SDK Telemetry](/guides/sdk-telemetry)) | `false` | `OPENSANDBOX_DISABLE_METRICS` |
-| `enableTracing` | Enable OpenTelemetry tracing for pool warmup (see [SDK Tracing](/guides/sdk-tracing)) | `false` | - |
+| `disableMetrics` | Disable SDK create-latency telemetry (see [SDK Telemetry](/sdks/observability#creation-metrics)) | `false` | `OPENSANDBOX_DISABLE_METRICS` |
+| `enableTracing` | Enable OpenTelemetry tracing for pool warmup (see [SDK Tracing](/sdks/observability#pool-warmup-tracing)) | `false` | - |
 
 ```java
 // 1. Basic configuration
@@ -343,7 +343,7 @@ ConnectionConfig sharedConfig = ConnectionConfig.builder()
 ```
 
 ::: tip SDK Telemetry
-`Sandbox.builder()...build()` reports create latency to `POST /v1/metrics/events` by default. Call `ConnectionConfig.builder().disableMetrics(true)` or export `OPENSANDBOX_DISABLE_METRICS=1` to opt out. See [SDK Telemetry](/guides/sdk-telemetry).
+`Sandbox.builder()...build()` reports create latency to `POST /v1/metrics/events` by default. Call `ConnectionConfig.builder().disableMetrics(true)` or export `OPENSANDBOX_DISABLE_METRICS=1` to opt out. See [SDK Telemetry](/sdks/observability#creation-metrics).
 :::
 
 ### 2. Automatic retries

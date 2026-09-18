@@ -76,7 +76,7 @@ the JVM examples with that version; use the BOM when combining JVM modules such
 as `sandbox` and `sandbox-pool-redis`. See the [release index](https://github.com/opensandbox-group/OpenSandbox/releases).
 
 Feature availability differs by language. See the [capability matrix](/sdks/#capability-coverage),
-[Client Pool](/guides/client-pool), and [SDK Tracing](/guides/sdk-tracing).
+[Client Pool](/guides/client-pool), and [SDK Tracing](/sdks/observability#pool-warmup-tracing).
 
 ## CLI
 

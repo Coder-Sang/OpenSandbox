@@ -449,7 +449,7 @@ best-effort kill attempt. The Go method is intentionally outside the
 Python, JavaScript, and Kotlin/Java emit opt-in OpenTelemetry warmup spans. Set
 `enable_tracing=True` in Python or `enableTracing: true` / `.enableTracing(true)`
 in JavaScript/JVM connection configuration. The application supplies its
-OpenTelemetry provider and exporter. See [SDK Tracing](/guides/sdk-tracing)
+OpenTelemetry provider and exporter. See [SDK Tracing](/sdks/observability#pool-warmup-tracing)
 for phase names and language-specific attributes.
 
 Pool `shutdown` stops that local pool instance; it does not terminate sandboxes

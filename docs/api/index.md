@@ -57,7 +57,7 @@ Defines the complete lifecycle interfaces for creating, managing, and destroying
 - HTTP Header: `OPEN-SANDBOX-API-KEY: your-api-key`
 - Environment Variable: `OPEN_SANDBOX_API_KEY` (for SDK clients)
 
-### 2. diagnostic-api.yml
+### 2. diagnostic-api.yml {#diagnostics}
 
 [OpenAPI source](https://github.com/opensandbox-group/OpenSandbox/blob/main/specs/diagnostic-api.yml)
 
@@ -73,8 +73,19 @@ Defines best-effort troubleshooting descriptors for sandbox diagnostic logs and 
 - HTTP Header: `OPEN-SANDBOX-API-KEY: your-api-key`
 - Environment Variable: `OPEN_SANDBOX_API_KEY` (for SDK clients)
 
-See [Diagnostics](/guides/diagnostics) for scope support by runtime, inline/URL
-delivery, and SDK/CLI examples.
+`scope` is required. Docker and Kubernetes support `container`/`all` for logs and
+`runtime`/`all` for events. Fast Sandbox supports `runtime`/`all` events; log
+collection is not implemented there. Unsupported scopes return
+`DIAGNOSTICS_SCOPE_UNSUPPORTED`.
+
+Responses use `delivery: inline` with `content`, or `delivery: url` with
+`contentUrl` and an optional expiry. The SDK does not download URL content;
+inspect `truncated` and `warnings` before treating results as complete.
+Python models and CLI JSON/YAML use snake_case fields such as `content_url`.
+CLI raw output prints the content or URL without following it.
+
+See [SDK diagnostics](/sdks/#diagnostics) for language support and
+[CLI diagnostics](/cli/#collect-diagnostics) for command examples.
 
 ### 3. execd-api.yaml
 

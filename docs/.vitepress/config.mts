@@ -17,9 +17,7 @@ const sdkSidebar = [
     text: "SDK Features",
     items: [
       { text: "Client Pool", link: "/guides/client-pool" },
-      { text: "Tracing", link: "/guides/sdk-tracing" },
-      { text: "Diagnostics", link: "/guides/diagnostics" },
-      { text: "Telemetry", link: "/guides/sdk-telemetry" },
+      { text: "Observability", link: "/sdks/observability" },
     ],
   },
   {
@@ -119,15 +117,11 @@ export default defineConfig({
 
       // Specific guide routes must precede /guides/ for VitePress prefix matching.
       "/guides/client-pool": sdkSidebar,
-      "/guides/sdk-tracing": sdkSidebar,
-      "/guides/diagnostics": sdkSidebar,
-      "/guides/sdk-telemetry": sdkSidebar,
       "/guides/": [
         {
           text: "Guides",
           items: [
             { text: "Overview", link: "/guides/" },
-            { text: "Diagnostics", link: "/guides/diagnostics" },
             { text: "Credential Vault", link: "/guides/credential-vault" },
             { text: "Secure Access", link: "/guides/secure-access" },
             { text: "Secure Container", link: "/guides/secure-container" },
@@ -137,8 +131,7 @@ export default defineConfig({
             { text: "Lifecycle Hooks", link: "/guides/lifecycle-hooks" },
             { text: "Windows Sandbox", link: "/guides/windows-sandbox" },
             { text: "Client Pool", link: "/guides/client-pool" },
-            { text: "SDK Telemetry", link: "/guides/sdk-telemetry" },
-            { text: "SDK Tracing (Pool Warmup)", link: "/guides/sdk-tracing" },
+            { text: "SDK Observability", link: "/sdks/observability" },
           ],
         },
       ],

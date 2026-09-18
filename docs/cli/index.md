@@ -327,7 +327,7 @@ provide a subset. Raw output prints inline
 diagnostic text, or the content URL when diagnostics are delivered as a
 temporary URL; raw output does not download that URL. JSON/YAML use Python
 model names such as `content_url`, `content_type`, and `expires_at` (the HTTP API
-uses camelCase). See [Diagnostics](/guides/diagnostics) for runtime differences.
+uses camelCase). See [Diagnostics](/api/#diagnostics) for runtime differences.
 Older server builds may still return
 `DIAGNOSTICS_NOT_IMPLEMENTED` for scoped diagnostics.
 
