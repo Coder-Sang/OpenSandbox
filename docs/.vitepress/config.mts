@@ -1,5 +1,34 @@
 import { defineConfig } from "vitepress";
 
+const sdkSidebar = [
+  {
+    text: "Sandbox SDKs",
+    collapsed: false,
+    items: [
+      { text: "Overview", link: "/sdks/" },
+      { text: "Python", link: "/sdks/python" },
+      { text: "JavaScript", link: "/sdks/javascript" },
+      { text: "Kotlin / Java", link: "/sdks/kotlin" },
+      { text: "Go", link: "/sdks/go" },
+      { text: "C#", link: "/sdks/csharp" },
+    ],
+  },
+  {
+    text: "SDK Features",
+    items: [
+      { text: "Client Pool", link: "/guides/client-pool" },
+      { text: "Tracing", link: "/guides/sdk-tracing" },
+      { text: "Diagnostics", link: "/guides/diagnostics" },
+      { text: "Telemetry", link: "/guides/sdk-telemetry" },
+    ],
+  },
+  {
+    text: "MCP",
+    collapsed: false,
+    items: [{ text: "MCP Server", link: "/sdks/mcp" }],
+  },
+];
+
 export default defineConfig({
   title: "OpenSandbox",
   description: "Universal Sandbox Infrastructure for AI Applications",
@@ -88,6 +117,11 @@ export default defineConfig({
         },
       ],
 
+      // Specific guide routes must precede /guides/ for VitePress prefix matching.
+      "/guides/client-pool": sdkSidebar,
+      "/guides/sdk-tracing": sdkSidebar,
+      "/guides/diagnostics": sdkSidebar,
+      "/guides/sdk-telemetry": sdkSidebar,
       "/guides/": [
         {
           text: "Guides",
@@ -109,35 +143,7 @@ export default defineConfig({
         },
       ],
 
-      "/sdks/": [
-        {
-          text: "Sandbox SDKs",
-          collapsed: false,
-          items: [
-            { text: "Overview", link: "/sdks/" },
-            { text: "Python", link: "/sdks/python" },
-            { text: "JavaScript", link: "/sdks/javascript" },
-            { text: "Kotlin / Java", link: "/sdks/kotlin" },
-            { text: "Go", link: "/sdks/go" },
-            { text: "C#", link: "/sdks/csharp" },
-          ],
-        },
-        {
-          text: "SDK Features",
-          items: [
-            { text: "Client Pool", link: "/guides/client-pool" },
-            { text: "Tracing", link: "/guides/sdk-tracing" },
-            { text: "Diagnostics", link: "/guides/diagnostics" },
-            { text: "Telemetry", link: "/guides/sdk-telemetry" },
-          ],
-        },
-
-        {
-          text: "MCP",
-          collapsed: false,
-          items: [{ text: "MCP Server", link: "/sdks/mcp" }],
-        },
-      ],
+      "/sdks/": sdkSidebar,
 
       "/components/": [
         {
