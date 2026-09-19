@@ -71,33 +71,12 @@ dotnet add package Alibaba.OpenSandbox
 
 For detailed SDK usage, see the [SDK documentation](/sdks/).
 
-### Code Interpreter SDKs
+Choose a published SDK version for your application. Replace `{latest_version}` in
+the JVM examples with that version; use the BOM when combining JVM modules such
+as `sandbox` and `sandbox-pool-redis`. See the [release index](https://github.com/opensandbox-group/OpenSandbox/releases).
 
-Higher-level SDKs for multi-language code execution inside sandboxes.
-
-::: code-group
-
-```bash [Python]
-pip install opensandbox-code-interpreter
-```
-
-```bash [JavaScript/TypeScript]
-npm install @alibaba-group/opensandbox-code-interpreter
-```
-
-```kotlin [Kotlin/Java (Gradle)]
-dependencies {
-    implementation(platform("com.alibaba.opensandbox:sandbox-bom:{latest_version}"))
-    implementation("com.alibaba.opensandbox:sandbox")
-    implementation("com.alibaba.opensandbox:code-interpreter")
-}
-```
-
-```bash [C#/.NET]
-dotnet add package Alibaba.OpenSandbox.CodeInterpreter
-```
-
-:::
+Feature availability differs by language. See the [capability matrix](/sdks/#capability-coverage),
+[Client Pool](/guides/client-pool), and [SDK Tracing](/sdks/observability#pool-warmup-tracing).
 
 ## CLI
 
