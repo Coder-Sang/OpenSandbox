@@ -27,7 +27,6 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/alibaba/opensandbox/execd/pkg/log"
-	"github.com/alibaba/opensandbox/execd/pkg/util/pathutil"
 	"github.com/alibaba/opensandbox/execd/pkg/web/model"
 )
 
@@ -143,7 +142,7 @@ func parseUploadMetadata(header *multipart.FileHeader) (*model.FileMetadata, *up
 }
 
 func resolveUploadTarget(targetPath string, perm model.Permission) (string, *uploadError) {
-	resolvedPath, err := pathutil.ExpandPath(targetPath)
+	resolvedPath, err := expandRuntimePath(targetPath)
 	if err != nil {
 		return "", newUploadError(
 			http.StatusInternalServerError,

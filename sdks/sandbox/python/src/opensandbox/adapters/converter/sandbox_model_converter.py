@@ -22,6 +22,7 @@ similar to the Kotlin SDK SandboxModelConverter.
 This converter is designed to work with openapi-python-client generated models,
 which use attrs for model definitions.
 """
+
 from datetime import datetime, timedelta, timezone
 from typing import Literal, cast
 
@@ -60,6 +61,7 @@ from opensandbox.models.sandboxes import (
     SandboxEndpoint,
     SandboxImageSpec,
     SandboxInfo,
+    SandboxIsolation,
     SandboxLifecycle,
     SandboxRenewResponse,
     SandboxStatus,
@@ -155,7 +157,9 @@ class SandboxModelConverter:
                 access_key_id=volume.ossfs.access_key_id,
                 access_key_secret=volume.ossfs.access_key_secret,
                 version=OSSFSVersion(volume.ossfs.version),
-                options=volume.ossfs.options if volume.ossfs.options is not None else UNSET,
+                options=volume.ossfs.options
+                if volume.ossfs.options is not None
+                else UNSET,
             )
 
         api_sub_path = UNSET
@@ -179,7 +183,7 @@ class SandboxModelConverter:
         env: dict[str, str],
         metadata: dict[str, str],
         timeout: timedelta | None,
-        resource: dict[str, str],
+        resource: dict[str, str] | None,
         platform: PlatformSpec | None,
         network_policy: NetworkPolicy | None,
         extensions: dict[str, str],
@@ -189,6 +193,7 @@ class SandboxModelConverter:
         credential_proxy: CredentialProxyConfig | None = None,
         resource_requests: dict[str, str] | None = None,
         lifecycle: SandboxLifecycle | None = None,
+        isolation: SandboxIsolation | None = None,
     ) -> CreateSandboxRequest:
         """Convert domain parameters to API CreateSandboxRequest."""
         from opensandbox.api.lifecycle.models.create_sandbox_request import (
@@ -226,11 +231,11 @@ class SandboxModelConverter:
             api_metadata = CreateSandboxRequestMetadata.from_dict(metadata)
 
         # Convert resource limits dict to API model
-        api_resource_limits = ResourceLimits.from_dict(resource)
-
-        api_network_policy = SandboxModelConverter.to_api_network_policy(
-            network_policy
+        api_resource_limits = (
+            ResourceLimits.from_dict(resource) if resource is not None else UNSET
         )
+
+        api_network_policy = SandboxModelConverter.to_api_network_policy(network_policy)
 
         api_credential_proxy = UNSET
         if credential_proxy is not None:
@@ -244,7 +249,9 @@ class SandboxModelConverter:
             )
 
         api_extensions = (
-            CreateSandboxRequestExtensions.from_dict(extensions) if extensions else UNSET
+            CreateSandboxRequestExtensions.from_dict(extensions)
+            if extensions
+            else UNSET
         )
 
         api_platform = UNSET
@@ -273,17 +280,28 @@ class SandboxModelConverter:
                     lifecycle_payload.pop("periodic", None)
                 api_lifecycle = ApiSandboxLifecycle.from_dict(lifecycle_payload)
 
+        api_isolation = UNSET
+        if isolation is not None:
+            if not isinstance(isolation, SandboxIsolation):
+                raise TypeError(
+                    "isolation must be a SandboxIsolation or None, "
+                    f"got {type(isolation).__name__}"
+                )
+            from opensandbox.api.lifecycle.models.sandbox_isolation import (
+                SandboxIsolation as ApiSandboxIsolation,
+            )
+
+            api_isolation = ApiSandboxIsolation.from_dict(
+                isolation.model_dump(by_alias=True)
+            )
+
         # Convert volumes to API model
         api_volumes = UNSET
         if volumes is not None and len(volumes) > 0:
-            api_volumes = [
-                SandboxModelConverter.to_api_volume(v) for v in volumes
-            ]
+            api_volumes = [SandboxModelConverter.to_api_volume(v) for v in volumes]
 
         image = (
-            SandboxModelConverter.to_api_image_spec(spec)
-            if spec is not None
-            else UNSET
+            SandboxModelConverter.to_api_image_spec(spec) if spec is not None else UNSET
         )
         api_resource_requests = UNSET
         if resource_requests:
@@ -296,6 +314,7 @@ class SandboxModelConverter:
             env=api_env,
             metadata=api_metadata,
             lifecycle=api_lifecycle,
+            isolation=api_isolation,
             resource_limits=api_resource_limits,
             resource_requests=api_resource_requests,
             platform=api_platform,
@@ -385,13 +404,9 @@ class SandboxModelConverter:
         request = CreateSandboxRequest(
             template_id=template_id,
             metadata=(
-                CreateSandboxRequestMetadata.from_dict(metadata)
-                if metadata
-                else UNSET
+                CreateSandboxRequestMetadata.from_dict(metadata) if metadata else UNSET
             ),
-            network_policy=SandboxModelConverter.to_api_network_policy(
-                network_policy
-            ),
+            network_policy=SandboxModelConverter.to_api_network_policy(network_policy),
             extensions=(
                 CreateSandboxRequestExtensions.from_dict(extensions)
                 if extensions
@@ -514,11 +529,23 @@ class SandboxModelConverter:
         from opensandbox.models.sandboxes import SandboxCreateResponse
 
         platform: PlatformSpec | None = None
-        if hasattr(api_response, "platform") and not isinstance(api_response.platform, Unset):
+        if hasattr(api_response, "platform") and not isinstance(
+            api_response.platform, Unset
+        ):
             platform = PlatformSpec.model_validate(
                 {
-                    "os": str(getattr(api_response.platform.os, "value", api_response.platform.os)),
-                    "arch": str(getattr(api_response.platform.arch, "value", api_response.platform.arch)),
+                    "os": str(
+                        getattr(
+                            api_response.platform.os, "value", api_response.platform.os
+                        )
+                    ),
+                    "arch": str(
+                        getattr(
+                            api_response.platform.arch,
+                            "value",
+                            api_response.platform.arch,
+                        )
+                    ),
                 }
             )
 
@@ -551,7 +578,9 @@ class SandboxModelConverter:
                 username_val = getattr(auth_obj, "username", None)
                 password_val = getattr(auth_obj, "password", None)
                 if isinstance(username_val, str) and isinstance(password_val, str):
-                    auth = SandboxImageAuth(username=username_val, password=password_val)
+                    auth = SandboxImageAuth(
+                        username=username_val, password=password_val
+                    )
             domain_image_spec = SandboxImageSpec(
                 image=api_sandbox.image.uri,
                 auth=auth,
@@ -572,11 +601,23 @@ class SandboxModelConverter:
             expires_at = None
 
         platform: PlatformSpec | None = None
-        if hasattr(api_sandbox, "platform") and not isinstance(api_sandbox.platform, Unset):
+        if hasattr(api_sandbox, "platform") and not isinstance(
+            api_sandbox.platform, Unset
+        ):
             platform = PlatformSpec.model_validate(
                 {
-                    "os": str(getattr(api_sandbox.platform.os, "value", api_sandbox.platform.os)),
-                    "arch": str(getattr(api_sandbox.platform.arch, "value", api_sandbox.platform.arch)),
+                    "os": str(
+                        getattr(
+                            api_sandbox.platform.os, "value", api_sandbox.platform.os
+                        )
+                    ),
+                    "arch": str(
+                        getattr(
+                            api_sandbox.platform.arch,
+                            "value",
+                            api_sandbox.platform.arch,
+                        )
+                    ),
                 }
             )
 

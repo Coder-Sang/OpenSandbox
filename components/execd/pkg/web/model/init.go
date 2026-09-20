@@ -16,6 +16,7 @@ package model
 
 import (
 	"github.com/alibaba/opensandbox/execd/pkg/lifecycle"
+	"github.com/alibaba/opensandbox/execd/pkg/runtime"
 )
 
 // RuntimeInitRequest carries the sandbox-scoped parameters applied by
@@ -60,6 +61,11 @@ type RuntimeInitRequest struct {
 	// previous generation's hooks). Omitted means: keep the template-level
 	// lifecycle.
 	Lifecycle *lifecycle.Config `json:"lifecycle,omitempty"`
+
+	// Isolation configures the mandatory long-lived bwrap runtime used by a
+	// policy-enabled Kubernetes Pool. It is intentionally an internal control
+	// plane contract, not a public execd API.
+	Isolation *runtime.PoolIsolationSpec `json:"isolation,omitempty"`
 
 	// Telemetry carries dynamic observability attributes (tenant, plan...)
 	// attached to metrics alongside sandbox_id/generation.

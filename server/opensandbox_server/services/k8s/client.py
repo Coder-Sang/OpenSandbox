@@ -23,7 +23,13 @@ from functools import partial
 from typing import Any, Dict, List, Optional, Tuple
 
 from kubernetes import client, config
-from kubernetes.client import ApiException, CoreV1Api, CustomObjectsApi, NodeV1Api, V1APIResourceList
+from kubernetes.client import (
+    ApiException,
+    CoreV1Api,
+    CustomObjectsApi,
+    NodeV1Api,
+    V1APIResourceList,
+)
 
 from opensandbox_server.config import KubernetesRuntimeConfig
 from opensandbox_server.services.k8s.informer import WorkloadInformer
@@ -83,6 +89,12 @@ class K8sClient:
             self._core_v1_api = client.CoreV1Api()
         return self._core_v1_api
 
+    def get_secret(self, namespace: str, name: str):
+        """Read a namespaced Secret through the shared read limiter."""
+        if self._read_limiter:
+            self._read_limiter.acquire()
+        return self.get_core_v1_api().read_namespaced_secret(name=name, namespace=namespace)
+
     def get_custom_objects_api(self) -> CustomObjectsApi:
         if self._custom_objects_api is None:
             self._custom_objects_api = client.CustomObjectsApi()
@@ -93,8 +105,9 @@ class K8sClient:
             self._node_v1_api = client.NodeV1Api()
         return self._node_v1_api
 
-
-    def _lookup_informer(self, group: str, version: str, plural: str, namespace: str) -> Optional[WorkloadInformer]:
+    def _lookup_informer(
+        self, group: str, version: str, plural: str, namespace: str
+    ) -> Optional[WorkloadInformer]:
         """Return an existing informer without starting one. Used by write paths
         to invalidate cache entries; never auto-create on writes since list paths
         own the lazy-start contract."""
@@ -163,7 +176,6 @@ class K8sClient:
         stops with ``stop_informers``.
         """
         return self._get_informer(group, version, plural, namespace, event_handler)
-
 
     def create_custom_object(
         self,
@@ -464,7 +476,6 @@ class K8sClient:
             namespace=namespace,
             body=body,
         )
-
 
     def list_pods(
         self,

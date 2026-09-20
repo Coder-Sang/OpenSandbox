@@ -167,6 +167,22 @@ type SandboxLifecycle struct {
 	Periodic []PeriodicLifecycleHook `json:"periodic,omitempty"`
 }
 
+// SandboxIsolationMount selects a directory from a named, server-controlled
+// pool mount root and exposes it at Target inside the sandbox runtime.
+type SandboxIsolationMount struct {
+	Root    string `json:"root"`
+	SubPath string `json:"subPath"`
+	Target  string `json:"target"`
+	Mode    string `json:"mode"`
+}
+
+// SandboxIsolation requests the execution-isolation backend advertised by a
+// Kubernetes Pool. Bwrap isolation is currently available only with poolRef.
+type SandboxIsolation struct {
+	Type   string                  `json:"type"`
+	Mounts []SandboxIsolationMount `json:"mounts"`
+}
+
 // CreateSandboxRequest is the request body for creating a new sandbox.
 type CreateSandboxRequest struct {
 	Image      *ImageSpec `json:"image,omitempty"`
@@ -178,7 +194,7 @@ type CreateSandboxRequest struct {
 	// is required.
 	TemplateID       string                 `json:"templateId,omitempty"`
 	Timeout          *int                   `json:"timeout,omitempty"`
-	ResourceLimits   ResourceLimits         `json:"resourceLimits"`
+	ResourceLimits   ResourceLimits         `json:"resourceLimits,omitempty"`
 	ResourceRequests ResourceLimits         `json:"resourceRequests,omitempty"`
 	Env              map[string]string      `json:"env,omitempty"`
 	SecureAccess     bool                   `json:"secureAccess,omitempty"`
@@ -190,6 +206,7 @@ type CreateSandboxRequest struct {
 	Volumes          []Volume               `json:"volumes,omitempty"`
 	Extensions       map[string]string      `json:"extensions,omitempty"`
 	Platform         *PlatformSpec          `json:"platform,omitempty"`
+	Isolation        *SandboxIsolation      `json:"isolation,omitempty"`
 }
 
 // AllocationMode identifies how the runtime allocated a sandbox.

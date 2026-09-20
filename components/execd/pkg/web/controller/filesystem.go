@@ -30,7 +30,6 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/alibaba/opensandbox/execd/pkg/util/glob"
-	"github.com/alibaba/opensandbox/execd/pkg/util/pathutil"
 	"github.com/alibaba/opensandbox/execd/pkg/web/model"
 )
 
@@ -192,7 +191,7 @@ func (c *FilesystemController) RemoveDirs() {
 
 	paths := c.ctx.QueryArray("path")
 	for _, dir := range paths {
-		resolvedDir, err := pathutil.ExpandPath(dir)
+		resolvedDir, err := expandRuntimePath(dir)
 		if err != nil {
 			c.RespondError(
 				http.StatusInternalServerError,
@@ -243,7 +242,7 @@ func (c *FilesystemController) ListDirectory() {
 		depth = parsedDepth
 	}
 
-	path, err := pathutil.ExpandAbsPath(path)
+	path, err := expandAbsRuntimePath(path)
 	if err != nil {
 		c.RespondError(
 			http.StatusInternalServerError,
@@ -345,7 +344,7 @@ func (c *FilesystemController) SearchFiles() {
 		return
 	}
 
-	path, err := pathutil.ExpandAbsPath(path)
+	path, err := expandAbsRuntimePath(path)
 	if err != nil {
 		c.RespondError(
 			http.StatusInternalServerError,
@@ -430,7 +429,7 @@ func (c *FilesystemController) ReplaceContent() {
 
 	for file, item := range request {
 		origPath := file
-		file, err := pathutil.ExpandAbsPath(file)
+		file, err := expandAbsRuntimePath(file)
 		if err != nil {
 			c.handleFileError(err)
 			return

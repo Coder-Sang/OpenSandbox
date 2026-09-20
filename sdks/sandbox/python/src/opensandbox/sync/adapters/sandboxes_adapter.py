@@ -51,6 +51,7 @@ from opensandbox.models.sandboxes import (
     SandboxFilter,
     SandboxImageSpec,
     SandboxInfo,
+    SandboxIsolation,
     SandboxLifecycle,
     SandboxRenewResponse,
     SnapshotFilter,
@@ -122,7 +123,7 @@ class SandboxesAdapterSync(SandboxesSync):
         env: dict[str, str],
         metadata: dict[str, str],
         timeout: timedelta | None,
-        resource: dict[str, str],
+        resource: dict[str, str] | None,
         network_policy: NetworkPolicy | None,
         extensions: dict[str, str],
         volumes: list[Volume] | None,
@@ -132,6 +133,7 @@ class SandboxesAdapterSync(SandboxesSync):
         credential_proxy: CredentialProxyConfig | None = None,
         resource_requests: dict[str, str] | None = None,
         lifecycle: SandboxLifecycle | None = None,
+        isolation: SandboxIsolation | None = None,
     ) -> SandboxCreateResponse:
         logger.info(
             f"Creating sandbox with startup source: {spec.image if spec is not None else snapshot_id}"
@@ -158,6 +160,7 @@ class SandboxesAdapterSync(SandboxesSync):
                 snapshot_id=snapshot_id,
                 resource_requests=resource_requests,
                 lifecycle=lifecycle,
+                isolation=isolation,
             )
             response_obj = post_sandboxes.sync_detailed(
                 client=self._get_client(), body=create_request
@@ -188,12 +191,14 @@ class SandboxesAdapterSync(SandboxesSync):
                 CreateSandboxResponse as ApiCreateSandboxResponse,
             )
 
-            create_request = SandboxModelConverter.to_api_create_template_sandbox_request(
-                template_id=template_id,
-                timeout=timeout,
-                metadata=metadata,
-                network_policy=network_policy,
-                extensions=extensions,
+            create_request = (
+                SandboxModelConverter.to_api_create_template_sandbox_request(
+                    template_id=template_id,
+                    timeout=timeout,
+                    metadata=metadata,
+                    network_policy=network_policy,
+                    extensions=extensions,
+                )
             )
             response_obj = post_sandboxes.sync_detailed(
                 client=self._get_client(), body=create_request
@@ -229,9 +234,7 @@ class SandboxesAdapterSync(SandboxesSync):
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     def list_sandboxes(self, filter: SandboxFilter) -> PagedSandboxInfos:
-        metadata = (
-            encode_metadata_filter(filter.metadata) if filter.metadata else UNSET
-        )
+        metadata = encode_metadata_filter(filter.metadata) if filter.metadata else UNSET
 
         try:
             from opensandbox.api.lifecycle.api.sandboxes import get_sandboxes
@@ -566,9 +569,7 @@ class SandboxesAdapterSync(SandboxesSync):
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     def list_templates(self, filter: TemplateFilter) -> PagedTemplateInfos:
-        metadata = (
-            encode_metadata_filter(filter.metadata) if filter.metadata else UNSET
-        )
+        metadata = encode_metadata_filter(filter.metadata) if filter.metadata else UNSET
 
         try:
             from opensandbox.api.lifecycle.api.templates import list_templates

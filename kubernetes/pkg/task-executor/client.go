@@ -28,6 +28,20 @@ import (
 type Client struct {
 	baseURL    string
 	httpClient *http.Client
+	authToken  string
+}
+
+// NewAuthenticatedClient sends a bearer token on task API requests.
+func NewAuthenticatedClient(baseURL, token string) *Client {
+	client := NewClient(baseURL)
+	client.authToken = token
+	return client
+}
+
+func (c *Client) authorize(req *http.Request) {
+	if c.authToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.authToken)
+	}
 }
 
 func NewClient(baseURL string) *Client {
@@ -67,6 +81,7 @@ func (c *Client) Set(ctx context.Context, task *Task) (*Task, error) {
 	}
 
 	req.Header.Set("Content-Type", "application/json")
+	c.authorize(req)
 
 	var resp *http.Response
 	resp, err = c.httpClient.Do(req)
@@ -110,6 +125,7 @@ func (c *Client) Get(ctx context.Context) (*Task, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
+	c.authorize(req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {

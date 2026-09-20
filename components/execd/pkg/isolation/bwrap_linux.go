@@ -147,6 +147,7 @@ func (b *bwrapImpl) Wrap(cmd *exec.Cmd, opts WrapOptions) error {
 	}
 
 	firstAddedFile := len(cmd.ExtraFiles)
+	prepareBindFiles(cmd, &opts)
 	seccompFd, err := appendSeccompFile(cmd)
 	if err != nil {
 		return err
@@ -188,6 +189,7 @@ func (b *bwrapImpl) WrapWithLifecycle(
 		}
 	}()
 
+	prepareBindFiles(cmd, &opts)
 	seccompFD, err := appendSeccompFile(cmd)
 	if err != nil {
 		return nil, err
@@ -262,6 +264,16 @@ func (b *bwrapImpl) WrapWithLifecycle(
 	cleanupExtraFiles = false
 	closeControlParent = false
 	return lifecycle, nil
+}
+
+// prepareBindFiles assigns the child-side descriptor numbers used by
+// --bind-fd. Ownership of SourceFile transfers to cmd.ExtraFiles.
+func prepareBindFiles(cmd *exec.Cmd, opts *WrapOptions) {
+	for i := range opts.Binds {
+		if opts.Binds[i].SourceFile != nil {
+			opts.Binds[i].sourceFD = appendExtraFile(cmd, opts.Binds[i].SourceFile)
+		}
+	}
 }
 
 func appendSeccompFile(cmd *exec.Cmd) (string, error) {

@@ -1,11 +1,11 @@
 // Copyright 2026 The OpenSandbox Authors
-// 
+//
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
-// 
+//
 //     http://www.apache.org/licenses/LICENSE-2.0
-// 
+//
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -1287,6 +1287,21 @@ export interface components {
         PatchSandboxMetadataRequest: {
             [key: string]: string | null;
         };
+        SandboxIsolationMount: {
+            /** @description Name of a trusted root declared by the Pool mount policy. */
+            root: string;
+            /** @description Normalized relative directory beneath the selected root. Absolute paths and traversal are rejected. */
+            subPath: string;
+            /** @description Normalized absolute path inside the sandbox, constrained by the root's targetPrefixes. */
+            target: string;
+            /** @enum {string} */
+            mode: "ro" | "rw";
+        };
+        SandboxIsolation: {
+            /** @enum {string} */
+            type: "bwrap";
+            mounts: components["schemas"]["SandboxIsolationMount"][];
+        };
         /**
          * @description Request to create a new sandbox from either a container image, a snapshot,
          *     or a pre-configured pool (via `extensions.poolRef`).
@@ -1395,8 +1410,9 @@ export interface components {
              *     execd; callers must not depend on the internal transport mechanism.
              *     The configuration is not included in Sandbox responses.
              *
-             *     Not supported together with `extensions.poolRef`, because Pool Pods
-             *     are pre-created before request-specific lifecycle hooks are known.
+             *     Supported with `extensions.poolRef` only for Pools advertising the
+             *     `bwrap-v1` runtime-init contract; ordinary Pool Pods are pre-created
+             *     before request-specific lifecycle hooks are known and reject it.
              *     Runtimes that do not implement lifecycle hook transport reject this
              *     field.
              */
@@ -1462,6 +1478,12 @@ export interface components {
              *     per volume entry.
              */
             volumes?: components["schemas"]["Volume"][];
+            /**
+             * @description Required for Pools advertising `opensandbox.io/execution-isolation=bwrap-v1`.
+             *     Unsupported for ordinary Pools and non-Pool sandboxes. Sources are selected only
+             *     by named root and relative subPath; callers cannot provide host absolute paths.
+             */
+            isolation?: components["schemas"]["SandboxIsolation"];
             /**
              * @description Opaque container for provider-specific or transient parameters not supported by the core API.
              *

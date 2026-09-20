@@ -34,6 +34,19 @@ import (
 	api "github.com/alibaba/OpenSandbox/sandbox-k8s/pkg/task-executor"
 )
 
+const taskExecutorAuthTokenEnv = "TASK_EXECUTOR_AUTH_TOKEN"
+
+func withoutTaskExecutorToken(env []string) []string {
+	prefix := taskExecutorAuthTokenEnv + "="
+	filtered := make([]string, 0, len(env))
+	for _, item := range env {
+		if !strings.HasPrefix(item, prefix) {
+			filtered = append(filtered, item)
+		}
+	}
+	return filtered
+}
+
 const (
 	exitFile   = "exit"
 	pidFile    = "pid"
@@ -126,12 +139,12 @@ func (e *processExecutor) Start(ctx context.Context, task *types.Task) error {
 			"/bin/sh", "-c", shimScript,
 		}
 		cmd = exec.Command("nsenter", nsenterArgs...)
-		cmd.Env = targetEnv
+		cmd.Env = withoutTaskExecutorToken(targetEnv)
 		klog.InfoS("Starting sidecar task", "id", task.Name, "targetPID", targetPID)
 
 	} else {
 		cmd = exec.Command("/bin/sh", "-c", shimScript)
-		cmd.Env = os.Environ()
+		cmd.Env = withoutTaskExecutorToken(os.Environ())
 		klog.InfoS("Starting host task", "name", task.Name, "cmd", safeCmdStr, "exitPath", exitPath)
 	}
 
@@ -174,7 +187,7 @@ func (e *processExecutor) executeCommand(task *types.Task, cmd *exec.Cmd, pidPat
 
 	if task.Process != nil {
 		for _, env := range task.Process.Env {
-			if env.Name != "" {
+			if env.Name != "" && env.Name != taskExecutorAuthTokenEnv {
 				cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", env.Name, env.Value))
 			}
 		}
@@ -497,11 +510,11 @@ func (e *processExecutor) execLifecycleHook(ctx context.Context, task *types.Tas
 			"/bin/sh", "-c", safeCmdStr,
 		}
 		cmd = exec.CommandContext(hookCtx, "nsenter", nsenterArgs...)
-		cmd.Env = targetEnv
+		cmd.Env = withoutTaskExecutorToken(targetEnv)
 		klog.InfoS("Executing lifecycle hook via nsenter", "task", task.Name, "targetPID", targetPID, "cmd", safeCmdStr)
 	} else {
 		cmd = exec.CommandContext(hookCtx, "/bin/sh", "-c", safeCmdStr)
-		cmd.Env = os.Environ()
+		cmd.Env = withoutTaskExecutorToken(os.Environ())
 		klog.InfoS("Executing lifecycle hook locally", "task", task.Name, "cmd", safeCmdStr)
 	}
 

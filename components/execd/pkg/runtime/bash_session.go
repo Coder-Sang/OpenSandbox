@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -243,11 +244,24 @@ func (s *bashSession) run(ctx context.Context, request *ExecuteCodeRequest) erro
 	defer cancel()
 
 	script := buildWrappedScript(request.Code, envSnapshot, cwd)
-	scriptFile, err := os.CreateTemp("", "execd_bash_*.sh")
+	tempDir := ""
+	if PoolRuntimeHealthy() {
+		mappedTempDir, err := MapFilesystemPath("/tmp")
+		if err != nil {
+			return fmt.Errorf("resolve runtime temp directory: %w", err)
+		}
+		tempDir = mappedTempDir
+	}
+	scriptFile, err := os.CreateTemp(tempDir, "execd_bash_*.sh")
 	if err != nil {
 		return fmt.Errorf("create script file: %w", err)
 	}
-	scriptPath := scriptFile.Name()
+	hostScriptPath := scriptFile.Name()
+	scriptPath := hostScriptPath
+	if PoolRuntimeHealthy() {
+		scriptPath = filepath.Join("/tmp", filepath.Base(hostScriptPath))
+	}
+	defer os.Remove(hostScriptPath)
 	if _, err := scriptFile.WriteString(script); err != nil {
 		_ = scriptFile.Close()
 		return fmt.Errorf("write script file: %w", err)

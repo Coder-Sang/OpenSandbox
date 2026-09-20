@@ -19,6 +19,7 @@
 package runtime
 
 import (
+	"errors"
 	"sync/atomic"
 
 	"github.com/alibaba/opensandbox/execd/pkg/isolation"
@@ -40,6 +41,11 @@ func InitHardening(cfg isolation.Config) error {
 	otherHardeningRequested.Store(cfg.Hardening != nil && cfg.Hardening.Enabled)
 	otherLandlockRequested.Store(cfg.Landlock != nil && cfg.Landlock.Enabled)
 	return nil
+}
+
+// RequirePoolHardening fails closed because the pool backend is Linux-only.
+func RequirePoolHardening() error {
+	return errors.New("pool bwrap runtime hardening requires Linux")
 }
 
 // SetEbpfState records whether eBPF observation was requested off Linux.

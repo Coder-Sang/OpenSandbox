@@ -82,6 +82,9 @@ RUN gcc -Os -static -s -Wall -Wextra -Werror \
 COPY components/execd/native/launcher.c /build/launcher.c
 RUN gcc -Os -static -s -Wall -Wextra -Werror \
     -o /build/opensandbox-launcher /build/launcher.c
+COPY components/execd/native/nsenter.c /build/nsenter.c
+RUN gcc -Os -static -s -Wall -Wextra -Werror \
+    -o /build/opensandbox-nsenter /build/nsenter.c
 RUN git clone --depth 1 --branch v0.11.2 \
     https://github.com/containers/bubblewrap /build/bwrap
 WORKDIR /build/bwrap
@@ -148,6 +151,8 @@ COPY --from=bwrap-builder --chown=0:0 /build/opensandbox-session-gate /usr/local
 COPY --from=bwrap-builder --chown=0:0 /build/opensandbox-session-gate /opt/opensandbox/opensandbox-session-gate
 COPY --from=bwrap-builder --chown=0:0 /build/opensandbox-launcher /usr/local/libexec/opensandbox-launcher
 COPY --from=bwrap-builder --chown=0:0 /build/opensandbox-launcher /opt/opensandbox/opensandbox-launcher
+COPY --from=bwrap-builder --chown=0:0 /build/opensandbox-nsenter /usr/local/libexec/opensandbox-nsenter
+COPY --from=bwrap-builder --chown=0:0 /build/opensandbox-nsenter /opt/opensandbox/opensandbox-nsenter
 COPY --from=builder /build/execd .
 COPY --from=builder /build/execd.exe ./execd.exe
 COPY --from=builder /build/opensandbox-supervisor ./opensandbox-supervisor
@@ -168,6 +173,8 @@ RUN chmod 0755 \
     /usr/local/libexec/opensandbox-session-gate \
     /opt/opensandbox/opensandbox-session-gate \
     /usr/local/libexec/opensandbox-launcher \
-    /opt/opensandbox/opensandbox-launcher
+    /opt/opensandbox/opensandbox-launcher \
+    /usr/local/libexec/opensandbox-nsenter \
+    /opt/opensandbox/opensandbox-nsenter
 
 ENTRYPOINT ["./execd"]

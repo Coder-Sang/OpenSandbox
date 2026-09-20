@@ -72,6 +72,13 @@ func run() int {
 		log.Error("isolation: config: %v", err)
 		return 1
 	}
+	if os.Getenv("EXECD_POOL_BWRAP") == "1" {
+		// Forced Pool isolation must not inherit a policy that retains
+		// capabilities or weakens the mandatory syscall denylist.
+		isoCfg.Hardening = &isolation.HardeningConfig{Enabled: true}
+		isoCfg.Seccomp = nil
+	}
+	_ = os.Unsetenv("EXECD_POOL_BWRAP")
 
 	// Activate the pre-exec hardening floor ([hardening] enabled, OSEP-0018).
 	// Config errors (unknown capability, reserved execve) are fatal; missing
@@ -131,8 +138,12 @@ func run() int {
 	controller.InitIsolatedProbe(&isolationProbe)
 
 	var isolatedRunner *runtime.IsolatedRunner
+	var poolRuntimeIsolator isolation.LifecycleIsolator
 	if isolationProbe.Available {
 		iso := isolation.NewBwrapWithProbe(isoCfg, isolationProbe)
+		if lifecycleIso, ok := iso.(isolation.LifecycleIsolator); ok {
+			poolRuntimeIsolator = lifecycleIso
+		}
 		runner, err := runtime.NewIsolatedRunner(ctrl, iso, isoCfg)
 		if err != nil {
 			log.Error("isolation: runner init failed (continuing without isolation): %v", err)
@@ -157,6 +168,8 @@ func run() int {
 			log.Info("isolation: runner ready, upper_root=%s", isoCfg.UpperRoot)
 		}
 	}
+	poolRuntime := runtime.NewPoolRuntimeManager(poolRuntimeIsolator)
+	defer func() { _ = poolRuntime.Close() }()
 	if clone3Compat {
 		log.Warn("clone3: compatibility mode enabled (seccomp returns ENOSYS for clone3)")
 	}
@@ -182,6 +195,8 @@ func run() int {
 		AppendStartupStatus: func(status string) error {
 			return appendLifecycleStartupStatus(flag.LifecycleStartupStatusFile, status)
 		},
+		PoolRuntime:     poolRuntime,
+		InitAccessToken: flag.ServerAccessToken,
 	})
 	defer initManager.StopPeriodic()
 

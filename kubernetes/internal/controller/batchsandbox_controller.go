@@ -554,7 +554,9 @@ func (r *BatchSandboxReconciler) getTaskScheduler(ctx context.Context, batchSbx 
 		if err != nil {
 			return nil, err
 		}
-		sc, err := taskscheduler.NewTaskScheduler(key, taskSpecs, pods, policy, log)
+		sc, err := taskscheduler.NewTaskSchedulerWithTokenResolver(
+			key, taskSpecs, pods, policy, log, r.resolveTaskExecutorToken,
+		)
 		if err != nil {
 			return nil, fmt.Errorf("new task scheduler err %w", err)
 		}
@@ -580,6 +582,28 @@ func (r *BatchSandboxReconciler) getTaskScheduler(ctx context.Context, batchSbx 
 		}
 	}
 	return tSch, nil
+}
+
+func (r *BatchSandboxReconciler) resolveTaskExecutorToken(pod *corev1.Pod) (string, error) {
+	if pod == nil || pod.Annotations == nil {
+		return "", nil
+	}
+	secretName := pod.Annotations[controlTokenSecretAnnotation]
+	if secretName == "" {
+		return "", nil
+	}
+	secret := &corev1.Secret{}
+	if err := r.Client.Get(context.Background(), types.NamespacedName{
+		Namespace: pod.Namespace,
+		Name:      secretName,
+	}, secret); err != nil {
+		return "", fmt.Errorf("get control token Secret %s: %w", secretName, err)
+	}
+	token := secret.Data["task-executor-token"]
+	if len(token) == 0 {
+		return "", fmt.Errorf("control token Secret %s has no task-executor-token", secretName)
+	}
+	return string(token), nil
 }
 
 func (r *BatchSandboxReconciler) deleteTaskScheduler(ctx context.Context, batchSbx *sandboxv1alpha1.BatchSandbox) {

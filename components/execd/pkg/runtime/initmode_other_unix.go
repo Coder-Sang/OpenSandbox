@@ -49,6 +49,10 @@ func withoutHardening() launchOption {
 	return func(*managedProcess) {}
 }
 
+func withoutPoolRuntime() launchOption {
+	return func(*managedProcess) {}
+}
+
 func launchManagedWith(cmd *exec.Cmd, startFn func() error, opts ...launchOption) (*managedProcess, error) {
 	if err := startFn(); err != nil {
 		return nil, err

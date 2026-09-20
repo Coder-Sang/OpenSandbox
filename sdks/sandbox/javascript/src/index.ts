@@ -82,6 +82,8 @@ export type {
   SnapshotStatus,
   SandboxId,
   SandboxInfo,
+  SandboxIsolation,
+  SandboxIsolationMount,
   SandboxLifecycle,
   SandboxMetadataPatch,
   Volume,

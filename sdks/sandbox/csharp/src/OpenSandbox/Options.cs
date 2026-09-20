@@ -76,6 +76,11 @@ public class SandboxCreateOptions
     public SandboxLifecycle? Lifecycle { get; set; }
 
     /// <summary>
+    /// Gets or sets Pool-provided execution isolation and dynamic mounts.
+    /// </summary>
+    public SandboxIsolation? Isolation { get; set; }
+
+    /// <summary>
     /// Gets or sets the network policy for the sandbox.
     /// </summary>
     public NetworkPolicy? NetworkPolicy { get; set; }

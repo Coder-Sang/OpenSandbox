@@ -16,6 +16,7 @@ package controller
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"net/http"
@@ -67,6 +68,14 @@ type RuntimeInitConfig struct {
 	// AppendStartupStatus reports lifecycle progress to the bootstrap
 	// watchdog file (no-op when no status file is configured).
 	AppendStartupStatus func(string) error
+
+	// PoolRuntime creates the forced bwrap execution boundary for special
+	// Pool allocations. Nil means the capability is unavailable.
+	PoolRuntime *runtime.PoolRuntimeManager
+
+	// InitAccessToken authenticates isolation-bearing /internal/init calls
+	// before they may consume the one-shot slot.
+	InitAccessToken string
 }
 
 // RuntimeInitManager serializes POST /internal/init handling and owns the active
@@ -83,8 +92,9 @@ type RuntimeInitManager struct {
 	// validation passes, so malformed calls never burn the slot.
 	accepted atomic.Bool
 
-	mu    sync.Mutex
-	ready atomic.Bool
+	mu           sync.Mutex
+	ready        atomic.Bool
+	poolRequired atomic.Bool
 
 	periodic *lifecycle.PeriodicManager
 }
@@ -150,7 +160,10 @@ func (m *RuntimeInitManager) Ready() bool {
 	if m == nil {
 		return false
 	}
-	return m.ready.Load()
+	if !m.ready.Load() {
+		return false
+	}
+	return !m.poolRequired.Load() || runtime.PoolRuntimeHealthy()
 }
 
 // InitController serves POST /internal/init and GET /ready.
@@ -194,6 +207,14 @@ func (c *InitController) Init() {
 		c.RespondError(http.StatusBadRequest, model.ErrorCodeInvalidRequest, "invalid runtime init request: "+err.Error())
 		return
 	}
+	if req.Isolation != nil {
+		presented := c.ctx.GetHeader(model.ApiAccessTokenHeader)
+		if manager.cfg.InitAccessToken == "" || len(presented) != len(manager.cfg.InitAccessToken) ||
+			subtle.ConstantTimeCompare([]byte(presented), []byte(manager.cfg.InitAccessToken)) != 1 {
+			c.RespondError(http.StatusUnauthorized, model.ErrorCodeUnauthorized, "invalid or missing runtime init access token")
+			return
+		}
+	}
 
 	warnings, errorCode, httpStatus, err := manager.Apply(&req)
 	if err != nil {
@@ -225,6 +246,15 @@ func (m *RuntimeInitManager) Apply(req *model.RuntimeInitRequest) ([]string, mod
 			return nil, model.ErrorCodeInvalidRequest, http.StatusBadRequest, err
 		}
 		tokenHash = digest
+	}
+	if req.Isolation != nil {
+		if m.cfg.PoolRuntime == nil {
+			return nil, model.ErrorCodeServiceUnavailable, http.StatusServiceUnavailable,
+				errors.New("pool bwrap runtime is unavailable")
+		}
+		if err := runtime.ValidatePoolIsolation(req.Isolation); err != nil {
+			return nil, model.ErrorCodeInvalidRequest, http.StatusBadRequest, err
+		}
 	}
 	policy := req.EntrypointPolicy
 
@@ -260,6 +290,17 @@ func (m *RuntimeInitManager) Apply(req *model.RuntimeInitRequest) ([]string, mod
 		runtime.RetireEntrypoint()
 	}
 	runtime.StopUserProcesses(policy == model.EntrypointPolicyKeep)
+
+	// A forced pool runtime is established before any hook, entrypoint, or
+	// RuntimeBinding becomes visible. Failure leaves readiness gated and there
+	// is deliberately no direct-exec fallback.
+	if req.Isolation != nil {
+		m.poolRequired.Store(true)
+		if err := m.cfg.PoolRuntime.Start(req.Isolation); err != nil {
+			return warnings, model.ErrorCodeRuntimeError, http.StatusInternalServerError,
+				fmt.Errorf("runtime init bwrap: %w", err)
+		}
+	}
 
 	// 2. Apply the RuntimeBinding atomically: auth, env resolution, and
 	// telemetry attribution switch to the new sandbox in one swap.

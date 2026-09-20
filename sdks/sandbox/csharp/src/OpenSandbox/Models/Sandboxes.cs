@@ -927,6 +927,42 @@ public class CreateSandboxRequest
     /// </summary>
     [JsonPropertyName("extensions")]
     public IReadOnlyDictionary<string, object>? Extensions { get; set; }
+
+    /// <summary>
+    /// Gets or sets the Pool-provided execution isolation and dynamic mounts.
+    /// </summary>
+    [JsonPropertyName("isolation")]
+    public SandboxIsolation? Isolation { get; set; }
+}
+
+/// <summary>
+/// Selects a directory from a named Pool mount root.
+/// </summary>
+public class SandboxIsolationMount
+{
+    [JsonPropertyName("root")]
+    public required string Root { get; set; }
+
+    [JsonPropertyName("subPath")]
+    public required string SubPath { get; set; }
+
+    [JsonPropertyName("target")]
+    public required string Target { get; set; }
+
+    [JsonPropertyName("mode")]
+    public required string Mode { get; set; }
+}
+
+/// <summary>
+/// Requests the execution-isolation backend advertised by a Kubernetes Pool.
+/// </summary>
+public class SandboxIsolation
+{
+    [JsonPropertyName("type")]
+    public required string Type { get; set; }
+
+    [JsonPropertyName("mounts")]
+    public required IReadOnlyList<SandboxIsolationMount> Mounts { get; set; }
 }
 
 /// <summary>

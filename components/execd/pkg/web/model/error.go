@@ -30,6 +30,7 @@ const (
 	ErrorCodeServiceUnavailable  ErrorCode = "SERVICE_UNAVAILABLE"
 	ErrorCodeSessionNotFound     ErrorCode = "SESSION_NOT_FOUND"
 	ErrorCodeAlreadyInitialized  ErrorCode = "ALREADY_INITIALIZED"
+	ErrorCodeUnauthorized        ErrorCode = "UNAUTHORIZED"
 )
 
 type ErrorResponse struct {

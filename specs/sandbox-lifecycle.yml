@@ -1708,6 +1708,40 @@ components:
         team: null
         environment: "production"
 
+    SandboxIsolationMount:
+      type: object
+      additionalProperties: false
+      required: [root, subPath, target, mode]
+      properties:
+        root:
+          type: string
+          minLength: 1
+          description: Name of a trusted root declared by the Pool mount policy.
+        subPath:
+          type: string
+          minLength: 1
+          description: Normalized relative directory beneath the selected root. Absolute paths and traversal are rejected.
+        target:
+          type: string
+          pattern: '^/'
+          description: Normalized absolute path inside the sandbox, constrained by the root's targetPrefixes.
+        mode:
+          type: string
+          enum: [ro, rw]
+
+    SandboxIsolation:
+      type: object
+      additionalProperties: false
+      required: [type, mounts]
+      properties:
+        type:
+          type: string
+          enum: [bwrap]
+        mounts:
+          type: array
+          items:
+            $ref: '#/components/schemas/SandboxIsolationMount'
+
     CreateSandboxRequest:
       type: object
       description: |
@@ -1829,8 +1863,9 @@ components:
             execd; callers must not depend on the internal transport mechanism.
             The configuration is not included in Sandbox responses.
 
-            Not supported together with `extensions.poolRef`, because Pool Pods
-            are pre-created before request-specific lifecycle hooks are known.
+            Supported with `extensions.poolRef` only for Pools advertising the
+            `bwrap-v1` runtime-init contract; ordinary Pool Pods are pre-created
+            before request-specific lifecycle hooks are known and reject it.
             Runtimes that do not implement lifecycle hook transport reject this
             field.
 
@@ -1903,6 +1938,13 @@ components:
             per volume entry.
           items:
             $ref: '#/components/schemas/Volume'
+
+        isolation:
+          $ref: '#/components/schemas/SandboxIsolation'
+          description: |
+            Required for Pools advertising `opensandbox.io/execution-isolation=bwrap-v1`.
+            Unsupported for ordinary Pools and non-Pool sandboxes. Sources are selected only
+            by named root and relative subPath; callers cannot provide host absolute paths.
 
         extensions:
           type: object

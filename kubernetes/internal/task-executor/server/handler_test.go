@@ -112,6 +112,25 @@ func TestHandler_Health(t *testing.T) {
 	}
 }
 
+func TestRouter_RequiresBearerTokenWhenConfigured(t *testing.T) {
+	cfg := &config.Config{AuthToken: "secret-token"}
+	router := NewRouter(NewHandler(NewMockTaskManager(), cfg))
+
+	unauthorized := httptest.NewRecorder()
+	router.ServeHTTP(unauthorized, httptest.NewRequest("GET", "/getTasks", nil))
+	assert.Equal(t, http.StatusUnauthorized, unauthorized.Code)
+
+	authorizedReq := httptest.NewRequest("GET", "/getTasks", nil)
+	authorizedReq.Header.Set("Authorization", "Bearer secret-token")
+	authorized := httptest.NewRecorder()
+	router.ServeHTTP(authorized, authorizedReq)
+	assert.Equal(t, http.StatusOK, authorized.Code)
+
+	health := httptest.NewRecorder()
+	router.ServeHTTP(health, httptest.NewRequest("GET", "/health", nil))
+	assert.Equal(t, http.StatusOK, health.Code)
+}
+
 func TestHandler_CreateTask(t *testing.T) {
 	mgr := NewMockTaskManager()
 	cfg := &config.Config{}

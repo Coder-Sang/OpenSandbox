@@ -33,6 +33,15 @@ import (
 	api "github.com/alibaba/OpenSandbox/sandbox-k8s/pkg/task-executor"
 )
 
+func TestWithoutTaskExecutorToken(t *testing.T) {
+	env := withoutTaskExecutorToken([]string{
+		"PATH=/usr/bin",
+		"TASK_EXECUTOR_AUTH_TOKEN=secret",
+		"TASK_EXECUTOR_AUTH_TOKEN_SUFFIX=visible",
+	})
+	assert.Equal(t, []string{"PATH=/usr/bin", "TASK_EXECUTOR_AUTH_TOKEN_SUFFIX=visible"}, env)
+}
+
 func setupTestExecutor(t *testing.T) (Executor, string) {
 	dataDir := t.TempDir()
 	cfg := &config.Config{

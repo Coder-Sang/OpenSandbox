@@ -165,6 +165,33 @@ test("Sandbox.create forwards lifecycle hooks", async () => {
   assert.deepEqual(recordedRequests[0].lifecycle, expectedLifecycle);
 });
 
+test("Sandbox.create forwards bwrap Pool isolation without a startup image", async () => {
+  const { adapterFactory, recordedRequests } = createAdapterFactory();
+  const isolation = {
+    type: "bwrap",
+    mounts: [
+      {
+        root: "projects",
+        subPath: "project-A",
+        target: "/workspace/a",
+        mode: "rw",
+      },
+    ],
+  };
+
+  await Sandbox.create({
+    adapterFactory,
+    connectionConfig: { domain: "http://127.0.0.1:8080" },
+    extensions: { poolRef: "secure" },
+    isolation,
+    skipHealthCheck: true,
+  });
+
+  assert.equal(recordedRequests.length, 1);
+  assert.deepEqual(recordedRequests[0].isolation, isolation);
+  assert.equal(recordedRequests[0].resourceLimits, undefined);
+});
+
 test("Sandbox.create forwards windows platform values", async () => {
   const { adapterFactory, recordedRequests } = createAdapterFactory();
 

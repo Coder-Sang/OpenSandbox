@@ -17,6 +17,7 @@ package isolation
 
 import (
 	"context"
+	"os"
 	"os/exec"
 )
 
@@ -96,9 +97,15 @@ type EnvSpec struct {
 // (which always mounts Source==Dest read-write), a BindMount may map a distinct
 // destination and be mounted read-only.
 type BindMount struct {
-	Source   string // host path (required)
-	Dest     string // mount destination; defaults to Source when empty
-	ReadOnly bool   // true → --ro-bind; false → --bind
+	Source string // host path (required)
+	// SourceFile, when non-nil, is passed to bubblewrap as an inherited
+	// O_PATH descriptor and mounted with --bind-fd/--ro-bind-fd. This is the
+	// safe form for control-plane selected paths because it is immune to a
+	// concurrent rename or symlink replacement after validation.
+	SourceFile *os.File
+	Dest       string // mount destination; defaults to Source when empty
+	ReadOnly   bool   // true → --ro-bind; false → --bind
+	sourceFD   string // child descriptor assigned by the Linux implementation
 }
 
 // Capabilities describes what the isolator can and cannot do.
@@ -136,6 +143,18 @@ type WrapOptions struct {
 	UidMode        UidMode // "" or "setpriv" → setpriv; "userns" → user namespace
 	UpperDir       string  // empty when upper is on tmpfs (persist disabled)
 	WorkDir        string
+	// RootWritable preserves ordinary container rootfs write semantics. The
+	// default remains read-only for isolated-session compatibility.
+	RootWritable bool
+	// SkipWorkspace is used by the pool runtime, whose visible workspaces are
+	// supplied exclusively by policy-authorized FD bind mounts.
+	SkipWorkspace bool
+	// MaskPaths are replaced with empty, read-only tmpfs mounts after caller
+	// binds have been installed. Pool runtimes use this to hide the PVC mount
+	// roots and execd control directories.
+	MaskPaths []string
+	// DropCapabilities asks bubblewrap to clear the entire capability set.
+	DropCapabilities bool
 }
 
 // Isolator wraps an *exec.Cmd in a namespace-isolated execution environment.

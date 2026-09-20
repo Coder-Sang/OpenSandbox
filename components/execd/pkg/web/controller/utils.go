@@ -28,12 +28,33 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/alibaba/opensandbox/execd/pkg/runtime"
 	"github.com/alibaba/opensandbox/execd/pkg/util/pathutil"
 	"github.com/alibaba/opensandbox/execd/pkg/web/model"
 )
 
+func expandRuntimePath(value string) (string, error) {
+	resolved, err := pathutil.ExpandPath(value)
+	if err != nil {
+		return "", err
+	}
+	absolute, err := filepath.Abs(resolved)
+	if err != nil {
+		return "", err
+	}
+	return runtime.MapFilesystemPath(absolute)
+}
+
+func expandAbsRuntimePath(value string) (string, error) {
+	resolved, err := pathutil.ExpandAbsPath(value)
+	if err != nil {
+		return "", err
+	}
+	return runtime.MapFilesystemPath(resolved)
+}
+
 func DeleteFile(filePath string) error {
-	absPath, err := pathutil.ExpandAbsPath(filePath)
+	absPath, err := expandAbsRuntimePath(filePath)
 	if err != nil {
 		return fmt.Errorf("invalid path: %w", err)
 	}
@@ -58,7 +79,7 @@ func DeleteFile(filePath string) error {
 }
 
 func ChmodFile(file string, perms model.Permission) error {
-	abs, err := pathutil.ExpandAbsPath(file)
+	abs, err := expandAbsRuntimePath(file)
 	if err != nil {
 		return err
 	}
@@ -113,12 +134,12 @@ func SetFileOwnership(absPath string, owner string, group string) error {
 }
 
 func RenameFile(item model.RenameFileItem) error {
-	srcPath, err := pathutil.ExpandAbsPath(item.Src)
+	srcPath, err := expandAbsRuntimePath(item.Src)
 	if err != nil {
 		return fmt.Errorf("invalid source path: %w", err)
 	}
 
-	dstPath, err := pathutil.ExpandAbsPath(item.Dest)
+	dstPath, err := expandAbsRuntimePath(item.Dest)
 	if err != nil {
 		return fmt.Errorf("invalid destination path: %w", err)
 	}
@@ -193,7 +214,7 @@ func MkdirAllWithOwnership(targetDir string, dirPerm os.FileMode, owner, group s
 }
 
 func MakeDir(dir string, perm model.Permission) error {
-	abs, err := pathutil.ExpandAbsPath(dir)
+	abs, err := expandAbsRuntimePath(dir)
 	if err != nil {
 		return err
 	}
@@ -259,7 +280,7 @@ func buildFileInfo(absPath string, fileInfo os.FileInfo) (model.FileInfo, error)
 }
 
 func GetFileInfo(filePath string) (model.FileInfo, error) {
-	absPath, err := pathutil.ExpandAbsPath(filePath)
+	absPath, err := expandAbsRuntimePath(filePath)
 	if err != nil {
 		return model.FileInfo{}, fmt.Errorf("invalid path %s: %w", filePath, err)
 	}
@@ -272,7 +293,11 @@ func GetFileInfo(filePath string) (model.FileInfo, error) {
 		return model.FileInfo{}, fmt.Errorf("error accessing file %s: %w", filePath, err)
 	}
 
-	return buildFileInfo(absPath, fileInfo)
+	guestPath, guestErr := pathutil.ExpandAbsPath(filePath)
+	if guestErr != nil {
+		return model.FileInfo{}, guestErr
+	}
+	return buildFileInfo(guestPath, fileInfo)
 }
 
 type httpRange struct {

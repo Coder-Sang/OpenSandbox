@@ -170,16 +170,25 @@ public sealed class Sandbox : IAsyncDisposable
         CancellationToken cancellationToken = default)
     {
         var connectionConfig = options.ConnectionConfig ?? new ConnectionConfig();
-        if (string.IsNullOrWhiteSpace(options.Image) == string.IsNullOrWhiteSpace(options.SnapshotId))
+        var poolRef = options.Extensions is not null
+            && options.Extensions.TryGetValue("poolRef", out var rawPoolRef)
+            ? rawPoolRef.Trim()
+            : null;
+        if (string.IsNullOrWhiteSpace(poolRef)
+            && string.IsNullOrWhiteSpace(options.Image) == string.IsNullOrWhiteSpace(options.SnapshotId))
         {
             throw new InvalidArgumentException("Exactly one of Image or SnapshotId must be specified.");
+        }
+        if (options.Isolation is not null && string.IsNullOrWhiteSpace(poolRef))
+        {
+            throw new InvalidArgumentException("Isolation requires Extensions.poolRef.");
         }
         if (!string.IsNullOrWhiteSpace(options.SnapshotId) && options.Entrypoint is not null)
         {
             throw new InvalidArgumentException("Entrypoint must be omitted when SnapshotId is provided.");
         }
         ValidateHostPaths(options.Volumes);
-        var startupSource = options.Image ?? options.SnapshotId;
+        var startupSource = options.Image ?? options.SnapshotId ?? poolRef;
 
         var request = new CreateSandboxRequest
         {
@@ -195,12 +204,15 @@ public sealed class Sandbox : IAsyncDisposable
                 ? options.Entrypoint ?? Constants.DefaultEntrypoint
                 : null,
             Timeout = options.ManualCleanup ? null : options.TimeoutSeconds ?? Constants.DefaultTimeoutSeconds,
-            ResourceLimits = options.Resource ?? Constants.DefaultResourceLimits,
+            ResourceLimits = string.IsNullOrWhiteSpace(poolRef)
+                ? options.Resource ?? Constants.DefaultResourceLimits
+                : options.Resource,
             ResourceRequests = options.ResourceRequests,
             Env = options.Env,
             SecureAccess = options.SecureAccess,
             Metadata = options.Metadata,
             Lifecycle = options.Lifecycle,
+            Isolation = options.Isolation,
             Platform = options.Platform,
             NetworkPolicy = options.NetworkPolicy != null
                 ? new NetworkPolicy

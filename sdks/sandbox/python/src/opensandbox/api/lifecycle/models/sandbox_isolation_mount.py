@@ -1,0 +1,85 @@
+#
+# Copyright 2026 The OpenSandbox Authors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from typing import Any, TypeVar
+
+from attrs import define as _attrs_define
+
+from ..models.sandbox_isolation_mount_mode import SandboxIsolationMountMode
+
+T = TypeVar("T", bound="SandboxIsolationMount")
+
+
+@_attrs_define
+class SandboxIsolationMount:
+    """
+    Attributes:
+        root (str): Name of a trusted root declared by the Pool mount policy.
+        sub_path (str): Normalized relative directory beneath the selected root. Absolute paths and traversal are
+            rejected.
+        target (str): Normalized absolute path inside the sandbox, constrained by the root's targetPrefixes.
+        mode (SandboxIsolationMountMode):
+    """
+
+    root: str
+    sub_path: str
+    target: str
+    mode: SandboxIsolationMountMode
+
+    def to_dict(self) -> dict[str, Any]:
+        root = self.root
+
+        sub_path = self.sub_path
+
+        target = self.target
+
+        mode = self.mode.value
+
+        field_dict: dict[str, Any] = {}
+
+        field_dict.update(
+            {
+                "root": root,
+                "subPath": sub_path,
+                "target": target,
+                "mode": mode,
+            }
+        )
+
+        return field_dict
+
+    @classmethod
+    def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
+        d = dict(src_dict)
+        root = d.pop("root")
+
+        sub_path = d.pop("subPath")
+
+        target = d.pop("target")
+
+        mode = SandboxIsolationMountMode(d.pop("mode"))
+
+        sandbox_isolation_mount = cls(
+            root=root,
+            sub_path=sub_path,
+            target=target,
+            mode=mode,
+        )
+
+        return sandbox_isolation_mount

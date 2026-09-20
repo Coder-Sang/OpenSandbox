@@ -228,6 +228,26 @@ class SandboxLifecycle(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="forbid")
 
 
+class SandboxIsolationMount(BaseModel):
+    """Select a relative directory from a Pool-declared trusted root."""
+
+    root: str = Field(min_length=1)
+    sub_path: str = Field(alias="subPath", min_length=1)
+    target: str = Field(min_length=1)
+    mode: Literal["ro", "rw"]
+
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+
+class SandboxIsolation(BaseModel):
+    """Dynamic mount selection for a compatible bwrap-v1 Pool."""
+
+    type: Literal["bwrap"] = "bwrap"
+    mounts: list[SandboxIsolationMount]
+
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+
 class InlineCredentialSource(BaseModel):
     """
     Write-only inline credential material for Credential Vault.
@@ -273,7 +293,10 @@ class CredentialMatch(BaseModel):
     """Request match for a Credential Vault binding."""
 
     schemes: list[Literal["https", "http"]] | None = Field(default=None)
-    ports: list[int] | None = Field(default=None, deprecated="Port is derived from scheme (https→443, http→80). Values other than 80 or 443 are rejected by the server.")
+    ports: list[int] | None = Field(
+        default=None,
+        deprecated="Port is derived from scheme (https→443, http→80). Values other than 80 or 443 are rejected by the server.",
+    )
     hosts: list[str] = Field(description="Exact FQDNs or leftmost-label wildcards.")
     methods: list[str] | None = Field(default=None)
     paths: list[str] | None = Field(default=None)
@@ -907,9 +930,7 @@ class SnapshotFilter(BaseModel):
         description="Filter by source sandbox id",
         alias="sandbox_id",
     )
-    name: str | None = Field(
-        default=None, description="Filter by exact snapshot name"
-    )
+    name: str | None = Field(default=None, description="Filter by exact snapshot name")
     states: list[str] | None = Field(
         default=None, description="Filter by snapshot states"
     )

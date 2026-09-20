@@ -180,18 +180,24 @@ type defaultTaskScheduler struct {
 	resPolicyWhenTaskComplete sandboxv1alpha1.TaskResourcePolicy
 	name                      string
 	logger                    logr.Logger
+	tokenResolver             func(*corev1.Pod) (string, error)
 }
 
 func newTaskScheduler(name string, tasks []*api.Task, pods []*corev1.Pod, resPolicyWhenTaskComplete sandboxv1alpha1.TaskResourcePolicy, logger logr.Logger) (*defaultTaskScheduler, error) {
+	return newTaskSchedulerWithTokenResolver(name, tasks, pods, resPolicyWhenTaskComplete, logger, nil)
+}
+
+func newTaskSchedulerWithTokenResolver(name string, tasks []*api.Task, pods []*corev1.Pod, resPolicyWhenTaskComplete sandboxv1alpha1.TaskResourcePolicy, logger logr.Logger, resolver func(*corev1.Pod) (string, error)) (*defaultTaskScheduler, error) {
 	sch := &defaultTaskScheduler{
 		allPods:                   pods,
 		maxConcurrency:            defaultSchConcurrency,
-		taskClientCreator:         newTaskClient,
-		taskStatusCollector:       newTaskStatusCollector(newTaskClient, logger),
 		resPolicyWhenTaskComplete: resPolicyWhenTaskComplete,
 		name:                      name,
 		logger:                    logger,
+		tokenResolver:             resolver,
 	}
+	sch.taskClientCreator = sch.newTaskClient
+	sch.taskStatusCollector = newTaskStatusCollector(sch.newTaskClient, logger)
 	taskNodes, err := initTaskNodes(tasks)
 	if err != nil {
 		return nil, fmt.Errorf("scheduler: failed to init task node err %w", err)
@@ -206,6 +212,33 @@ func newTaskScheduler(name string, tasks []*api.Task, pods []*corev1.Pod, resPol
 	}
 	logger.Info("successfully recover", "scheduler", name)
 	return sch, nil
+}
+
+func (sch *defaultTaskScheduler) newTaskClient(ip string) taskClient {
+	if sch.tokenResolver != nil {
+		for _, pod := range sch.allPods {
+			if pod != nil && pod.Status.PodIP == ip {
+				token, err := sch.tokenResolver(pod)
+				if err != nil {
+					sch.logger.Error(err, "resolve task-executor token", "pod", pod.Name)
+					if pod.Annotations["opensandbox.io/control-token-secret"] != "" {
+						// Deliberately produce an authenticated request that cannot
+						// succeed. Never downgrade a protected Pod to plaintext.
+						return api.NewAuthenticatedClient(fmtEndpoint(ip), "invalid-control-token")
+					}
+					break
+				}
+				if token != "" {
+					return api.NewAuthenticatedClient(fmtEndpoint(ip), token)
+				}
+				if pod.Annotations["opensandbox.io/control-token-secret"] != "" {
+					return api.NewAuthenticatedClient(fmtEndpoint(ip), "invalid-control-token")
+				}
+				break
+			}
+		}
+	}
+	return newTaskClient(ip)
 }
 
 func indexByName(taskNodes []*taskNode) map[string]*taskNode {

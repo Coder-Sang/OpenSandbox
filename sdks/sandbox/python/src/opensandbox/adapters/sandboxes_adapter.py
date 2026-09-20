@@ -54,6 +54,7 @@ from opensandbox.models.sandboxes import (
     SandboxFilter,
     SandboxImageSpec,
     SandboxInfo,
+    SandboxIsolation,
     SandboxLifecycle,
     SandboxRenewResponse,
     SnapshotFilter,
@@ -156,7 +157,7 @@ class SandboxesAdapter(Sandboxes):
         env: dict[str, str],
         metadata: dict[str, str],
         timeout: timedelta | None,
-        resource: dict[str, str],
+        resource: dict[str, str] | None,
         network_policy: NetworkPolicy | None,
         extensions: dict[str, str],
         volumes: list[Volume] | None,
@@ -166,6 +167,7 @@ class SandboxesAdapter(Sandboxes):
         credential_proxy: CredentialProxyConfig | None = None,
         resource_requests: dict[str, str] | None = None,
         lifecycle: SandboxLifecycle | None = None,
+        isolation: SandboxIsolation | None = None,
     ) -> SandboxCreateResponse:
         """Create a new sandbox instance with the specified configuration."""
         logger.info(
@@ -191,6 +193,7 @@ class SandboxesAdapter(Sandboxes):
                 snapshot_id=snapshot_id,
                 resource_requests=resource_requests,
                 lifecycle=lifecycle,
+                isolation=isolation,
             )
 
             client = await self._get_client()
@@ -230,12 +233,14 @@ class SandboxesAdapter(Sandboxes):
         try:
             from opensandbox.api.lifecycle.api.sandboxes import post_sandboxes
 
-            create_request = SandboxModelConverter.to_api_create_template_sandbox_request(
-                template_id=template_id,
-                timeout=timeout,
-                metadata=metadata,
-                network_policy=network_policy,
-                extensions=extensions,
+            create_request = (
+                SandboxModelConverter.to_api_create_template_sandbox_request(
+                    template_id=template_id,
+                    timeout=timeout,
+                    metadata=metadata,
+                    network_policy=network_policy,
+                    extensions=extensions,
+                )
             )
 
             client = await self._get_client()
@@ -244,7 +249,9 @@ class SandboxesAdapter(Sandboxes):
                 body=create_request,
             )
 
-            handle_api_error(response_obj, f"Create sandbox from template {template_id}")
+            handle_api_error(
+                response_obj, f"Create sandbox from template {template_id}"
+            )
 
             from opensandbox.api.lifecycle.models import CreateSandboxResponse
 
@@ -287,9 +294,7 @@ class SandboxesAdapter(Sandboxes):
         """List sandboxes with optional filtering criteria."""
         logger.debug(f"Listing sandboxes with filter: {filter}")
 
-        metadata = (
-            encode_metadata_filter(filter.metadata) if filter.metadata else UNSET
-        )
+        metadata = encode_metadata_filter(filter.metadata) if filter.metadata else UNSET
 
         try:
             from opensandbox.api.lifecycle.api.sandboxes import get_sandboxes
@@ -488,9 +493,7 @@ class SandboxesAdapter(Sandboxes):
 
     async def list_templates(self, filter: TemplateFilter) -> PagedTemplateInfos:
         """List the current tenant's templates with optional filtering."""
-        metadata = (
-            encode_metadata_filter(filter.metadata) if filter.metadata else UNSET
-        )
+        metadata = encode_metadata_filter(filter.metadata) if filter.metadata else UNSET
 
         try:
             from opensandbox.api.lifecycle.api.templates import list_templates

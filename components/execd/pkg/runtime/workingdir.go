@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path/filepath"
 
 	"github.com/alibaba/opensandbox/execd/pkg/util/pathutil"
 )
@@ -35,7 +36,15 @@ func ValidateWorkingDirWithEnv(cwd string, envOverrides map[string]string) error
 	if err != nil {
 		return fmt.Errorf("cannot resolve working directory %q: %w", cwd, err)
 	}
-	fi, err := os.Stat(resolvedCwd)
+	resolvedCwd, err = filepath.Abs(resolvedCwd)
+	if err != nil {
+		return fmt.Errorf("cannot resolve working directory %q: %w", cwd, err)
+	}
+	hostCwd, err := MapFilesystemPath(resolvedCwd)
+	if err != nil {
+		return fmt.Errorf("cannot access working directory %q: %w", cwd, err)
+	}
+	fi, err := os.Stat(hostCwd)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return fmt.Errorf("working directory does not exist: %s: %w", cwd, err)

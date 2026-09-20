@@ -37,6 +37,7 @@ type Config struct {
 	LogMaxBackups     int
 	LogMaxAge         int
 	LogDir            string
+	AuthToken         string
 }
 
 func NewConfig() *Config {
@@ -71,6 +72,9 @@ func (c *Config) LoadFromEnv() {
 	}
 	if v := os.Getenv("MAIN_CONTAINER_NAME"); v != "" {
 		c.MainContainerName = v
+	}
+	if v := os.Getenv("TASK_EXECUTOR_AUTH_TOKEN"); v != "" {
+		c.AuthToken = v
 	}
 }
 

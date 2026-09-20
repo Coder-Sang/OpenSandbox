@@ -225,6 +225,45 @@ public class SandboxEgressLifecycleTests
     }
 
     [Fact]
+    public async Task CreateAsync_ShouldSupportBwrapPoolWithoutImage()
+    {
+        var sandboxes = new StubSandboxes();
+        var adapterFactory = new StubAdapterFactory(sandboxes, new StubEgress());
+
+        await using var sandbox = await Sandbox.CreateAsync(new SandboxCreateOptions
+        {
+            Extensions = new Dictionary<string, string> { ["poolRef"] = "secure-pool" },
+            Isolation = new SandboxIsolation
+            {
+                Type = "bwrap",
+                Mounts =
+                [
+                    new SandboxIsolationMount
+                    {
+                        Root = "projects",
+                        SubPath = "project-a",
+                        Target = "/workspace/a",
+                        Mode = "rw"
+                    }
+                ]
+            },
+            ConnectionConfig = new ConnectionConfig(new ConnectionConfigOptions
+            {
+                Domain = "127.0.0.1:8080",
+                Protocol = ConnectionProtocol.Http
+            }),
+            AdapterFactory = adapterFactory,
+            SkipHealthCheck = true,
+            Diagnostics = new SdkDiagnosticsOptions { LoggerFactory = NullLoggerFactory.Instance }
+        });
+
+        sandboxes.LastCreateRequest.Should().NotBeNull();
+        sandboxes.LastCreateRequest!.Image.Should().BeNull();
+        sandboxes.LastCreateRequest.ResourceLimits.Should().BeNull();
+        sandboxes.LastCreateRequest.Isolation!.Mounts.Should().ContainSingle();
+    }
+
+    [Fact]
     public async Task CreateAsync_ShouldRejectRelativeHostPath()
     {
         var sandboxes = new StubSandboxes();

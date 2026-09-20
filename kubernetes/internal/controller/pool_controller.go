@@ -16,7 +16,9 @@ package controller
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	stdjson "encoding/json"
 	gerrors "errors"
@@ -67,8 +69,11 @@ const (
 )
 
 const (
-	labelPoolName     = "sandbox.opensandbox.io/pool-name"
-	labelPoolRevision = "sandbox.opensandbox.io/pool-revision"
+	labelPoolName                = "sandbox.opensandbox.io/pool-name"
+	labelPoolRevision            = "sandbox.opensandbox.io/pool-revision"
+	executionIsolationAnnotation = "opensandbox.io/execution-isolation"
+	controlTokenSecretAnnotation = "opensandbox.io/control-token-secret"
+	bwrapV1Isolation             = "bwrap-v1"
 )
 
 const (
@@ -117,6 +122,7 @@ type PoolReconciler struct {
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=pods/exec,verbs=create
 // +kubebuilder:rbac:groups=core,resources=pods/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;create
 // +kubebuilder:rbac:groups=core,resources=events,verbs=get;list;watch;create;update;patch;delete
 
 func (r *PoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, retErr error) {
@@ -1346,6 +1352,13 @@ func (r *PoolReconciler) createPoolPod(ctx context.Context, pool *sandboxv1alpha
 	pod.GenerateName = pool.Name + "-"
 	pod.Labels[labelPoolName] = pool.Name
 	pod.Labels[labelPoolRevision] = updateRevision
+	var controlSecret *corev1.Secret
+	if pool.Spec.Template.Annotations[executionIsolationAnnotation] == bwrapV1Isolation {
+		controlSecret, err = preparePoolControlSecret(pod, pool)
+		if err != nil {
+			return err
+		}
+	}
 	if err := ctrl.SetControllerReference(pool, pod, r.Scheme); err != nil {
 		return err
 	}
@@ -1353,10 +1366,100 @@ func (r *PoolReconciler) createPoolPod(ctx context.Context, pool *sandboxv1alpha
 		r.Recorder.Eventf(pool, corev1.EventTypeWarning, eventReasonFailedCreate, "Failed to create pool pod: %v", err)
 		return err
 	}
+	if controlSecret != nil {
+		controlSecret.Namespace = pod.Namespace
+		if err := ctrl.SetControllerReference(pod, controlSecret, r.Scheme); err != nil {
+			_ = r.Delete(ctx, pod)
+			return err
+		}
+		if err := r.Create(ctx, controlSecret); err != nil {
+			_ = r.Delete(ctx, pod)
+			return fmt.Errorf("create per-pod control token Secret: %w", err)
+		}
+	}
 	poolScaleExpectations.ExpectScale(controllerutils.GetControllerKey(pool), expectations.Create, pod.Name)
 	log.Info("Created pool pod", "pool", pool.Name, "pod", pod.Name, "revision", updateRevision)
 	r.Recorder.Eventf(pool, corev1.EventTypeNormal, eventReasonSuccessfulCreate, "Created pool pod: %v", pod.Name)
 	return nil
+}
+
+func preparePoolControlSecret(pod *corev1.Pod, pool *sandboxv1alpha1.Pool) (*corev1.Secret, error) {
+	if pod.Annotations == nil {
+		pod.Annotations = make(map[string]string)
+	}
+	// Give the Pod a stable name so its Secret reference is known before the
+	// Pod is submitted. The Secret itself is created immediately afterwards
+	// with the Pod as owner; containers remain Pending until it exists.
+	pod.Name = fmt.Sprintf("%s-%s", pool.Name, randomTokenName(8))
+	pod.GenerateName = ""
+	secretName := pod.Name + "-control"
+	pod.Annotations[controlTokenSecretAnnotation] = secretName
+
+	execdToken, err := randomControlToken()
+	if err != nil {
+		return nil, err
+	}
+	taskToken, err := randomControlToken()
+	if err != nil {
+		return nil, err
+	}
+	for idx := range pod.Spec.Containers {
+		container := &pod.Spec.Containers[idx]
+		// The common Pool topology runs task-executor and the allocated task in
+		// one container, so that sole container needs both credentials. In a
+		// sidecar topology, scope each credential to its consumer and never
+		// expose either token to unrelated sidecars.
+		if len(pod.Spec.Containers) == 1 || container.Name == "sandbox" || container.Name == "sandbox-container" {
+			container.Env = upsertSecretEnv(container.Env, "EXECD_ACCESS_TOKEN", secretName, "execd-token")
+		}
+		if len(pod.Spec.Containers) == 1 || container.Name == "task-executor" {
+			container.Env = upsertSecretEnv(container.Env, "TASK_EXECUTOR_AUTH_TOKEN", secretName, "task-executor-token")
+		}
+	}
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: secretName},
+		Type:       corev1.SecretTypeOpaque,
+		Data: map[string][]byte{
+			"execd-token":         []byte(execdToken),
+			"task-executor-token": []byte(taskToken),
+		},
+	}, nil
+}
+
+func randomControlToken() (string, error) {
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return "", fmt.Errorf("generate control token: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(raw), nil
+}
+
+func randomTokenName(length int) string {
+	raw := make([]byte, length)
+	if _, err := rand.Read(raw); err != nil {
+		return strconv.FormatInt(time.Now().UnixNano(), 36)
+	}
+	const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
+	for i := range raw {
+		raw[i] = alphabet[int(raw[i])%len(alphabet)]
+	}
+	return string(raw)
+}
+
+func upsertSecretEnv(env []corev1.EnvVar, name, secretName, key string) []corev1.EnvVar {
+	filtered := env[:0]
+	for _, item := range env {
+		if item.Name != name {
+			filtered = append(filtered, item)
+		}
+	}
+	return append(filtered, corev1.EnvVar{
+		Name: name,
+		ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+			LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
+			Key:                  key,
+		}},
+	})
 }
 
 // handleEviction fetches the current allocation, evicts idle pods marked for eviction,

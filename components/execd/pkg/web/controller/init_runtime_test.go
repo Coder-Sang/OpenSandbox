@@ -15,6 +15,7 @@
 package controller
 
 import (
+	"encoding/json"
 	"net/http"
 	"sync/atomic"
 	"testing"
@@ -23,6 +24,7 @@ import (
 
 	"github.com/alibaba/opensandbox/execd/pkg/binding"
 	"github.com/alibaba/opensandbox/execd/pkg/lifecycle"
+	"github.com/alibaba/opensandbox/execd/pkg/runtime"
 	"github.com/alibaba/opensandbox/execd/pkg/web/model"
 )
 
@@ -299,6 +301,39 @@ func TestApplyWithTelemetryAttrs(t *testing.T) {
 	current := binding.Current()
 	require.Equal(t, "tenant-a", current.TelemetryAttrs["tenant_id"])
 	require.NotContains(t, current.TelemetryAttrs, "sandbox_id")
+}
+
+func TestIsolationInitAuthenticatesBeforeConsumingSlot(t *testing.T) {
+	clearInitManager(t)
+	manager := newTestInitManager(t, RuntimeInitConfig{InitAccessToken: "control-token"})
+	req := validInitRequest()
+	req.Isolation = &runtime.PoolIsolationSpec{
+		Type: "bwrap",
+		Roots: map[string]runtime.PoolMountRoot{
+			"projects": {
+				MountRoot:      "/storage",
+				Source:         "/storage/projects",
+				TargetPrefixes: []string{"/workspace"},
+				MaxMode:        "rw",
+			},
+		},
+		Mounts: []runtime.PoolMountSelector{{
+			Root: "projects", SubPath: "project-a", Target: "/workspace/a", Mode: "rw",
+		}},
+	}
+	body, err := json.Marshal(req)
+	require.NoError(t, err)
+
+	ctx, recorder := newTestContext(http.MethodPost, "/internal/init", body)
+	NewInitController(ctx).Init()
+	require.Equal(t, http.StatusUnauthorized, recorder.Code)
+	require.False(t, manager.accepted.Load())
+
+	ctx, recorder = newTestContext(http.MethodPost, "/internal/init", body)
+	ctx.Request.Header.Set(model.ApiAccessTokenHeader, "control-token")
+	NewInitController(ctx).Init()
+	require.Equal(t, http.StatusServiceUnavailable, recorder.Code)
+	require.False(t, manager.accepted.Load(), "missing runtime capability must not burn init slot")
 }
 
 func TestApplyLifecycleOverrideAndTemplateFallback(t *testing.T) {

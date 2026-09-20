@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     from ..models.network_policy import NetworkPolicy
     from ..models.platform_spec import PlatformSpec
     from ..models.resource_limits import ResourceLimits
+    from ..models.sandbox_isolation import SandboxIsolation
     from ..models.sandbox_lifecycle import SandboxLifecycle
     from ..models.volume import Volume
 
@@ -169,6 +170,7 @@ class CreateSandboxRequest:
                 specific
                 storage source and common mount settings. Exactly one backend type must be specified
                 per volume entry.
+            isolation (SandboxIsolation | Unset):
             extensions (CreateSandboxRequestExtensions | Unset): Opaque container for provider-specific or transient
                 parameters not supported by the core API.
 
@@ -201,6 +203,7 @@ class CreateSandboxRequest:
     credential_proxy: CredentialProxyConfig | Unset = UNSET
     secure_access: bool | Unset = False
     volumes: list[Volume] | Unset = UNSET
+    isolation: SandboxIsolation | Unset = UNSET
     extensions: CreateSandboxRequestExtensions | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
@@ -264,6 +267,10 @@ class CreateSandboxRequest:
                 volumes_item = volumes_item_data.to_dict()
                 volumes.append(volumes_item)
 
+        isolation: dict[str, Any] | Unset = UNSET
+        if not isinstance(self.isolation, Unset):
+            isolation = self.isolation.to_dict()
+
         extensions: dict[str, Any] | Unset = UNSET
         if not isinstance(self.extensions, Unset):
             extensions = self.extensions.to_dict()
@@ -301,6 +308,8 @@ class CreateSandboxRequest:
             field_dict["secureAccess"] = secure_access
         if volumes is not UNSET:
             field_dict["volumes"] = volumes
+        if isolation is not UNSET:
+            field_dict["isolation"] = isolation
         if extensions is not UNSET:
             field_dict["extensions"] = extensions
 
@@ -316,6 +325,7 @@ class CreateSandboxRequest:
         from ..models.network_policy import NetworkPolicy
         from ..models.platform_spec import PlatformSpec
         from ..models.resource_limits import ResourceLimits
+        from ..models.sandbox_isolation import SandboxIsolation
         from ..models.sandbox_lifecycle import SandboxLifecycle
         from ..models.volume import Volume
 
@@ -409,6 +419,13 @@ class CreateSandboxRequest:
 
                 volumes.append(volumes_item)
 
+        _isolation = d.pop("isolation", UNSET)
+        isolation: SandboxIsolation | Unset
+        if isinstance(_isolation, Unset):
+            isolation = UNSET
+        else:
+            isolation = SandboxIsolation.from_dict(_isolation)
+
         _extensions = d.pop("extensions", UNSET)
         extensions: CreateSandboxRequestExtensions | Unset
         if isinstance(_extensions, Unset):
@@ -432,6 +449,7 @@ class CreateSandboxRequest:
             credential_proxy=credential_proxy,
             secure_access=secure_access,
             volumes=volumes,
+            isolation=isolation,
             extensions=extensions,
         )
 

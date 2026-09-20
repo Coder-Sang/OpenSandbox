@@ -15,7 +15,9 @@
 package server
 
 import (
+	"crypto/subtle"
 	"net/http"
+	"strings"
 )
 
 func NewRouter(h *handler) http.Handler {
@@ -28,5 +30,21 @@ func NewRouter(h *handler) http.Handler {
 	mux.HandleFunc("DELETE /tasks/{id}", h.deleteTask)
 	mux.HandleFunc("GET /health", h.health)
 
-	return mux
+	return h.authenticate(mux)
+}
+
+func (h *handler) authenticate(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" || h.config == nil || h.config.AuthToken == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		provided := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if len(provided) != len(h.config.AuthToken) ||
+			subtle.ConstantTimeCompare([]byte(provided), []byte(h.config.AuthToken)) != 1 {
+			writeError(w, http.StatusUnauthorized, "missing or invalid bearer token")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }

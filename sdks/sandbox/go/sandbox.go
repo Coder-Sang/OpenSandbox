@@ -25,7 +25,7 @@ import (
 
 // SandboxCreateOptions configures sandbox creation.
 type SandboxCreateOptions struct {
-	// Image is the container image URI (required).
+	// Image is the container image URI. It is optional when Extensions contains poolRef.
 	Image string
 	// SnapshotID restores the sandbox from a previously created snapshot.
 	SnapshotID string
@@ -56,6 +56,9 @@ type SandboxCreateOptions struct {
 
 	// Lifecycle contains optional pre-start and periodic hooks.
 	Lifecycle *SandboxLifecycle
+
+	// Isolation selects dynamic mounts from a compatible bwrap-v1 Pool.
+	Isolation *SandboxIsolation
 
 	// NetworkPolicy for egress control.
 	NetworkPolicy *NetworkPolicy
@@ -136,8 +139,12 @@ func (s *Sandbox) templateBacked() bool {
 
 // CreateSandbox creates a new sandbox and waits for it to be ready.
 func CreateSandbox(ctx context.Context, config ConnectionConfig, opts SandboxCreateOptions) (*Sandbox, error) {
-	if (opts.Image == "") == (opts.SnapshotID == "") {
+	poolRef := strings.TrimSpace(opts.Extensions["poolRef"])
+	if poolRef == "" && (opts.Image == "") == (opts.SnapshotID == "") {
 		return nil, &InvalidArgumentError{Field: "Image/SnapshotID", Message: "exactly one of image or snapshotID is required"}
+	}
+	if opts.Isolation != nil && poolRef == "" {
+		return nil, &InvalidArgumentError{Field: "Isolation", Message: "isolation requires Extensions.poolRef"}
 	}
 
 	entrypoint := opts.Entrypoint
@@ -145,7 +152,7 @@ func CreateSandbox(ctx context.Context, config ConnectionConfig, opts SandboxCre
 		entrypoint = DefaultEntrypoint
 	}
 	limits := opts.ResourceLimits
-	if limits == nil {
+	if limits == nil && poolRef == "" {
 		limits = DefaultResourceLimits
 	}
 	var timeout *int
@@ -163,6 +170,9 @@ func CreateSandbox(ctx context.Context, config ConnectionConfig, opts SandboxCre
 	if startupSource == "" {
 		startupSource = opts.SnapshotID
 	}
+	if startupSource == "" {
+		startupSource = poolRef
+	}
 	started := time.Now()
 
 	req := CreateSandboxRequest{
@@ -176,6 +186,7 @@ func CreateSandbox(ctx context.Context, config ConnectionConfig, opts SandboxCre
 		SecureAccess:     opts.SecureAccess,
 		Metadata:         opts.Metadata,
 		Lifecycle:        opts.Lifecycle,
+		Isolation:        opts.Isolation,
 		NetworkPolicy:    opts.NetworkPolicy,
 		CredentialProxy:  opts.CredentialProxy,
 		Volumes:          opts.Volumes,

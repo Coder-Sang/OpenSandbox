@@ -46,6 +46,7 @@ import type {
   RenewSandboxExpirationResponse,
   SandboxId,
   SandboxInfo,
+  SandboxIsolation,
   SandboxLifecycle,
   SandboxMetadataPatch,
   Volume,
@@ -181,6 +182,8 @@ export interface SandboxCreateOptions {
    * Optional declarative lifecycle hooks executed inside the sandbox.
    */
   lifecycle?: SandboxLifecycle;
+  /** Dynamic mount selection for a compatible bwrap-v1 Pool. */
+  isolation?: SandboxIsolation;
   /**
    * Optional runtime platform constraint used for provisioning.
    */
@@ -490,8 +493,12 @@ export class Sandbox {
   }
 
   static async create(opts: SandboxCreateOptions): Promise<Sandbox> {
-    if ((opts.image == null) === (opts.snapshotId == null)) {
+    const poolRef = opts.extensions?.poolRef?.trim();
+    if (!poolRef && (opts.image == null) === (opts.snapshotId == null)) {
       throw new Error("Exactly one of image or snapshotId must be provided");
+    }
+    if (opts.isolation && !poolRef) {
+      throw new Error("isolation requires extensions.poolRef");
     }
     if (!(opts.skipHealthCheck ?? false) && opts.healthCheckPollingInterval !== undefined) {
       validatePollingInterval(opts.healthCheckPollingInterval);
@@ -554,7 +561,7 @@ export class Sandbox {
       image: opts.image == null ? undefined : toImageSpec(opts.image),
       snapshotId: opts.snapshotId,
       entrypoint: opts.entrypoint ?? DEFAULT_ENTRYPOINT,
-      resourceLimits: opts.resource ?? DEFAULT_RESOURCE_LIMITS,
+      resourceLimits: poolRef ? opts.resource : opts.resource ?? DEFAULT_RESOURCE_LIMITS,
       resourceRequests: opts.resourceRequests,
       secureAccess: opts.secureAccess ?? false,
       env: opts.env ?? {},
@@ -569,6 +576,7 @@ export class Sandbox {
       volumes: opts.volumes,
       extensions: opts.extensions ?? {},
       lifecycle: opts.lifecycle,
+      isolation: opts.isolation,
       platform: opts.platform,
     };
     if (timeoutSeconds !== null) {

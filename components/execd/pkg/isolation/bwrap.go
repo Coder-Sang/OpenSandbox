@@ -57,11 +57,22 @@ func buildArgvWithLifecycle(
 	// 1. Namespace flags.
 	argv = append(argv, bwrapNamespaceSegment(opts, useUserns)...)
 
-	// 2. Root filesystem (read-only).
-	argv = append(argv, "--ro-bind", "/", "/")
+	// 2. Root filesystem. Ordinary isolated sessions retain their historical
+	// read-only root; pool runtimes deliberately preserve container semantics.
+	rootFlag := "--ro-bind"
+	if opts.RootWritable {
+		rootFlag = "--bind"
+	}
+	argv = append(argv, rootFlag, "/", "/")
+	if opts.RootWritable {
+		// Pool runtimes retain normal writable container-root semantics, but
+		// sysfs remains a kernel-facing control surface and must never inherit
+		// a writable mount from the parent container.
+		argv = append(argv, "--ro-bind", "/sys", "/sys")
+	}
 
 	// 3. /tmp — skip if workspace is /tmp (workspace bind would override).
-	if filepath.Clean(opts.Workspace.Path) != "/tmp" {
+	if opts.SkipWorkspace || filepath.Clean(opts.Workspace.Path) != "/tmp" {
 		argv = append(argv, bwrapTmpSegment(opts.Profile)...)
 	}
 
@@ -74,11 +85,13 @@ func buildArgvWithLifecycle(
 	}
 
 	// 7. Workspace.
-	wsArgv, err := bwrapWorkspaceSegment(opts)
-	if err != nil {
-		return nil, err
+	if !opts.SkipWorkspace {
+		wsArgv, err := bwrapWorkspaceSegment(opts)
+		if err != nil {
+			return nil, err
+		}
+		argv = append(argv, wsArgv...)
 	}
-	argv = append(argv, wsArgv...)
 
 	// Hide upper root to prevent cross-session access.
 	if opts.UpperDir != "" {
@@ -91,11 +104,25 @@ func buildArgvWithLifecycle(
 		argv = append(argv, "--bind", p, p)
 	}
 
+	// Hide trusted source roots and control-plane state before installing the
+	// descriptor-pinned destinations that are intentionally exposed.
+	for _, path := range opts.MaskPaths {
+		argv = append(argv, "--tmpfs", path, "--remount-ro", path)
+	}
+
 	// 8b. Explicit source→dest bind mounts.
 	for _, b := range opts.Binds {
 		dest := b.Dest
 		if dest == "" {
 			dest = b.Source
+		}
+		if b.sourceFD != "" {
+			flag := "--bind-fd"
+			if b.ReadOnly {
+				flag = "--ro-bind-fd"
+			}
+			argv = append(argv, flag, b.sourceFD, dest)
+			continue
 		}
 		flag := "--bind"
 		if b.ReadOnly {
@@ -122,6 +149,9 @@ func buildArgvWithLifecycle(
 	// 10. Seccomp.
 	if seccompFd != "" {
 		argv = append(argv, "--seccomp", seccompFd)
+	}
+	if opts.DropCapabilities {
+		argv = append(argv, "--cap-drop", "ALL")
 	}
 
 	// 11. Lifecycle: kill sandbox when execd dies.
@@ -213,7 +243,7 @@ func bwrapNamespaceSegment(opts WrapOptions, useUserns bool) []string {
 }
 
 func validateWrapOptions(opts WrapOptions) error {
-	if opts.Workspace.Path == "" {
+	if !opts.SkipWorkspace && opts.Workspace.Path == "" {
 		return errors.New("isolation: workspace.path is required")
 	}
 	if !opts.Profile.Valid() {
@@ -229,10 +259,10 @@ func validateWrapOptions(opts WrapOptions) error {
 		return fmt.Errorf("isolation: unknown uid mode %q", opts.UidMode)
 	}
 	for _, b := range opts.Binds {
-		if b.Source == "" {
+		if b.Source == "" && b.SourceFile == nil {
 			return errors.New("isolation: bind.source is required")
 		}
-		if !filepath.IsAbs(b.Source) {
+		if b.SourceFile == nil && !filepath.IsAbs(b.Source) {
 			return fmt.Errorf("isolation: bind.source %q must be an absolute path", b.Source)
 		}
 		if b.Dest != "" && !filepath.IsAbs(b.Dest) {

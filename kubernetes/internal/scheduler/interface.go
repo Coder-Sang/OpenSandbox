@@ -36,3 +36,9 @@ type TaskScheduler interface {
 func NewTaskScheduler(name string, tasks []*apis.Task, pods []*corev1.Pod, resPolicyWhenTaskCompleted sandboxv1alpha1.TaskResourcePolicy, logger logr.Logger) (TaskScheduler, error) {
 	return newTaskScheduler(name, tasks, pods, resPolicyWhenTaskCompleted, logger)
 }
+
+// NewTaskSchedulerWithTokenResolver enables Secret-backed per-Pod
+// task-executor authentication without changing ordinary Pool behavior.
+func NewTaskSchedulerWithTokenResolver(name string, tasks []*apis.Task, pods []*corev1.Pod, resPolicyWhenTaskCompleted sandboxv1alpha1.TaskResourcePolicy, logger logr.Logger, resolver func(*corev1.Pod) (string, error)) (TaskScheduler, error) {
+	return newTaskSchedulerWithTokenResolver(name, tasks, pods, resPolicyWhenTaskCompleted, logger, resolver)
+}

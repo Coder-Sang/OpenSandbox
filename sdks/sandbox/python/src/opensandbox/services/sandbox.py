@@ -34,6 +34,7 @@ from opensandbox.models.sandboxes import (
     SandboxFilter,
     SandboxImageSpec,
     SandboxInfo,
+    SandboxIsolation,
     SandboxLifecycle,
     SandboxRenewResponse,
     SnapshotFilter,
@@ -63,7 +64,7 @@ class Sandboxes(Protocol):
         env: dict[str, str],
         metadata: dict[str, str],
         timeout: timedelta | None,
-        resource: dict[str, str],
+        resource: dict[str, str] | None,
         network_policy: NetworkPolicy | None,
         extensions: dict[str, str],
         volumes: list[Volume] | None,
@@ -73,6 +74,7 @@ class Sandboxes(Protocol):
         credential_proxy: CredentialProxyConfig | None = None,
         resource_requests: dict[str, str] | None = None,
         lifecycle: SandboxLifecycle | None = None,
+        isolation: SandboxIsolation | None = None,
     ) -> SandboxCreateResponse:
         """
         Create a new sandbox with the specified configuration.
@@ -198,7 +200,10 @@ class Sandboxes(Protocol):
         ...
 
     async def get_signed_sandbox_endpoint(
-        self, sandbox_id: str, port: int, expires: int,
+        self,
+        sandbox_id: str,
+        port: int,
+        expires: int,
         use_server_proxy: bool = False,
     ) -> SandboxEndpoint:
         """

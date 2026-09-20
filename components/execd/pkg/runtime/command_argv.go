@@ -54,6 +54,12 @@ func prepareCommand(ctx context.Context, request *ExecuteCodeRequest) (*exec.Cmd
 	if err != nil {
 		return nil, err
 	}
+	if cwd != "" {
+		cwd, err = filepath.Abs(cwd)
+		if err != nil {
+			return nil, err
+		}
+	}
 	// Derive PWD from cwd before applying explicit overrides.
 	env := mergeEnvs((&exec.Cmd{Dir: cwd}).Environ(), overrides)
 	var cmd *exec.Cmd
@@ -110,6 +116,11 @@ func resolveExecutable(name, cwd string, env []string) (string, error) {
 	}
 	if strings.ContainsAny(name, separators) {
 		return filepath.Abs(filepath.Join(cwd, name))
+	}
+	// The executable may exist only in a dynamically selected PVC mount.
+	// Defer bare-name PATH lookup to execvp after entering the pool runtime.
+	if PoolRuntimeHealthy() {
+		return name, nil
 	}
 	path := ""
 	for _, entry := range env {

@@ -22,6 +22,7 @@ import (
 	"github.com/alibaba/opensandbox/execd/pkg/binding"
 	"github.com/alibaba/opensandbox/execd/pkg/flag"
 	"github.com/alibaba/opensandbox/execd/pkg/log"
+	"github.com/alibaba/opensandbox/execd/pkg/runtime"
 	"github.com/alibaba/opensandbox/execd/pkg/web/controller"
 	"github.com/alibaba/opensandbox/execd/pkg/web/model"
 )
@@ -165,6 +166,12 @@ func withPTY(fn func(*controller.PTYController)) gin.HandlerFunc {
 
 func withIsolated(fn func(*controller.IsolatedSessionController)) gin.HandlerFunc {
 	return func(ctx *gin.Context) {
+		if runtime.PoolRuntimeHealthy() {
+			ctx.AbortWithStatusJSON(http.StatusConflict, map[string]any{
+				"error": "isolated sessions are disabled inside a forced pool bwrap runtime",
+			})
+			return
+		}
 		fn(controller.NewIsolatedSessionController(ctx))
 	}
 }

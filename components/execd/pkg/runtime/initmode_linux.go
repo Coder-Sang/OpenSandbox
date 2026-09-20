@@ -232,16 +232,17 @@ func (r *reaper) drain() {
 // In non-init mode it falls back to plain Cmd.Start/Cmd.Wait, so callers
 // share one launch path regardless of mode.
 type managedProcess struct {
-	cmd         *exec.Cmd
-	stateMu     sync.Mutex
-	exited      bool
-	preReap     func()
-	noHardening bool
-	stripEnv    []string // nil = default blacklist; explicit list overrides
-	done        chan struct{}
-	once        sync.Once
-	ws          syscall.WaitStatus
-	exitErr     error
+	cmd           *exec.Cmd
+	stateMu       sync.Mutex
+	exited        bool
+	preReap       func()
+	noHardening   bool
+	noPoolRuntime bool
+	stripEnv      []string // nil = default blacklist; explicit list overrides
+	done          chan struct{}
+	once          sync.Once
+	ws            syscall.WaitStatus
+	exitErr       error
 }
 
 func newManagedProcess(cmd *exec.Cmd) *managedProcess {
@@ -331,6 +332,13 @@ func withoutHardening() launchOption {
 	}
 }
 
+// withoutPoolRuntime is reserved for starting the bwrap anchor itself.
+func withoutPoolRuntime() launchOption {
+	return func(mp *managedProcess) {
+		mp.noPoolRuntime = true
+	}
+}
+
 // bootstrapEnv overrides the env strip for the user entrypoint: its scripts
 // may need JUPYTER_TOKEN/EXECD_ENVS to configure themselves (e.g. the
 // code-interpreter entrypoint), but credentials and lifecycle transport must
@@ -365,6 +373,9 @@ func launchManagedWith(cmd *exec.Cmd, startFn func() error, opts ...launchOption
 	}
 	if policyFile != nil {
 		defer policyFile.Close()
+	}
+	if err := wrapPoolCommand(cmd, mp.noPoolRuntime); err != nil {
+		return nil, err
 	}
 	if initReaper == nil {
 		if err := startFn(); err != nil {

@@ -25,7 +25,6 @@ import (
 	"path/filepath"
 	"strconv"
 
-	"github.com/alibaba/opensandbox/execd/pkg/util/pathutil"
 	"github.com/alibaba/opensandbox/execd/pkg/web/model"
 )
 
@@ -44,7 +43,7 @@ func (c *FilesystemController) DownloadFile() {
 		)
 		return
 	}
-	resolvedFilePath, err := pathutil.ExpandPath(filePath)
+	resolvedFilePath, err := expandRuntimePath(filePath)
 	if err != nil {
 		c.RespondError(
 			http.StatusInternalServerError,

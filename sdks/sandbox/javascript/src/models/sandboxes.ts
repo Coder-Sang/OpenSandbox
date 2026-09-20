@@ -499,6 +499,18 @@ export interface SandboxLifecycle extends Record<string, unknown> {
   periodic?: PeriodicLifecycleHook[];
 }
 
+export interface SandboxIsolationMount extends Record<string, unknown> {
+  root: string;
+  subPath: string;
+  target: string;
+  mode: "ro" | "rw";
+}
+
+export interface SandboxIsolation extends Record<string, unknown> {
+  type: "bwrap";
+  mounts: SandboxIsolationMount[];
+}
+
 export interface CreateSandboxRequest extends Record<string, unknown> {
   image?: ImageSpec;
   snapshotId?: string;
@@ -512,11 +524,12 @@ export interface CreateSandboxRequest extends Record<string, unknown> {
    * Timeout in seconds (server semantics).
    */
   timeout?: number | null;
-  resourceLimits: ResourceLimits;
+  resourceLimits?: ResourceLimits;
   resourceRequests?: ResourceLimits;
   env?: Record<string, string>;
   metadata?: Record<string, string>;
   lifecycle?: SandboxLifecycle;
+  isolation?: SandboxIsolation;
   /**
    * Optional outbound network policy for the sandbox.
    */

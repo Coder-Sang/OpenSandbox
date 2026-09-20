@@ -33,6 +33,7 @@ package runtime
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -442,6 +443,21 @@ func InitHardening(cfg isolation.Config) error {
 	log.Info("hardening: enabled (launcher=%s uid=%d gid=%d keep_caps=%v seccomp=%d bytes)",
 		path, hardening.policy.uid, hardening.policy.gid,
 		cfg.Hardening.KeepCapabilities, len(seccompBPF))
+	return nil
+}
+
+// RequirePoolHardening verifies the mandatory privilege floor for the forced
+// bwrap Pool backend. Degraded enforcement is unsafe for this execution path.
+func RequirePoolHardening() error {
+	if !hardening.enabled.Load() || hardening.policy == nil || hardening.launcherPath == "" {
+		return errors.New("pool bwrap runtime requires the execd hardening launcher")
+	}
+	if state := hardening.capDrop.Load(); state == nil || state.State != "active" {
+		return errors.New("pool bwrap runtime requires active capability dropping")
+	}
+	if state := hardening.seccomp.Load(); state == nil || state.State != "active" {
+		return errors.New("pool bwrap runtime requires active seccomp")
+	}
 	return nil
 }
 

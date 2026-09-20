@@ -56,6 +56,8 @@ from opensandbox.models.sandboxes import (
     PeriodicLifecycleHook,
     PlatformSpec,
     SandboxImageSpec,
+    SandboxIsolation,
+    SandboxIsolationMount,
     SandboxLifecycle,
 )
 
@@ -151,9 +153,7 @@ def test_to_sandbox_exception_connection_is_retryable() -> None:
     )
     from opensandbox.exceptions import SandboxConnectionException
 
-    mapped = ExceptionConverter.to_sandbox_exception(
-        httpx.ConnectError("dns down")
-    )
+    mapped = ExceptionConverter.to_sandbox_exception(httpx.ConnectError("dns down"))
     assert isinstance(mapped, SandboxConnectionException)
     assert mapped.is_retryable is True
 
@@ -509,19 +509,40 @@ def test_execution_converter_to_api_run_command_request() -> None:
     assert d4["envs"] == {"APP_ENV": "test", "LOG_LEVEL": "debug"}
     assert "cwd" not in d4
 
-
     argv = ["tool", "", "a b", "$HOME", "x'y", "中文"]
     native = ExecutionConverter.to_api_run_command_request(
-        argv, RunCommandOpts(background=True, working_directory="$DIR", envs={"DIR": "/tmp"})
+        argv,
+        RunCommandOpts(background=True, working_directory="$DIR", envs={"DIR": "/tmp"}),
     ).to_dict()
-    assert native == {"argv": argv, "background": True, "cwd": "$DIR", "envs": {"DIR": "/tmp"}}
-    for invalid in ([], [""], ["tool", "\0"], ["tool", None], ("tool", "arg"), None, 123):
+    assert native == {
+        "argv": argv,
+        "background": True,
+        "cwd": "$DIR",
+        "envs": {"DIR": "/tmp"},
+    }
+    for invalid in (
+        [],
+        [""],
+        ["tool", "\0"],
+        ["tool", None],
+        ("tool", "arg"),
+        None,
+        123,
+    ):
         with pytest.raises(InvalidArgumentException):
             ExecutionConverter.to_api_run_command_request(invalid, RunCommandOpts())
 
     # Shell-sensitive values (a literal "$HOME", an embedded space, a single
     # quote, a trailing empty string) travel in `argv` untouched.
-    literal_argv = ["python3", "-c", "import sys; print(sys.argv[1:])", "a b", "$HOME", "x'y", ""]
+    literal_argv = [
+        "python3",
+        "-c",
+        "import sys; print(sys.argv[1:])",
+        "a b",
+        "$HOME",
+        "x'y",
+        "",
+    ]
     literal_request = ExecutionConverter.to_api_run_command_request(
         literal_argv, RunCommandOpts()
     ).to_dict()
@@ -702,6 +723,47 @@ def test_sandbox_model_converter_snapshot_restore_request() -> None:
     assert "image" not in dumped
     assert "entrypoint" not in dumped
 
+
+def test_sandbox_model_converter_bwrap_pool_request() -> None:
+    req = SandboxModelConverter.to_api_create_sandbox_request(
+        spec=None,
+        entrypoint=["python", "/app/main.py"],
+        env={},
+        metadata={},
+        timeout=None,
+        resource=None,
+        platform=None,
+        network_policy=None,
+        extensions={"poolRef": "secure-pool"},
+        volumes=None,
+        isolation=SandboxIsolation(
+            mounts=[
+                SandboxIsolationMount(
+                    root="projects",
+                    subPath="project-a",
+                    target="/workspace/a",
+                    mode="rw",
+                )
+            ]
+        ),
+    )
+
+    dumped = req.to_dict()
+    assert "image" not in dumped
+    assert "resourceLimits" not in dumped
+    assert dumped["isolation"] == {
+        "type": "bwrap",
+        "mounts": [
+            {
+                "root": "projects",
+                "subPath": "project-a",
+                "target": "/workspace/a",
+                "mode": "rw",
+            }
+        ],
+    }
+
+
 def test_sandbox_model_converter_to_api_volume_skips_unset_fields() -> None:
     from opensandbox.api.lifecycle.types import UNSET
     from opensandbox.models.sandboxes import Volume
@@ -725,6 +787,7 @@ def test_sandbox_model_converter_to_api_volume_skips_unset_fields() -> None:
     assert "pvc" not in dumped
     assert "ossfs" not in dumped
     assert "subPath" not in dumped
+
 
 def test_sandbox_model_converter_to_api_volume_maps_backends() -> None:
     from opensandbox.models.sandboxes import OSSFS, PVC, Host, Volume
@@ -752,7 +815,8 @@ def test_sandbox_model_converter_to_api_volume_maps_backends() -> None:
     assert pvc_dumped["readOnly"] is True
 
     ossfs_volume = Volume(
-        name="oss", ossfs=OSSFS(
+        name="oss",
+        ossfs=OSSFS(
             bucket="b",
             endpoint="oss-cn-hangzhou.aliyuncs.com",
             accessKeyId="ak",
@@ -762,6 +826,7 @@ def test_sandbox_model_converter_to_api_volume_maps_backends() -> None:
     )
     ossfs_dumped = SandboxModelConverter.to_api_volume(ossfs_volume).to_dict()
     assert ossfs_dumped["ossfs"]["bucket"] == "b"
+
 
 def test_sandbox_model_converter_maps_platform_from_create_response() -> None:
     from opensandbox.api.lifecycle.models.create_sandbox_response import (

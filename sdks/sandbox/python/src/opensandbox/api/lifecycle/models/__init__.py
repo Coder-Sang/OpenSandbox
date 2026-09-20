@@ -68,6 +68,10 @@ from .renew_sandbox_expiration_response import RenewSandboxExpirationResponse
 from .resource_limits import ResourceLimits
 from .sandbox import Sandbox
 from .sandbox_extensions import SandboxExtensions
+from .sandbox_isolation import SandboxIsolation
+from .sandbox_isolation_mount import SandboxIsolationMount
+from .sandbox_isolation_mount_mode import SandboxIsolationMountMode
+from .sandbox_isolation_type import SandboxIsolationType
 from .sandbox_lifecycle import SandboxLifecycle
 from .sandbox_metadata import SandboxMetadata
 from .sandbox_status import SandboxStatus
@@ -128,6 +132,10 @@ __all__ = (
     "ResourceLimits",
     "Sandbox",
     "SandboxExtensions",
+    "SandboxIsolation",
+    "SandboxIsolationMount",
+    "SandboxIsolationMountMode",
+    "SandboxIsolationType",
     "SandboxLifecycle",
     "SandboxMetadata",
     "SandboxStatus",
