@@ -34,6 +34,7 @@ import (
 
 	"github.com/alibaba/opensandbox/execd/pkg/isolation"
 	"github.com/alibaba/opensandbox/execd/pkg/log"
+	"github.com/alibaba/opensandbox/execd/pkg/sessionresource"
 	"github.com/alibaba/opensandbox/execd/pkg/telemetry"
 	"github.com/alibaba/opensandbox/execd/pkg/vfs"
 )
@@ -46,18 +47,32 @@ type IsolatedRunner struct {
 	isolator        isolation.Isolator
 	upperMgr        *isolation.UpperManager
 	allowedWritable []string
+	namespacePinner sessionNamespacePinner
 	stopGC          chan struct{}
+	// bgRuns tracks detached background runs (map[runID]*IsolatedBackgroundRun),
+	// swept when the owning session is deleted or GC'd.
+	bgRuns      sync.Map
+	gcDone      chan struct{}
+	stopGCOnce  sync.Once
+	admissionMu sync.RWMutex
+	closeMu     sync.Mutex
+	closed      bool
 	// pendingStartupCleanup owns failed creates whose workload did not reap
 	// within the bounded startup rollback. These sessions are deliberately
 	// kept out of the public controller map and retried by the collector.
 	pendingStartupCleanup sync.Map // map[sessionID]*isolatedSession
 }
 
-// NewIsolatedRunner creates the isolated session runner.
 func NewIsolatedRunner(ctrl *Controller, iso isolation.Isolator, cfg isolation.Config) (*IsolatedRunner, error) {
 	mgr, err := isolation.NewUpperManager(cfg.UpperRoot, cfg.UpperMaxBytes)
 	if err != nil {
 		return nil, fmt.Errorf("isolated runner: upper manager: %w", err)
+	}
+	namespaceMgr, err := sessionresource.NewNamespaceManager(
+		sessionresource.DefaultNamespaceRoot,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("isolated runner: namespace manager: %w", err)
 	}
 	r := &IsolatedRunner{
 		ctrl:            ctrl,
@@ -65,6 +80,13 @@ func NewIsolatedRunner(ctrl *Controller, iso isolation.Isolator, cfg isolation.C
 		upperMgr:        mgr,
 		allowedWritable: cfg.AllowedWritable,
 		stopGC:          make(chan struct{}),
+		gcDone:          make(chan struct{}),
+		namespacePinner: func(
+			ctx context.Context,
+			identity isolation.WorkloadIdentity,
+		) (sessionNamespacePins, error) {
+			return namespaceMgr.Pin(ctx, identity)
+		},
 	}
 	go r.gcLoop()
 
@@ -92,6 +114,7 @@ func (r *IsolatedRunner) statsSnapshot() telemetry.IsolationStats {
 func (r *IsolatedRunner) gcLoop() {
 	ticker := time.NewTicker(60 * time.Second)
 	defer ticker.Stop()
+	defer close(r.gcDone)
 	for {
 		select {
 		case <-r.stopGC:
@@ -130,8 +153,13 @@ func (r *IsolatedRunner) CollectIdle() {
 			timeout := time.Duration(s.opts.IdleTimeoutSeconds) * time.Second
 			idle := time.Since(s.lastRunAt)
 			s.mu.RUnlock()
-			if !dead && (timeout <= 0 || idle <= timeout) {
-				return
+			if !dead {
+				if s.activeBackgroundRuns.Load() > 0 {
+					return // background run in flight; session is deliberately busy
+				}
+				if timeout <= 0 || idle <= timeout {
+					return
+				}
 			}
 
 			if dead {
@@ -193,9 +221,12 @@ func (r *IsolatedRunner) cleanupPendingStartup(
 	}
 
 	stopErr := session.stop()
-	if errors.Is(stopErr, ErrSessionTeardownTimeout) {
+	if errors.Is(stopErr, ErrSessionTeardownTimeout) ||
+		errors.Is(stopErr, ErrSessionNamespaceCleanup) {
 		// The process or trusted lifecycle drain is still live. Keep both the
 		// private owner entry and upper allocation intact for a later retry.
+		// Namespace cleanup errors follow the same ownership rule even after
+		// the process has been fully reaped.
 		return fmt.Errorf("stop session process: %w", stopErr)
 	}
 
@@ -230,7 +261,93 @@ func (r *IsolatedRunner) collectReleasedUppers() error {
 
 // StopGC stops the background GC goroutine.
 func (r *IsolatedRunner) StopGC() {
-	close(r.stopGC)
+	if r == nil || r.stopGC == nil {
+		return
+	}
+	r.stopGCOnce.Do(func() {
+		close(r.stopGC)
+	})
+	if r.gcDone != nil {
+		<-r.gcDone
+	}
+}
+
+// Close stops new Session admission, waits for in-flight creates, stops the
+// collector, and synchronously attempts cleanup of all runtime-owned sessions.
+// It is the process-shutdown teardown and is permanent (the runner does not
+// reopen); use Reset to clear sessions while keeping the runner usable.
+// Close is safe to call repeatedly; retained cleanup ownership is retried.
+func (r *IsolatedRunner) Close() error {
+	if r == nil {
+		return nil
+	}
+	r.closeMu.Lock()
+	defer r.closeMu.Unlock()
+
+	r.admissionMu.Lock()
+	r.closed = true
+	r.admissionMu.Unlock()
+	r.StopGC()
+
+	cleanupErr := r.cleanupSessions()
+	return cleanupErr
+}
+
+// Reset deletes every isolated session while keeping the runner usable:
+// admission re-opens for new sessions and the idle GC loop keeps running.
+// It is the runtime-init counterpart to Close — POST /internal/init must
+// clear the previous generation's sessions without permanently disabling
+// the isolated-session APIs.
+func (r *IsolatedRunner) Reset() error {
+	if r == nil {
+		return nil
+	}
+	r.closeMu.Lock()
+	defer r.closeMu.Unlock()
+
+	r.admissionMu.Lock()
+	r.closed = false
+	r.admissionMu.Unlock()
+
+	return r.cleanupSessions()
+}
+
+// cleanupSessions synchronously attempts cleanup of all runtime-owned
+// sessions plus pending-startup and released-upper retries. Callers hold
+// closeMu.
+func (r *IsolatedRunner) cleanupSessions() error {
+	var cleanupErr error
+	r.ctrl.isolatedSessionMap.Range(func(key, value any) bool {
+		id, idOK := key.(string)
+		session, sessionOK := value.(*isolatedSession)
+		if !idOK || !sessionOK {
+			return true
+		}
+		if current := r.lookup(id); current != session {
+			return true
+		}
+		if err := r.DeleteIsolatedSession(id); err != nil &&
+			!errors.Is(err, ErrContextNotFound) {
+			cleanupErr = errors.Join(
+				cleanupErr,
+				fmt.Errorf("close isolated session %s: %w", id, err),
+			)
+		}
+		return true
+	})
+	if err := r.collectPendingStartupCleanup(); err != nil {
+		cleanupErr = errors.Join(
+			cleanupErr,
+			fmt.Errorf("close failed session startups: %w", err),
+		)
+	}
+	if err := r.collectReleasedUppers(); err != nil {
+		cleanupErr = errors.Join(
+			cleanupErr,
+			fmt.Errorf("close released upper directories: %w", err),
+		)
+	}
+	return cleanupErr
 }
 
 // Available reports whether the isolator is ready.
@@ -240,6 +357,12 @@ func (r *IsolatedRunner) Available() bool {
 
 // CreateIsolatedSession starts a new bwrap + shell session.
 func (r *IsolatedRunner) CreateIsolatedSession(opts *IsolatedSessionOptions) (string, error) {
+	r.admissionMu.RLock()
+	defer r.admissionMu.RUnlock()
+	if r.closed {
+		return "", ErrIsolatedRunnerClosed
+	}
+
 	if err := r.validateExtraWritable(opts.ExtraWritable); err != nil {
 		return "", err
 	}
@@ -270,9 +393,8 @@ func (r *IsolatedRunner) CreateIsolatedSession(opts *IsolatedSessionOptions) (st
 	}
 
 	id := uuid.New().String()
-	session := newIsolatedSession(id, opts, r.isolator)
+	session := newIsolatedSession(id, opts, r.isolator, r.namespacePinner)
 
-	// Allocate upper directory for overlay mode.
 	if opts.WorkspaceMode == string(isolation.WorkspaceOverlay) || opts.WorkspaceMode == "" {
 		upperID, upperDir, workDir, err := r.upperMgr.Allocate()
 		if err != nil {
@@ -285,7 +407,8 @@ func (r *IsolatedRunner) CreateIsolatedSession(opts *IsolatedSessionOptions) (st
 
 	if err := session.start(); err != nil {
 		startErr := fmt.Errorf("start bwrap: %w", err)
-		if errors.Is(err, ErrSessionTeardownTimeout) {
+		if errors.Is(err, ErrSessionTeardownTimeout) ||
+			errors.Is(err, ErrSessionNamespaceCleanup) {
 			// Create returns no ID, so failed startup ownership cannot live in
 			// the public session map. Retain it privately until GC can prove the
 			// workload and lifecycle are fully reaped.
@@ -304,11 +427,29 @@ func (r *IsolatedRunner) CreateIsolatedSession(opts *IsolatedSessionOptions) (st
 	}
 
 	r.ctrl.isolatedSessionMap.Store(id, session)
-	log.Info("created isolated session %s (profile=%s, mode=%s)", id, opts.Profile, opts.WorkspaceMode)
+	go r.cleanupExitedSession(id, session)
+	log.Info("isolated session: created %s (profile=%s, mode=%s)", id, opts.Profile, opts.WorkspaceMode)
 	return id, nil
 }
 
-// GetIsolatedSession returns session state.
+func (r *IsolatedRunner) cleanupExitedSession(
+	id string,
+	session *isolatedSession,
+) {
+	<-session.doneCh
+	if session.stopping.Load() {
+		return
+	}
+	if current := r.lookup(id); current != session {
+		return
+	}
+	log.Info("isolated session: %s exited; starting resource cleanup", id)
+	if err := r.DeleteIsolatedSession(id); err != nil &&
+		!errors.Is(err, ErrContextNotFound) {
+		log.Warn("isolated session: clean up exited %s: %v", id, err)
+	}
+}
+
 func (r *IsolatedRunner) GetIsolatedSession(id string) (*IsolatedSessionState, error) {
 	s := r.lookup(id)
 	if s == nil {
@@ -441,7 +582,6 @@ func (r *IsolatedRunner) RunInIsolatedSession(ctx context.Context, id string, co
 		return ErrContextNotFound
 	}
 
-	// Serialize concurrent runs on the same session.
 	s.runMu.Lock()
 	defer s.runMu.Unlock()
 
@@ -593,14 +733,15 @@ func (r *IsolatedRunner) DeleteIsolatedSession(id string) error {
 
 	var cleanupErr error
 	if stopErr := s.stop(); stopErr != nil {
-		log.Warn("stop isolated session %s: %v", id, stopErr)
+		log.Warn("isolated session: stop %s: %v", id, stopErr)
 		cleanupErr = errors.Join(
 			cleanupErr,
 			fmt.Errorf("stop session process: %w", stopErr),
 		)
 		// The process may still be using the overlay. Keep both the map entry
 		// and upper allocation intact so a later Delete or GC can retry.
-		if errors.Is(stopErr, ErrSessionTeardownTimeout) {
+		if errors.Is(stopErr, ErrSessionTeardownTimeout) ||
+			errors.Is(stopErr, ErrSessionNamespaceCleanup) {
 			return cleanupErr
 		}
 	}
@@ -616,7 +757,7 @@ func (r *IsolatedRunner) DeleteIsolatedSession(id string) error {
 	}
 	if s.upperID != "" {
 		if err := r.upperMgr.Remove(s.upperID); err != nil {
-			log.Warn("remove upper dir for session %s: %v", id, err)
+			log.Warn("isolated session: remove upper dir %s: %v", id, err)
 			cleanupErr = errors.Join(
 				cleanupErr,
 				fmt.Errorf("remove session upper: %w", err),
@@ -625,10 +766,14 @@ func (r *IsolatedRunner) DeleteIsolatedSession(id string) error {
 	}
 
 	r.ctrl.isolatedSessionMap.CompareAndDelete(id, s)
+	// Run logs are gone with the upper layer; drop the session's run records.
+	// Swept even when a non-fatal cleanup error remains: the session is out
+	// of the public map, so nothing else would ever sweep them.
+	r.removeSessionBackgroundRuns(s)
 	if cleanupErr != nil {
 		return cleanupErr
 	}
-	log.Info("deleted isolated session %s", id)
+	log.Info("isolated session: deleted %s", id)
 	return nil
 }
 
@@ -722,7 +867,6 @@ func newMergedView(s *isolatedSession) vfs.FS {
 	return isolation.NewMergedView(s.opts.WorkspacePath, upper, mode, uid, gid)
 }
 
-// Capabilities returns the current isolator capabilities.
 func (r *IsolatedRunner) Capabilities() isolation.Capabilities {
 	return r.isolator.Capabilities()
 }

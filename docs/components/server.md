@@ -34,6 +34,19 @@ A production-grade, FastAPI-based service for managing the lifecycle of containe
 Metadata keys under the reserved prefix `opensandbox.io/` are system-managed and cannot be supplied by users.
 :::
 
+## Docker deletion
+
+Deletion synchronously removes the application, stops and removes its egress
+sidecar, then cleans up volumes. Docker allows 9 seconds for
+[egress shutdown](/components/egress#shutdown) before forced termination;
+the full deletion request can take longer.
+
+If application removal fails, dependent resources and metadata are kept for
+retry. TTL cleanup retries after 30 seconds without changing the expiration.
+If the application is already absent, DELETE and TTL attempt orphan sidecar
+cleanup; DELETE returns 404. Sidecar cleanup is best effort, so 404 does not
+guarantee that all resources are gone.
+
 ## Requirements
 
 - **Python**: 3.10 or higher
@@ -49,9 +62,17 @@ Metadata keys under the reserved prefix `opensandbox.io/` are system-managed and
 
 Install from PyPI. For local development, clone the repo and run `uv sync` in `server/`.
 
-```bash
+::: code-group
+
+```bash [pip]
+pip install opensandbox-server
+```
+
+```bash [uv]
 uv pip install opensandbox-server
 ```
+
+:::
 
 ### Configuration
 
@@ -67,8 +88,111 @@ opensandbox-server init-config ~/.sandbox.toml --example docker
 
 2. Edit the file for your environment. Full reference: [configuration.md](https://github.com/opensandbox-group/OpenSandbox/blob/main/server/configuration.md) (all keys, defaults, validation, env vars).
 
-   Topics covered there include: Docker `network_mode` / `host_ip` (e.g. server in Docker Compose), `[egress]` when clients send `networkPolicy`, `[ingress]`, `[secure_runtime]`, Kubernetes `workload_provider` / `batchsandbox_template_file`, `[agent_sandbox]`, TTL caps, `[renew_intent]`.
-   The server-wide persistence backend is configured under `[store]`; by default OpenSandbox uses a local SQLite database at `~/.opensandbox/opensandbox.db` for server-managed metadata such as snapshot records.
+   Topics covered there include: Docker `network_mode` / `host_ip` and `[proxy] resolve_internal` (e.g. server in Docker Compose), `[egress]` when clients send `networkPolicy`, `[ingress]`, `[secure_runtime]`, Kubernetes `workload_provider` / `batchsandbox_template_file`, `[agent_sandbox]`, TTL caps, `[renew_intent]`.
+   The server-wide persistence backend is configured under `[store]`; by default OpenSandbox uses a local SQLite database at `~/.opensandbox/opensandbox.db` for server-managed metadata such as snapshot records. PostgreSQL can be selected for externally managed persistence; see the [store configuration](https://github.com/opensandbox-group/OpenSandbox/blob/main/server/configuration.md#store).
+
+### Fast Sandbox workload and network policy {#fast-sandbox-workload-and-network-policy}
+
+Fast Sandbox images/templates must include and start execd on port `44772`. Do not
+declare execd as a runtime Infra Component: Ingress resolves its raw port just
+like other workload ports. See [Ingress](/components/ingress).
+
+`POST /v1/sandboxes` accepts `networkPolicy` for Fast Sandbox. The server includes its
+JSON in the initial FastPath `egress` action binding. The selected SandboxPool
+must declare the `egress` Action Handler and run a compatible egress process.
+The handler is shared by the Fastlet's sandboxes, with separate per-sandbox policy
+state. It is not execd injection and does not require an execd Infra Component.
+
+Runtime policy operations use the authenticated lifecycle API, not a public
+endpoint to the Fastlet's port `18080`:
+
+```http
+PUT /v1/sandboxes/fsb-<id>/networkpolicy
+OPEN-SANDBOX-API-KEY: <api-key>
+Content-Type: application/json
+
+{"defaultAction":"deny","egress":[{"action":"allow","target":"example.com"}]}
+```
+
+GET on the same path reads the persisted policy. PUT replaces the complete
+policy; it does not merge rules. `PATCH` merges rules with the same semantics
+as the egress sidecar (incoming same-target rules replace in place, first rule
+per target in the payload wins, defaultAction preserved), and `DELETE` removes
+rules by target (idempotent). Unrelated action bindings retain their values
+and order. Concurrent writes are protected by Sandbox UID/generation fences
+and return `409` on conflict. Other tenants' sandboxes return `404`.
+
+For Fast Sandbox, `200` means intent was committed, not that network enforcement has
+already converged. `mode` is derived from that intent; `enforcementMode` is not
+reported. An absent/cleared binding resets a configured Actions handler to
+deny-first. This response does not prove that a pool without an egress handler
+enforces any policy. Use an explicit `{"defaultAction":"allow","egress":[]}`
+to allow all. No PATCH/DELETE rule-management or SDK additions are included in
+this increment. For non-Fast Sandbox IDs, GET/PUT proxy the existing sidecar `/policy`.
+
+### PostgreSQL persistence
+
+Set the backend in the TOML configuration and inject the connection string through the environment:
+
+```toml
+[store]
+type = "postgresql"
+
+[store.postgresql]
+min_pool_size = 1
+max_pool_size = 10
+snapshot_recovery_interval_seconds = 15
+```
+
+```bash
+export OPENSANDBOX_STORE_POSTGRESQL_DSN='postgresql://opensandbox:password@postgres:5432/opensandbox?sslmode=require'
+opensandbox-server
+```
+
+::: info
+Multiple active Server processes are supported for public snapshots only when
+PostgreSQL is paired with the Kubernetes runtime. They observe the deterministic
+`SandboxSnapshot` CR before creating it, recover unfinished PostgreSQL rows
+periodically, and use state CAS for the terminal database result. A process
+crash or transient Kubernetes observation timeout therefore leaves the row
+recoverable instead of assigning a database lease.
+:::
+
+::: warning
+SQLite and Docker snapshot execution keep their existing single-process
+recovery behavior. The PostgreSQL recovery interval changes peer takeover
+latency for Kubernetes snapshots; it does not provide an exactly-once guarantee
+across PostgreSQL, Kubernetes, and the image registry.
+:::
+
+The Helm chart still defaults to one Server replica. An explicitly configured
+two-replica topology is supported for public snapshots only under the
+PostgreSQL-plus-Kubernetes conditions above. For Secret, configuration, and
+Helm values wiring, see
+[Kubernetes Deployment](/kubernetes/deployment#use-postgresql-for-server-persistence).
+
+### OpenTelemetry metrics
+
+The Server can export metrics through OTLP when `[otel].enabled = true`. It uses
+the configured OTLP HTTP endpoint and does not expose a Prometheus `/metrics`
+listener.
+
+| Metric | Type | Unit | Attributes |
+|---|---|---|---|
+| `server.http.request.duration` | Histogram | `ms` | `http_method`, `http_route`, `http_status_code` |
+| `opensandbox.sandbox.create.duration` | Histogram | `ms` | `sdk.language`, `sdk.version`, `success` |
+
+HTTP metrics use matched route templates such as `/v1/sandboxes/{sandbox_id}`,
+not raw paths. Requests that do not reach a matched route, including early
+authentication failures, use `http_route=unknown`. Sandbox IDs, tenant IDs,
+API keys, bodies, and query strings are never metric attributes. Standard HTTP
+methods are recorded in uppercase, while extension methods use
+`http_method=OTHER` to keep attribute cardinality bounded.
+
+The HTTP histogram's sample count can be used for request rate, its status-code
+attribute for error rate, and its buckets for latency percentiles. See the
+[Server configuration reference](https://github.com/opensandbox-group/OpenSandbox/blob/main/server/configuration.md#otel)
+for the complete `[otel]` settings.
 
 ### Run the server
 
@@ -160,7 +284,16 @@ Response:
 }
 ```
 
+**Resource limits**: The request above limits the sandbox to 0.5 CPU cores (`500m`) and 512 MiB of memory (`512Mi`). With the Docker runtime, invalid CPU or memory limits return HTTP 400 (`INVALID_PARAMETER`).
+
 **Other lifecycle calls** (same `OPEN-SANDBOX-API-KEY` header): `GET /v1/sandboxes/{id}`, `POST /v1/sandboxes/{id}/pause`, `POST /v1/sandboxes/{id}/resume`, `GET /v1/sandboxes/{id}/endpoints/{port}` (append `?use_server_proxy=true` when needed), `POST .../renew-expiration`, `DELETE /v1/sandboxes/{id}`. Full request/response shapes: **Swagger UI** above or OpenAPI under [specs/](/api/).
+
+Server-proxied HTTP responses preserve repeated response headers, including each
+`Set-Cookie` field, without combining their values. Hop-by-hop headers are filtered.
+
+When a server-proxied HTTP route cannot connect to the selected sandbox backend,
+the server returns HTTP `502` with error code `BACKEND_CONNECTION_FAILED`. Use the
+code, rather than the human-readable message, to classify this failure.
 
 For Kubernetes-backed sandboxes, pause/resume is implemented via `BatchSandbox.spec.pause` and internal `SandboxSnapshot` resources. The externally visible lifecycle transitions are `Running -> Pausing -> Paused -> Resuming -> Running`.
 
@@ -218,6 +351,39 @@ For Kubernetes-backed sandboxes, pause/resume is implemented via `BatchSandbox.s
      | Terminated |   | Failed |
      +------------+   +--------+
 ```
+
+### Failure recovery and `resume`
+
+`resume` is a pause-state operation, not a general restart operation. The API
+accepts it only for a sandbox in `Paused` and returns `409 Conflict` for a
+container or workload that has already exited into `Terminated` or `Failed`.
+It does not restart an externally stopped Docker container.
+
+Runtime restart behavior is configured below the Lifecycle API:
+
+- **Docker**: OpenSandbox does not set a Docker restart policy on sandbox
+  containers. If the entrypoint exits or an operator stops the container, the
+  sandbox becomes `Terminated` for exit code 0 or `Failed` for a non-zero exit.
+- **Kubernetes BatchSandbox**: container restart behavior follows the effective
+  Pod template's `restartPolicy`. The example Linux template uses `Never`, but
+  operators can supply a different template when its lifecycle and state-loss
+  tradeoffs are acceptable. OpenSandbox reports the resulting workload state;
+  it does not turn `resume` into a restart of a failed Pod.
+
+To continue after a terminal failure, create a replacement sandbox and update
+the caller to use its new sandbox ID. Ordinary recreation starts from the
+configured image and persistent volume contents; it does not recover process
+memory or unpersisted container filesystem changes. For an intentional
+state-preserving suspension, call `pause` while the sandbox is healthy and then
+`resume`. Kubernetes pause/resume keeps the same sandbox ID and restores the
+captured root filesystem, but not running processes or memory; see
+[Pause and Resume](/guides/pause-resume).
+
+TTL is an absolute expiration time. Runtime or server restarts do not reset it:
+the Docker server restores timers for managed containers after a server
+restart, and Kubernetes keeps `spec.expireTime` on the workload. A newly
+created replacement receives its own ID and expiration time from its new create
+request.
 
 ## Experimental Features
 

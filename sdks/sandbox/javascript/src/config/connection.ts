@@ -68,6 +68,11 @@ export interface ConnectionConfigOptions {
    * Also honored via `OPENSANDBOX_DISABLE_METRICS=1`.
    */
   disableMetrics?: boolean;
+  /**
+   * Enable OpenTelemetry tracing for client-side pool warmup.
+   * Off by default.
+   */
+  enableTracing?: boolean;
 }
 
 function isNodeRuntime(): boolean {
@@ -214,6 +219,11 @@ function createTimedFetch(opts: {
         : (input as any)?.toString?.() ?? String(input);
 
     const ac = new AbortController();
+    const requestSignal =
+      init?.signal ??
+      (typeof Request !== "undefined" && input instanceof Request
+        ? input.signal
+        : undefined);
     const timeoutMs = Math.floor(timeoutSeconds * 1000);
     const t =
       Number.isFinite(timeoutMs) && timeoutMs > 0
@@ -229,11 +239,11 @@ function createTimedFetch(opts: {
         : undefined;
 
     const onAbort = () =>
-      ac.abort((init?.signal as any)?.reason ?? new Error("Aborted"));
-    if (init?.signal) {
-      if (init.signal.aborted) onAbort();
+      ac.abort((requestSignal as any)?.reason ?? new Error("Aborted"));
+    if (requestSignal) {
+      if (requestSignal.aborted) onAbort();
       else
-        init.signal.addEventListener("abort", onAbort, { once: true } as any);
+        requestSignal.addEventListener("abort", onAbort, { once: true } as any);
     }
 
     // Best-effort: attach the SDK host's own IP so the server can see the
@@ -281,8 +291,8 @@ function createTimedFetch(opts: {
       return res;
     } finally {
       if (t) clearTimeout(t);
-      if (init?.signal)
-        init.signal.removeEventListener("abort", onAbort as any);
+      if (requestSignal)
+        requestSignal.removeEventListener("abort", onAbort as any);
     }
   };
 }
@@ -305,6 +315,7 @@ export class ConnectionConfig {
   readonly endpointCacheSize: number;
   readonly endpointCacheDisabled: boolean;
   readonly disableMetrics: boolean;
+  readonly enableTracing: boolean;
   private _closeTransport: () => Promise<void>;
   private _closePromise: Promise<void> | null = null;
   private _transportInitialized = false;
@@ -338,6 +349,7 @@ export class ConnectionConfig {
     this.endpointCacheSize = opts.endpointCacheSize ?? 1024;
     this.endpointCacheDisabled = !!opts.endpointCacheDisabled;
     this.disableMetrics = !!opts.disableMetrics;
+    this.enableTracing = !!opts.enableTracing;
 
     const headers: Record<string, string> = { ...(opts.headers ?? {}) };
     // Attach API key via header unless the user already provided one.
@@ -426,6 +438,7 @@ export class ConnectionConfig {
       endpointCacheSize: this.endpointCacheSize,
       endpointCacheDisabled: this.endpointCacheDisabled,
       disableMetrics: this.disableMetrics,
+      enableTracing: this.enableTracing,
     });
     clone.initializeTransport();
     return clone;

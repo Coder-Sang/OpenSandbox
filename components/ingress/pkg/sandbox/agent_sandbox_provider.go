@@ -36,7 +36,7 @@ import (
 
 const (
 	agentSandboxGroup    = "agents.x-k8s.io"
-	agentSandboxVersion  = "v1alpha1"
+	agentSandboxVersion  = "v1beta1"
 	agentSandboxResource = "sandboxes"
 
 	agentSandboxConditionReady = "Ready"
@@ -209,6 +209,10 @@ func (a *AgentSandboxProvider) GetEndpoint(sandboxId string) (*EndpointInfo, err
 		Endpoint:          endpoint,
 		SecureAccessToken: accessToken,
 	}, nil
+}
+
+func (a *AgentSandboxProvider) ResolveEndpoint(_ context.Context, target EndpointTarget) (*EndpointInfo, error) {
+	return a.GetEndpoint(target.SandboxID)
 }
 
 func (a *AgentSandboxProvider) resolveEndpointFromSandbox(sandboxId string, u *unstructured.Unstructured) (string, error) {

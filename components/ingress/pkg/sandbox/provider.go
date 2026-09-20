@@ -24,14 +24,17 @@ type ProviderType string
 const (
 	ProviderTypeBatchSandbox ProviderType = "batchsandbox"
 	ProviderTypeAgentSandbox ProviderType = "agent-sandbox"
+	// ProviderTypeFastSandbox selects FastPath-backed routing without a Kubernetes provider.
+	ProviderTypeFastSandbox ProviderType = "fast-sandbox"
 
-	sandboxNameIndex string = "sandbox-name"
+	// sandboxNameIndex indexes sandbox resources by metadata.name.
+	sandboxNameIndex = "sandbox-name"
 
 	// AnnotationAccessToken marks a sandbox that requires signed ingress routes when non-empty.
 	AnnotationAccessToken = "opensandbox.io/secure-access-token"
 )
 
-func (tpy ProviderType) String() string { return string(tpy) }
+func (t ProviderType) String() string { return string(t) }
 
 var (
 	// ErrSandboxNotFound indicates the sandbox resource does not exist
@@ -40,22 +43,55 @@ var (
 	// ErrSandboxNotReady indicates the sandbox exists but is not ready
 	// This includes: not enough ready replicas, missing endpoints, invalid configuration
 	ErrSandboxNotReady = errors.New("sandbox not ready")
+
+	// ErrTargetUnsupported indicates that a route handle exists but traffic to
+	// the requested target is not implemented by this provider.
+	ErrTargetUnsupported = errors.New("sandbox target not supported")
 )
+
+// RouteKind identifies the backend selected by the verified ingress route format.
+type RouteKind uint8
+
+const (
+	// RouteKindLegacy is the zero value so existing target construction keeps
+	// selecting the configured Kubernetes provider.
+	RouteKindLegacy RouteKind = iota
+	// RouteKindFastSandbox selects FastPath-backed endpoint resolution.
+	RouteKindFastSandbox
+)
+
+type EndpointTarget struct {
+	RouteKind RouteKind
+	Namespace string
+	SandboxID string
+	Port      int
+}
 
 // Provider defines the interface for sandbox resource providers
 // Implementations include BatchSandboxProvider, AgentSandboxProvider, etc.
 type Provider interface {
-	// GetEndpoint retrieves endpoint and secure-access metadata for a sandbox by its id/name.
-	// Providers run in global-watch mode across all namespaces.
-	// Returns the first available endpoint from provider status/annotations.
-	// Returns error if sandbox not found or endpoint unavailable.
-	// Note: This is a local cache query, no network I/O involved
-	GetEndpoint(sandboxId string) (*EndpointInfo, error)
+	// ResolveEndpoint retrieves the complete upstream route for one target.
+	// Kubernetes providers answer from their informer cache. The Fast Sandbox provider
+	// may perform a bounded FastPath RPC and cache the resulting short-lived route.
+	ResolveEndpoint(ctx context.Context, target EndpointTarget) (*EndpointInfo, error)
 
 	// Start initializes and starts the provider's informer cache
 	// Waits for cache sync before returning
-	// Must be called before using GetEndpoint
+	// Must be called before using ResolveEndpoint.
 	Start(ctx context.Context) error
+}
+
+// EndpointInvalidator is implemented by providers with expiring or
+// assignment-fenced routes. The proxy calls it after an authenticated upstream
+// reports that a cached route is stale; the current request is not replayed.
+type EndpointInvalidator interface {
+	Invalidate(target EndpointTarget)
+}
+
+// AuthenticatedRouteProvider marks providers that reject legacy unsigned
+// ingress routes and require a verified tenant-scoped handle.
+type AuthenticatedRouteProvider interface {
+	RequiresAuthenticatedRouteScope()
 }
 
 // ProviderFactory creates a Provider instance based on the provider type

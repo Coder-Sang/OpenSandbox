@@ -31,6 +31,13 @@ import (
 	api "github.com/alibaba/OpenSandbox/sandbox-k8s/pkg/task-executor"
 )
 
+func postStopFinished(task *types.Task) bool {
+	if task == nil {
+		return false
+	}
+	return statusHasPostStopFinished(task.Status)
+}
+
 type fakeExecutor struct {
 	mu      sync.Mutex
 	inspect map[string]*types.Status
@@ -152,6 +159,14 @@ func cleanupTask(t *testing.T, mgr TaskManager, name string) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	t.Logf("Task %s not deleted within timeout during cleanup", name)
+}
+
+// skipIfBinaryMissing skips the test when the given command is not available
+// on the host (e.g. running on a non-Linux/Unix system without sh).
+func skipIfBinaryMissing(t *testing.T, cmd string) {
+	if _, err := exec.LookPath(cmd); err != nil {
+		t.Skipf("%s not found, skipping task manager test", cmd)
+	}
 }
 
 func TestNewTaskManager(t *testing.T) {
@@ -1330,9 +1345,7 @@ func TestTaskManager_AsyncStopOnDelete(t *testing.T) {
 }
 
 func TestTaskManager_TimeoutHandling(t *testing.T) {
-	if _, err := exec.LookPath("sh"); err != nil {
-		t.Skip("sh not found, skipping timeout test")
-	}
+	skipIfBinaryMissing(t, "sh")
 
 	mgr, _ := setupTestManager(t)
 	mgr.Start(context.Background())

@@ -20,6 +20,7 @@ using OpenSandbox.Adapters;
 using OpenSandbox.Core;
 using OpenSandbox.Internal;
 using OpenSandbox.Models;
+using OpenSandbox.Services;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Xunit;
@@ -28,6 +29,54 @@ namespace OpenSandbox.Tests;
 
 public class CommandsAdapterTests
 {
+    [Fact]
+    public async Task NativeArgv_ShouldRejectInvalidInputsBeforeSending()
+    {
+        var requests = 0;
+        var handler = new StubHttpMessageHandler((_, _) =>
+        {
+            requests++;
+            throw new InvalidOperationException("Unexpected request");
+        });
+        IExecdCommands commands = CreateAdapter(handler);
+        IReadOnlyList<string>[] invalid = [null!, [], [""], ["tool", null!], ["tool", "\0"]];
+        foreach (var argv in invalid)
+        {
+            await Assert.ThrowsAsync<InvalidArgumentException>(() => commands.RunAsync(argv));
+            Assert.Throws<InvalidArgumentException>(() => commands.RunStreamAsync(argv));
+        }
+        requests.Should().Be(0);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task RunArgv_ShouldPreserveArgumentsAndOptions(bool streaming)
+    {
+        string[] argv = ["tool", "", "a b", "$HOME", "x'y", "中文"];
+        var handler = new StubHttpMessageHandler(async (request, cancellationToken) =>
+        {
+            using var body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync());
+            body.RootElement.TryGetProperty("command", out _).Should().BeFalse();
+            body.RootElement.GetProperty("argv").EnumerateArray().Select(x => x.GetString()).Should().Equal(argv);
+            body.RootElement.GetProperty("cwd").GetString().Should().Be("$DIR");
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("data: {\"type\":\"execution_complete\"}\n\n", Encoding.UTF8, "text/event-stream")
+            };
+        });
+        IExecdCommands commands = CreateAdapter(handler);
+        var options = new RunCommandOptions { WorkingDirectory = "$DIR" };
+        if (streaming)
+        {
+            await foreach (var _ in commands.RunStreamAsync(argv, options)) { }
+        }
+        else
+        {
+            await commands.RunAsync(argv, options);
+        }
+    }
+
     [Fact]
     public async Task GetCommandStatusAsync_ShouldParseStatusResponse()
     {
@@ -439,6 +488,64 @@ data: {"type":"error","error":{"ename":"CommandExecError","evalue":"7","tracebac
 
         await act.Should().ThrowAsync<InvalidArgumentException>()
             .WithMessage("*sessionId*");
+    }
+
+    [Fact]
+    public async Task GetCommandStatusAsync_ShouldIncludeBodyInMessage_WhenBodyUnparseable()
+    {
+        var body = "{\"error\":\"cursor must be positive\"}";
+        var handler = new StubHttpMessageHandler((_, _) =>
+        {
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.BadRequest)
+            {
+                Content = new StringContent(body, Encoding.UTF8, "application/json")
+            });
+        });
+        var adapter = CreateAdapter(handler);
+
+        var act = () => adapter.GetCommandStatusAsync("exec-1");
+
+        var ex = await act.Should().ThrowAsync<SandboxApiException>();
+        ex.Which.Message.Should().Contain(body);
+    }
+
+    [Fact]
+    public async Task GetCommandStatusAsync_ShouldIncludeBodyInMessage_WhenBodyIsPlainText()
+    {
+        var body = "cursor must be positive";
+        var handler = new StubHttpMessageHandler((_, _) =>
+        {
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.BadRequest)
+            {
+                Content = new StringContent(body, Encoding.UTF8, "text/plain")
+            });
+        });
+        var adapter = CreateAdapter(handler);
+
+        var act = () => adapter.GetCommandStatusAsync("exec-1");
+
+        var ex = await act.Should().ThrowAsync<SandboxApiException>();
+        ex.Which.Message.Should().Contain(body);
+        ex.Which.RawBody.Should().Be(body);
+    }
+
+    [Fact]
+    public async Task GetBackgroundCommandLogsAsync_ShouldIncludeBodyInMessage_WhenBodyUnparseable()
+    {
+        var body = "quota exceeded for sandbox";
+        var handler = new StubHttpMessageHandler((_, _) =>
+        {
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.BadRequest)
+            {
+                Content = new StringContent(body, Encoding.UTF8, "text/plain")
+            });
+        });
+        var adapter = CreateAdapter(handler);
+
+        var act = () => adapter.GetBackgroundCommandLogsAsync("exec-1");
+
+        var ex = await act.Should().ThrowAsync<SandboxApiException>();
+        ex.Which.Message.Should().Contain(body);
     }
 
     private static CommandsAdapter CreateAdapter(HttpMessageHandler httpHandler)

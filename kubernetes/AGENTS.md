@@ -18,7 +18,7 @@ For detailed development setup, architecture deep-dive, coding standards, testin
 - `pkg/task-executor/`: task-executor public types and config
 - `pkg/utils/`: public-ish helper contracts used by server-side Kubernetes integration
 - `config/`: Kustomize overlays, RBAC, CRD bases, samples
-- `charts/opensandbox-controller/`: Helm chart for deployment
+- `../manifests/charts/`: component Helm charts (base, controller, server, ingress-gateway, node-agent) plus the `opensandbox` umbrella chart
 - `cmd/image-committer/` and `Dockerfile.image-committer`: image used by pause/resume rootfs commit jobs
 - `test/e2e/`: end-to-end tests (Kind-based)
 - `test/e2e_task/`: task-executor e2e tests
@@ -46,7 +46,7 @@ For E2E test failure diagnosis, see [docs/E2E-TROUBLESHOOTING.md](./docs/E2E-TRO
 
 The controller communicates allocation state through annotations on BatchSandbox objects. These are treated as internal but stability-sensitive:
 
-- `sandbox.opensandbox.io/alloc-status`: JSON `{"pods":["pod-1","pod-2"]}` — current pod allocation
+- `sandbox.opensandbox.io/alloc-status`: current pool allocation. Legacy pods-only JSON such as `{"pods":["pod-1","pod-2"]}` remains accepted and readable. Current controller writes add `poolRef` and `generation`: `{"pods":["pod-1","pod-2"],"poolRef":"pool-a","generation":42}`. `generation` traces the BatchSandbox generation for the write; it is not an evidence-freshness predicate.
 - `sandbox.opensandbox.io/alloc-release`: JSON `{"pods":["pod-3"]}` — pods released back to pool
 - `sandbox.opensandbox.io/endpoints`: JSON endpoint list consumed by server-side endpoint resolution
 
@@ -125,7 +125,7 @@ Deploy via Helm:
 
 ```bash
 cd kubernetes
-make helm-install
+make -C manifests helm-install
 ```
 
 Regenerate CRD manifests and DeepCopy:

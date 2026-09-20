@@ -20,9 +20,11 @@ restore configuration, and lifecycle status. They are intentionally decoupled
 from both API schemas and runtime-specific objects.
 """
 
-from dataclasses import dataclass, field
+from collections.abc import Mapping
+from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime
 from enum import Enum
+from typing import Any
 
 
 class SnapshotState(str, Enum):
@@ -41,12 +43,21 @@ class SnapshotRestoreConfig:
     """
     Runtime-agnostic restore configuration for a snapshot.
 
-    Phase 1 stores only the image reference needed to restore a sandbox from the
-    snapshot. Keep this as an object so future fields can be added without
-    changing the top-level snapshot record shape.
+    ``image`` is the artifact a sandbox restore creates from. ``backend`` is
+    an optional marker naming the runtime that produced the snapshot (e.g.
+    ``"fsb"``); create-time routing uses it to send snapshot restores to the
+    owning backend. Absent means the default (pod/Docker) backend.
     """
 
     image: str | None = None
+    backend: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, values: Mapping[str, Any]) -> "SnapshotRestoreConfig":
+        return cls(**{item.name: values[item.name] for item in fields(cls) if item.name in values})
 
 
 @dataclass(slots=True)

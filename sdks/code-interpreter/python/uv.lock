@@ -219,6 +219,15 @@ wheels = [
 ]
 
 [[package]]
+name = "httpx-sse"
+version = "0.4.3"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/0f/4c/751061ffa58615a32c31b2d82e8482be8dd4a89154f003147acee90f2be9/httpx_sse-0.4.3.tar.gz", hash = "sha256:9b1ed0127459a66014aec3c56bebd93da3c1bc8bb6618c8082039a44889a755d", size = 15943, upload-time = "2025-10-10T21:48:22.271Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d2/fd/6668e5aec43ab844de6fc74927e155a3b37bf40d7c3790e49fc0406b6578/httpx_sse-0.4.3-py3-none-any.whl", hash = "sha256:0ac1c9fe3c0afad2e0ebb25a934a59f4c7823b60792691f779fad2c5568830fc", size = 8960, upload-time = "2025-10-10T21:48:21.158Z" },
+]
+
+[[package]]
 name = "idna"
 version = "3.15"
 source = { registry = "https://pypi.org/simple" }
@@ -250,7 +259,10 @@ name = "opensandbox"
 source = { editable = "../../sandbox/python" }
 dependencies = [
     { name = "attrs" },
+    { name = "httpcore" },
     { name = "httpx" },
+    { name = "httpx-sse" },
+    { name = "opentelemetry-api" },
     { name = "pydantic" },
     { name = "python-dateutil" },
 ]
@@ -258,7 +270,10 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "attrs", specifier = ">=21.3.0" },
+    { name = "httpcore", specifier = ">=1.0.0,<2.0" },
     { name = "httpx", specifier = ">=0.27.0,<1.0" },
+    { name = "httpx-sse", specifier = ">=0.4.3,<0.5" },
+    { name = "opentelemetry-api", specifier = ">=1.20,<2.0" },
     { name = "pydantic", specifier = ">=2.4.2,<3.0" },
     { name = "pyjwt", marker = "extra == 'pool-redis'", specifier = ">=2.13.0" },
     { name = "python-dateutil", specifier = ">=2.8.2,<3.0" },
@@ -269,6 +284,7 @@ provides-extras = ["pool-redis"]
 [package.metadata.requires-dev]
 dev = [
     { name = "openapi-python-client", specifier = ">=0.28.0" },
+    { name = "opentelemetry-sdk", specifier = ">=1.20,<2.0" },
     { name = "pyright", specifier = ">=1.1.0" },
     { name = "pytest", specifier = ">=7.0.0" },
     { name = "pytest-asyncio", specifier = ">=0.21.0" },
@@ -307,6 +323,18 @@ dev = [
     { name = "pytest-asyncio", specifier = ">=0.21.0" },
     { name = "pytest-cov", specifier = ">=4.0.0" },
     { name = "ruff", specifier = ">=0.14.8" },
+]
+
+[[package]]
+name = "opentelemetry-api"
+version = "1.44.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/ee/8b/aa9e2d8b8dfa7c946f7dec5d1f8f6ba8eca062f43509a06bdb5ce93d26c0/opentelemetry_api-1.44.0.tar.gz", hash = "sha256:67647e5e9566edcf421166fdf022b3537f818635daa852b289e34604dc6fb33a", size = 72406, upload-time = "2026-07-16T15:25:32.678Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ca/6f/a04e900f465ff3221ccc395522503e2d10e79fa21f2723c8e177aae1e0d1/opentelemetry_api-1.44.0-py3-none-any.whl", hash = "sha256:94b98c893a91b88657eaac1e3ba89618cdb85be6918196705354f34728b2cdef", size = 60018, upload-time = "2026-07-16T15:25:11.657Z" },
 ]
 
 [[package]]

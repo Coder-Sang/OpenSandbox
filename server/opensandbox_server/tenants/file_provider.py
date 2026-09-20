@@ -99,6 +99,11 @@ class FileTenantProvider:
         self._watcher_thread: Optional[threading.Thread] = None
 
     @property
+    def supports_enumeration(self) -> bool:
+        """The file provider lists its full config at startup."""
+        return True
+
+    @property
     def path(self) -> Path:
         return self._path
 
@@ -140,7 +145,7 @@ class FileTenantProvider:
             self._lookup = lookup
             self._ready = True
 
-        logger.info("Loaded %d tenant(s) from %s", len(entries), self._path)
+        logger.info(f"Loaded {len(entries)} tenant(s) from {self._path}")
 
     def _reload(self) -> None:
         try:
@@ -151,7 +156,7 @@ class FileTenantProvider:
                 self._entries = entries
                 self._lookup = lookup
 
-            logger.info("Reloaded %d tenant(s) from %s", len(entries), self._path)
+            logger.info(f"Reloaded {len(entries)} tenant(s) from {self._path}")
             for cb in self._callbacks:
                 try:
                     cb(entries)
@@ -162,7 +167,9 @@ class FileTenantProvider:
             with self._lock:
                 self._entries = []
                 self._lookup = {}
-            logger.warning("Tenants config deleted: %s — all tenant keys invalidated", self._path)
+            logger.warning(
+                f"Tenants config deleted: {self._path} — all tenant keys invalidated"
+            )
 
         except Exception:
             logger.exception("Failed to reload tenants config — keeping previous state")

@@ -49,8 +49,9 @@ type policyUpdater interface {
 // nftApplier: static allow/deny sets plus dynamic DNS-learned entries; teardown on shutdown.
 type nftApplier interface {
 	ApplyStatic(context.Context, *policy.NetworkPolicy) error
-	AddResolvedIPs(context.Context, []nftables.ResolvedIP) error
+	AddResolvedDomain(context.Context, string, []nftables.ResolvedIP) error
 	StartConnectionRefresh(context.Context)
+	StartDomainRefresh(context.Context, func(context.Context, string) ([]nftables.ResolvedIP, error))
 	RemoveEnforcement(context.Context) error
 }
 
@@ -110,7 +111,7 @@ func startPolicyServer(
 		if err != nil {
 			return nil, fmt.Errorf("lookup credential proxy user %q: %w", mitmproxy.RunAsUser, err)
 		}
-		activeSrv, cleanupActiveSocket, err = credentialvault.StartActiveSocketServer(handler.handleCredentialVaultActive, socketPath, int(mitmGID))
+		activeSrv, cleanupActiveSocket, err = credentialvault.StartActiveSocketServerRequestAware(handler.handleCredentialVaultActive, socketPath, int(mitmGID))
 		if err != nil {
 			return nil, fmt.Errorf("credential vault active socket: %w", err)
 		}
@@ -402,13 +403,8 @@ func (s *policyServer) handleCredentialVaultBinding(w http.ResponseWriter, name 
 	http.Error(w, "binding not found", http.StatusNotFound)
 }
 
-func (s *policyServer) handleCredentialVaultActive(w http.ResponseWriter) {
-	snapshot, err := s.credentialVault.ActiveSnapshot()
-	if err != nil {
-		credentialvault.WriteError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, snapshot)
+func (s *policyServer) handleCredentialVaultActive(w http.ResponseWriter, r *http.Request) {
+	handleActiveVaultSnapshot(w, r, s.credentialVault)
 }
 
 func (s *policyServer) handleGet(w http.ResponseWriter) {
@@ -713,6 +709,8 @@ func (s *policyServer) reloadAlwaysRules() (bool, error) {
 	if !changed {
 		return false, nil
 	}
+	allow = withTelemetryAllow(allow)
+	s.setAlwaysRules(deny, allow)
 	s.proxy.UpdateAlwaysRules(deny, allow)
 	return true, nil
 }

@@ -41,6 +41,12 @@ The egress control is implemented as a **Sidecar** that shares the network names
 
 Dynamic entries initially use the DNS TTL plus a short safety margin, clamped to 60–360 seconds. The sidecar polls active TCP connections every 30 seconds and renews only DNS-authorized remote IPs that are still in use. When activity ends, one final six-minute renewal provides a bounded reconnect window before the entry expires normally. This means an active TCP connection can keep an IP authorized beyond its original DNS TTL; UDP and QUIC entries are not connection-tracked and continue to expire according to DNS-driven TTL updates.
 
+The sidecar renews timed elements by ensuring each element exists, deleting it, and adding it with the requested timeout in one nft transaction. This also handles missing or expired elements and avoids relying on repeated `add element` commands to update existing timeouts, which older kernels do not support. DNS answers and TCP activity use the same update path.
+
+In sidecar `dns+nft` mode with a default-deny policy, the sidecar also revalidates previously observed allowed domains on a jittered ~30-second loop (15–45 seconds per tick, so fleet-deployed sidecars do not pulse upstream resolvers in phase). A domain is queried only when its earliest cached-IP lease is within about a minute of expiry, keeping revalidation volume proportional to the number of leases about to expire rather than to the number of tracked domains. A cached IP receives another finite DNS-derived lease only when the applied policy still allows its domain and a fresh upstream A/AAAA lookup still returns that IP. Background lookups neither shorten a longer existing lease nor authorize newly discovered IPs that the client has never received. This lets clients such as OSSFS reconnect using cached addresses after the TCP reconnect grace period, without making an IP authorization permanent.
+
+Revalidation is best-effort and bounded to 128 domains, 64 observed IPs per domain, four concurrent lookups, five seconds per lookup and a 20-second batch deadline. A domain whose revalidation keeps failing is retried starting at one refresh interval with the delay doubling per further failure (capped at ten minutes); while the earliest tracked lease is still alive the delay is clamped so a retry stays possible before it lapses, and a successful revalidation clears the backoff. Capacity pressure evicts the domain least recently observed in a client DNS response; background work does not count as client activity. Failed or truncated DNS responses do not extend leases. Negative answers and addresses absent from a successful revalidation stop domain-based renewal; existing TCP renewal and finite leases retain their previous behavior. Policy replacement clears domain tracking and invalidates in-flight results. Shutdown stops refresh work. A client DNS lookup is still required after eviction, policy replacement or an address change. DNS-only and fast-sandbox profiles do not enable this sidecar revalidation loop.
+
 ### Kubernetes Service Access Under `defaultAction: deny`
 
 In Kubernetes deployments that use `defaultAction: deny`, reaching an in-cluster Service usually needs two separate allowances:
@@ -61,6 +67,8 @@ See [Network Isolation](/architecture/network-isolation#allowing-legitimate-in-c
 
 ## Configuration
 
+For non-pooled Kubernetes sandboxes, configure independent sidecar requests and limits to avoid inheriting workload-sized `LimitRange` defaults. See [Kubernetes deployment](/kubernetes/deployment#configure-egress-sidecar-resources).
+
 Most deployments only need these settings:
 
 - **Mode**: `OPENSANDBOX_EGRESS_MODE`
@@ -74,15 +82,28 @@ Most deployments only need these settings:
   - `OPENSANDBOX_EGRESS_TOKEN` (optional auth via `OPENSANDBOX-EGRESS-AUTH`)
 - **Rule limit**:
   - `OPENSANDBOX_EGRESS_MAX_RULES` for `POST/PATCH /policy` (default `4096`, `0` disables cap)
+- **Redirect backend**: `OPENSANDBOX_EGRESS_REDIRECT_BACKEND` — how the OUTPUT redirects (DNS → the
+  proxy, HTTP/HTTPS → the transparent mitmproxy) are installed: `auto` (default: iptables first,
+  native nft rules when iptables' nft backend cannot load an xtables extension such as `owner` or
+  the IPv6 `REDIRECT` target), `nft` (native nft from the start, both address families), or
+  `iptables` (never fall back). Firecracker-style guest kernels (Fly.io Machines and similar
+  microVM hosts) ship nf_tables without `CONFIG_NETFILTER_XT_MATCH_OWNER`: use `nft` there.
+- **IPv6-only transport**: the `dns+nft` policy chain accepts ICMPv6 neighbor discovery (a host
+  whose default route is a link-local IPv6 gateway would otherwise lose its neighbor entry and
+  become unreachable once the cache goes stale), the DNS proxy also listens on `[::1]:15353`
+  so a `resolv.conf` naming an IPv6 resolver is proxied after the ip6 OUTPUT redirect, and the
+  transparent mitmproxy listens on `[::1]:18081` next to `127.0.0.1:18081` so IPv6 destinations
+  are intercepted too (the ip6 REDIRECT lands on `::1`, which `oifname "lo"` does not match —
+  the policy chain accepts `ip6 daddr ::1`).
 
 Optional advanced features:
 
 - Nameserver bypass: `OPENSANDBOX_EGRESS_NAMESERVER_EXEMPT`
-- Denied hostname webhook: `OPENSANDBOX_EGRESS_DENY_WEBHOOK`, `OPENSANDBOX_EGRESS_SANDBOX_ID`
+- Denied hostname webhook: `OPENSANDBOX_EGRESS_DENY_WEBHOOK` (server injects `OPENSANDBOX_EGRESS_SANDBOX_ID` automatically; not user-settable)
 - DoH/DoT controls: `OPENSANDBOX_EGRESS_BLOCK_DOH_443`, `OPENSANDBOX_EGRESS_DOH_BLOCKLIST`
 - Custom DNS upstream: `OPENSANDBOX_EGRESS_DNS_UPSTREAM` (comma-separated IPs, optional `:port`), `OPENSANDBOX_EGRESS_DNS_UPSTREAM_TIMEOUT` (default `5` seconds)
-- DNS upstream health probe: `OPENSANDBOX_EGRESS_DNS_UPSTREAM_PROBE` (enable), `OPENSANDBOX_EGRESS_DNS_UPSTREAM_PROBE_INTERVAL_SEC`
-- Credential vault: `OPENSANDBOX_EGRESS_CREDENTIAL_VAULT_REQUIRE_TLS`, `OPENSANDBOX_EGRESS_CREDENTIAL_VAULT_TRUSTED_PROXY_CIDRS`, `OPENSANDBOX_CREDENTIAL_PROXY_SOCKET` (default `/run/opensandbox/credential-proxy/active.sock`)
+- DNS upstream health probe: `OPENSANDBOX_EGRESS_DNS_UPSTREAM_PROBE` (probe name; default is root IN NS, set an FQDN your resolvers always answer), `OPENSANDBOX_EGRESS_DNS_UPSTREAM_PROBE_INTERVAL_SEC` (default `30`)
+- Credential vault: `OPENSANDBOX_EGRESS_CREDENTIAL_VAULT_REQUIRE_TLS`, `OPENSANDBOX_EGRESS_CREDENTIAL_VAULT_REQUIRE_SCOPED_MATCH`, `OPENSANDBOX_EGRESS_CREDENTIAL_VAULT_TRUSTED_PROXY_CIDRS`, `OPENSANDBOX_CREDENTIAL_PROXY_SOCKET` (default `/run/opensandbox/credential-proxy/active.sock`)
 - Metrics: `OPENSANDBOX_EGRESS_METRICS_EXTRA_ATTRS` (extra key=value attributes for OTLP metrics and structured log fields)
 
 ### Always-Rules Files
@@ -93,7 +114,7 @@ Static rule files under `/var/egress/rules/` are loaded at startup and take prio
 |------|---------|
 | `/var/egress/rules/deny.always` | Domains always denied, overrides user and allow rules |
 | `/var/egress/rules/allow.always` | Domains always allowed, overrides user rules |
-| `/var/egress/rules/log_skip.always` | Domain patterns whose DNS blocks are not logged (noise reduction) |
+| `/var/egress/rules/log_skip.always` | Domain patterns whose successful outbound DNS resolutions are not logged (noise reduction); failed/denied lookups are still logged |
 
 Format: one domain per line (supports wildcards like `*.example.com`). Lines starting with `#` are comments. Missing files are silently ignored.
 
@@ -169,9 +190,13 @@ Extra ports can be added via the experimental `OPENSANDBOX_EGRESS_MITMPROXY_EXTR
 On extra ports, mitmproxy still decrypts and logs traffic normally, but the Credential Vault's binding matcher currently only fires on the canonical `80/443` — bindings will not match requests to custom ports until follow-up work extends the matcher.
 :::
 
+::: warning Known issue: large SSE chunks truncated
+mitmproxy can truncate the tail of large streamed bodies (e.g. LLM SSE events > ~1 MB) when the upstream serves over TLS HTTP/1.1 and closes the connection right after the body. See [Egress: SSE Truncation (mitmproxy)](/components/egress-mitmproxy-sse-truncation) for root cause, reproduction, and status.
+:::
+
 ### Credential Vault
 
-The credential vault provides automatic credential injection for outbound requests to allowed hosts. Credentials are stored in-memory and injected into matching requests by the transparent mitmproxy layer.
+The credential vault provides automatic credential injection for outbound requests to allowed hosts. Credentials are stored in-memory and injected into matching requests by the transparent mitmproxy layer. Injection happens when request headers are read, so it applies to request bodies of any size, including large bodies that mitmproxy streams upstream.
 
 Prerequisites: transparent mitmproxy enabled (`OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT=true`), egress API auth token set (`OPENSANDBOX_EGRESS_TOKEN`).
 
@@ -181,7 +206,75 @@ See [Credential Vault](/guides/credential-vault) for full API usage, binding rul
 
 ### Observability (OpenTelemetry)
 
-Egress can export **OTLP metrics**; application logs use the **native zap** logger (JSON to stdout by default, configurable via `OPENSANDBOX_LOG_OUTPUT` / `OPENSANDBOX_EGRESS_LOG_LEVEL`). OTLP log export is not used.
+Egress can export **OTLP metrics**; application logs use the **native zap** logger (JSON to stdout by default, configurable via `OPENSANDBOX_LOG_OUTPUT` / `OPENSANDBOX_EGRESS_LOG_LEVEL`). The credential proxy's log lines from mitmdump are piped into the same zap sink at warn level; shadow outcome records described below are consumed as metrics instead. mitmproxy's own flow logs are not forwarded. OTLP log export is not used.
+
+#### Experimental TLS shadow observations
+
+Operators may set `OPENSANDBOX_EGRESS_MITMPROXY_SHADOW=true` directly on the
+egress process to collect `egress.mitm.shadow.requests_total` through the
+existing OTLP exporter. It defaults to off; this is not the public
+`credentialProxy.interceptionMode` option and is not forwarded through SDK
+sandbox environment settings. Enable it only for targeted diagnostic windows:
+it adds host matching and one fixed-format child-process record per sample.
+
+Samples are **HTTPS/443 request-header observations**, not TLS connection
+counts. They reuse the request's existing validated Vault result/ETag check;
+the observer performs no extra Vault lookup, retains no snapshot, and does not
+change TLS interception, credential injection, or rejection. A pooled
+connection may contribute many samples, and a binding change between handshake
+and request may change the projection. Early `ignore_hosts`/no-SNI/ECH opaque
+traffic, failed handshakes (including CA failures), and noncanonical ports are
+not represented. Do not use these samples to estimate total handshake savings
+or to prove OSEP revision acknowledgement or enforcement correctness.
+
+`decision=decrypt|passthrough|unavailable` is a hypothetical SNI/HTTPS-host-scope
+projection at the existing request lookup. Lookup errors are `unavailable`,
+never a successful no-binding result. Network-policy outcomes and DLP coverage
+are not inferred.
+
+| `decision` | `reason` | Meaning at the existing HTTPS/443 request Vault lookup |
+|---|---|---|
+| `decrypt` | `binding_host` | SNI is covered by an HTTPS binding host selector; method/path do not affect this host-level projection |
+| `passthrough` | `no_binding_host` | Validated Vault has no HTTPS selector covering SNI |
+| `passthrough` | `no_vault` | Sidecar active-Vault API returned authoritative absence; not proof of a future startup empty-snapshot transaction |
+| `unavailable` | `unknown_subject_or_vault` | Fast Sandbox 404 cannot distinguish an unknown source identity from absent Vault state |
+| `unavailable` | `lookup_failed` | The existing lookup failed; no cached result is used to guess |
+| `unavailable` | `missing_sni`, `invalid_sni` | No usable ASCII SNI in this observed request |
+| `unavailable` | `invalid_snapshot`, `observer_error` | Shadow projection could not interpret the sample |
+
+Only these fixed reasons and decisions plus existing shared attributes are
+exported. No hostname, path, credential, revision, or fast-sandbox subject ID is added.
+The Python addon emits a fixed outcome through its existing stdout pipe; Go
+consumes it as a metric instead of forwarding it to the application log sink.
+Unknown outcomes are discarded. Operator addons and the child process remain
+trusted diagnostic producers; this is not an audit record.
+
+Delivery is best effort. Process failure, pipe/log filtering, or exporter
+failure can lose observations; no-exporter deployments must not expect a stored
+log substitute. These are request-weighted observations after TLS termination,
+not ClientHello-time decisions: pooled requests count repeatedly, while opaque
+connections and failed handshakes never reach this hook. Shadow failures never
+change traffic. Evaluate `unavailable` alongside other outcomes rather than
+treating missing samples as successful pass-through.
+
+#### Enabling export from the server
+
+When the server config sets `[egress].otlp_endpoint`, the lifecycle server injects it into every egress sidecar as `OTEL_EXPORTER_OTLP_ENDPOINT` (Docker and Kubernetes alike):
+
+```toml
+[egress]
+otlp_endpoint = "http://otel-collector.observability.svc.cluster.local:4318"
+```
+
+- The endpoint must be an `http://` or `https://` URL with a collector host — the telemetry client only speaks OTLP over HTTP/protobuf, so a gRPC endpoint (port 4317) won't work.
+- Use a **fully qualified service name or an IP**, per the auto-allow note below: partial service names get search-domain-expanded to FQDNs the auto-generated allow rule does not match.
+- The collector address is infrastructure config: it is read only from the server config file and cannot be set per request. When unset, sidecar metrics are not exported.
+- By default, synchronous counters and histograms export **delta** temporality;
+  a collector feeding Prometheus/GMP needs the `deltatocumulative` processor.
+  Deployments that control the sidecar process environment can select cumulative
+  export or disable metrics using [component telemetry configuration](/guides/component-telemetry).
+
+Full key reference: [server configuration.md](https://github.com/opensandbox-group/OpenSandbox/blob/main/server/configuration.md).
 
 #### DNS latency buckets
 
@@ -206,7 +299,146 @@ millisecond ladder (`0, 5, 10, … 10000`), which would put every realistic DNS 
 single `le=5` bucket and make `histogram_quantile()` return an interpolation rather than a
 measurement.
 
+#### Denied vs failed
+
+Two counters look similar and mean opposite things. Reading one for the other inverts the
+diagnosis:
+
+| Metric | Meaning | Expected in a healthy system? |
+|---|---|---|
+| `egress.policy.denied_total` | the policy did its job — the workload asked for something it may not reach | **yes** |
+| `egress.dns.query.failed_total` | the sidecar could not do its job — an allowed lookup returned `SERVFAIL` | **no** |
+
+So the alert for "DNS is broken inside sandboxes" is the second one:
+
+```promql
+rate(egress_dns_query_failed_total[5m]) > 0
+```
+
+`reason` comes from a closed set — `no_upstreams`, `upstream_error`, `empty_response`,
+`rcode` — so the counter's cardinality does not depend on what the workload queries. Neither
+the queried name nor the error text is ever attached as a label.
+
+`egress.nftables.updates.failed_total{operation}` covers the other silent failure, with
+`operation` one of `static_apply`, `dynamic_add`, `remove`. **`dynamic_add` is the one to
+alert on**: it adds the IPs behind an allowed domain to the dynamic allow set, so a failure
+means the kernel never learned about destinations the policy permits and the chain drops
+them. From inside the sandbox that is indistinguishable from a denial, while
+`egress.policy.denied_total` stays flat — a fail-closed outage with no other signal.
+
+#### Resource usage: node vs sidecar
+
+Two pairs of gauges look interchangeable and are not:
+
+| Metric | Unit | Scope |
+|---|---|---|
+| `egress.system.memory.usage_bytes` | `By` | the **node** |
+| `egress.system.cpu.utilization` | `1` | the **node** |
+| `egress.process.memory.usage_bytes` | `By` | this **sidecar** |
+| `egress.process.cpu.time` | `s` | this **sidecar** |
+
+The `system` pair comes from `/proc/meminfo` and `/proc/stat`, which inside a container
+describe the node. Since the sidecar runs **per sandbox**, every sandbox on a node reports
+the same node figure under its own `sandbox_id` — do not chart these "by sandbox", because
+the series look per-sandbox and are N copies of one number. Use kubelet/cAdvisor or a node
+exporter for node-level data.
+
+The `process` pair is read from the sidecar's own cgroup, so it really is per sandbox.
+`egress.process.cpu.time` is a **cumulative counter of consumed seconds** — query it with
+`rate()`. A sampled ratio would depend on the export interval and could not be compared
+across deployments.
+
+Per-sandbox attribution needs `OPENSANDBOX_EGRESS_SANDBOX_ID` to be set, since that is what
+becomes the `sandbox_id` attribute. Without it every sidecar exports the same attribute set
+and the series from different sandboxes collide in the backend — which makes the `process`
+metrics look flat or flapping rather than absent. Set it when launching the sidecar.
+
+Both `process` metrics are **only present when the sidecar's cgroup is readable** (cgroup v2
+`memory.current` / `cpu.stat`, or v1 `memory.usage_in_bytes` / `cpuacct.usage`). Under a
+runtime that does not expose cgroupfs the series are absent rather than zero, so a flat zero
+is never mistaken for an idle sidecar.
+
 Full metric inventory and attribute semantics: [egress OpenTelemetry reference](https://github.com/opensandbox-group/OpenSandbox/blob/main/components/egress/docs/opentelemetry.md).
+
+## Fast Sandbox Profile (multi-sandbox control plane)
+
+> Experimental: design per [OSEP-0022](https://github.com/opensandbox-group/OpenSandbox/blob/main/oseps/0022-multi-sandbox-egress-control-plane.md);
+> subject lifecycle follows the fast-sandbox
+> [Sandbox Actions](https://github.com/opensandbox-group/fast-sandbox/blob/master/docs/concepts/sandbox-actions.md)
+> Handler protocol (replacing the earlier slot-store observation).
+
+The default `sidecar` profile serves exactly one sandbox sharing one network
+namespace. The opt-in `fast-sandbox` profile (`OPENSANDBOX_EGRESS_PROFILE=fast-sandbox`)
+serves N sandboxes sharing one host/network domain (fast-sandbox Fastlet
+Pod): a single egress process hosts one **subject** per sandbox, each with its
+own policy, credentials, and kernel rules. The sidecar profile and its API are
+unchanged; both profiles are mutually exclusive deployment forms.
+
+- **Identity and lifecycle**: the Fastlet is the sole lifecycle dispatcher.
+  The egress Handler implements `GET /_fastlet/v1/actions/status` (process
+  incarnation probe: a changed `instanceId` makes the Fastlet replay the
+  latest `SET_BINDING` plus reached Hooks) and `POST /_fastlet/v1/actions`
+  (`SET_BINDING` / `LIFECYCLE_HOOK` / `REMOVE_BINDING`). `SET_BINDING`
+  registers the subject deny-first and stores the input policy as pending;
+  `sandbox.data-plane-ready` applies it (`denying` → `active`). The network
+  identity (source IP, gateway, veth, private CIDR) comes from the action
+  envelope's attachment block. A subject is deny-first from registration
+  until its data-plane-ready Hook succeeds, so policy delivery can be late,
+  never early-open.
+- **Control surface**: the listener binds the Pod netns loopback only
+  (`OPENSANDBOX_EGRESS_HTTP_ADDR`, default `127.0.0.1:18080`) and serves the
+  action endpoints plus the proxy-route policy and credential surfaces.
+  Policy rides the Sandbox CRD `actionBindings` (declarative, revisioned);
+  credential pushes from the server are routed per subject by the
+  `X-Fast-Sandbox-Uid` header (added by fastlet-proxy, the only peer). A push
+  for a UID whose binding has not appeared is cached and applied on
+  registration (`OPENSANDBOX_EGRESS_PENDING_PUSH_TTL`, seconds, default
+  `30`); a stale push carrying a mismatched `X-Fast-Sandbox-Generation` is
+  discarded.
+- **DNS**: one shared proxy on loopback `127.0.0.1:15353` (never collides
+  with a host DNS service on `:53`); per-subject prerouting REDIRECTs
+  forward sandbox DNS addressed to the attachment gateway `:53` to it,
+  preserving the source IP, and per-query policy is dispatched by source IP.
+- **Enforcement**: nftables in the Pod netns. The forward path never issues
+  an explicit `accept` — with `net.bridge.bridge-nf-call-iptables=1` (the
+  fast-sandbox Firecracker bridge topology) an accept verdict returns the
+  frame to the bridge L2 path and drops it before postrouting. Instead,
+  per-subject `hook prerouting` chains mark allowed destinations (`meta mark
+  set 0x2` for allow/dyn set members; an unconditional mark for
+  default-allow policies), and the drop-by-default master forward chain
+  becomes a drop-by-unmarked chain (`policy accept` + `meta mark & 0x2 !=
+  0x2 drop` tail): per-subject deny sets still drop explicitly, unregistered
+  sources and deny-first subjects carry no mark and are denied by the tail.
+  Static sets are swapped atomically; dynamic DNS-learned sets carry bounded
+  leases. A per-subject connection refresh loop (Pod netns conntrack,
+  bucketed by source IP, every 30s, one batched transaction per tick) keeps
+  the dynamic leases of active connections alive. Only TCP sessions are
+  renewed; UDP/QUIC (HTTP/3) relies on the DNS lease TTLs — same limitation
+  as the sidecar profile. Mark `0x2` is distinct from the DNS proxy's
+  `SO_MARK 0x1` bypass.
+- **Encrypted-DNS blocking**: DoT 853 is always dropped in the master chain.
+  With `OPENSANDBOX_EGRESS_BLOCK_DOH_443=true`, TCP 443 to the
+  `OPENSANDBOX_EGRESS_DOH_BLOCKLIST` IP/CIDR list is dropped too — same
+  semantics as the sidecar profile, applied globally to every subject.
+  > Warning: when the blocklist is empty (strict mode) ALL TCP 443 is
+  > dropped globally, ahead of every per-subject allow verdict — an explicit
+  > policy allow cannot override it. Only TCP is blocked: UDP/QUIC
+  > (HTTP/3, DoH-over-UDP) is not intercepted by this mechanism.
+- **Telemetry**: OpenTelemetry metrics are exported exactly as in the sidecar
+  profile; nft updates are attributed per fast-sandbox operation (`deny_first`,
+  `static_apply`, `dynamic_add`, `reset`, `remove`).
+- **Credentials**: memory-only, per subject; complete vault revisions are
+  pushed over the proxy route (OSEP-0012 model). No Secret volume, no egress
+  disk state. The action binding input is NOT a secret transport (it is
+  persisted in the Sandbox CRD).
+- **Recovery**: on restart, egress wipes stale rules and serves a new
+  `instanceId`; the Fastlet detects the change and replays every live
+  binding (`SET_BINDING` + reached Hooks), re-entering each subject through
+  deny-first. The server re-pushes credential revisions.
+
+For how policy is applied, how outbound traffic flows through the nftables
+dispatch, and how the credential vault works in the fast-sandbox profile, see
+[policy, traffic flow, and credential vault](https://github.com/opensandbox-group/OpenSandbox/blob/main/components/egress/docs/policy-traffic-vault-flow.md).
 
 ## Build & Run
 
@@ -281,8 +513,14 @@ ENTRYPOINT: supervisor --pre-start=cleanup.sh --name=egress --grace-period=20s -
 
 Egress-specific configuration:
 
-- **`--grace-period=20s`**: Egress needs extra time to drain DNS connections and tear down iptables/nft rules on shutdown (default is 10 s).
+- **`--grace-period=20s`**: Maximum time for worker shutdown before the supervisor sends SIGKILL. The container runtime may enforce a shorter deadline.
 - **Pre-start hook** (`cleanup.sh`): Reaps orphaned `mitmdump` processes from a previous crash and removes stale DNS redirect iptables/native nft state that would otherwise point port 53 at a dead proxy. It does not manage the `inet opensandbox` policy table; the nftables manager deletes and recreates that table when policy enforcement starts.
+
+### Shutdown
+
+On SIGTERM, egress stops accepting webhook events and allows queued and in-flight deliveries up to 5 seconds to finish, keeping DNS and network rules available.
+It then shuts down listeners, removes network rules, and flushes telemetry.
+Delivery is best effort; timeouts or forced termination can drop events and interrupt cleanup. See [Docker deletion](/components/server#docker-deletion) for the Docker stop budget.
 
 ## Troubleshooting
 

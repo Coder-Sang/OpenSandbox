@@ -166,6 +166,17 @@ osb sandbox metrics <sandbox-id>
 osb sandbox metrics <sandbox-id> --watch -o raw
 ```
 
+### Pause a sandbox
+
+Pause is asynchronous. `Pause request accepted` confirms that the server accepted
+the request, not that the sandbox has reached the `Paused` state. Poll the sandbox
+until the transition finishes:
+
+```bash
+osb sandbox pause <sandbox-id>
+osb sandbox get <sandbox-id> -o json
+```
+
 ### Expose a service
 
 ```bash
@@ -188,6 +199,17 @@ osb command status <sandbox-id> <execution-id> -o json
 osb command logs <sandbox-id> <execution-id> -o json
 ```
 
+By default the payload after `--` is joined into one shell command string, so
+pipelines, redirection, and `$VAR` expansion work as in a terminal. Add `--argv`
+to pass the arguments to the executable as a literal argv list (no shell) when
+values such as `$HOME`, quotes, embedded spaces, or empty strings must reach the
+process unchanged. `--argv` needs a sandbox image whose execd accepts argv
+requests:
+
+```bash
+osb command run <sandbox-id> -o raw --argv -- python3 -c "import sys; print(sys.argv[1:])" "a b" '$HOME' "x'y" ""
+```
+
 Persistent shell session:
 
 ```bash
@@ -208,6 +230,11 @@ osb file info <sandbox-id> /workspace/main.py -o json
 osb file replace <sandbox-id> /workspace/app.py --old old --new new -o json
 osb file chmod <sandbox-id> /workspace/script.sh --mode 755 -o json
 ```
+
+Downloads replace regular files only on success; a failed or interrupted
+download preserves any existing regular file. Existing devices and named pipes
+receive data directly. Stdout aliases (such as `/dev/stdout`) stream only the file
+bytes, without a success message. See the [CLI guide](../docs/cli/index.md#work-with-files).
 
 ### Manage runtime egress policy
 
@@ -252,21 +279,23 @@ credential values as command-line flags; keep them in the payload stream or file
 Use the stable diagnostics commands for API-backed log and event descriptors.
 
 ```bash
-osb diagnostics events <sandbox-id> --scope lifecycle -o raw
 osb diagnostics events <sandbox-id> --scope runtime -o raw
+osb diagnostics events <sandbox-id> --scope all -o raw
 osb diagnostics logs <sandbox-id> --scope container -o raw
-osb diagnostics logs <sandbox-id> --scope lifecycle -o json
+osb diagnostics logs <sandbox-id> --scope all -o json
 osb diagnostics events <sandbox-id> --scope runtime -o json
 osb diagnostics logs <sandbox-id> --scope container -o yaml
 ```
 
-`--scope` is required for stable diagnostics. Common scopes are `lifecycle` and
-`container` for logs, and `lifecycle` and `runtime` for events. Raw output
-prints inline diagnostic text, or the content URL when diagnostics are
-delivered as a temporary URL. Structured CLI output follows the SDK/Python field
-style, for example `content_url`, `content_length`, and `expires_at`.
-Some server builds may return `DIAGNOSTICS_NOT_IMPLEMENTED` for scoped
-diagnostics until the stable backend implementation is enabled.
+`--scope` is required for stable diagnostics. The built-in server supports
+`container` and `all` for logs, and `runtime` and `all` for events. It returns
+`DIAGNOSTICS_SCOPE_UNSUPPORTED` for unavailable scopes, including lifecycle events.
+Best-effort scopes may include a `warnings` field when the backend can only
+provide a subset. Raw output prints inline
+diagnostic text, or the content URL when diagnostics are delivered as a
+temporary URL. Structured CLI output follows the SDK/Python field style, for
+example `content_url`, `content_length`, and `expires_at`. Older server builds
+may still return `DIAGNOSTICS_NOT_IMPLEMENTED` for scoped diagnostics.
 
 Legacy DevOps diagnostics remain experimental. Prefer `osb diagnostics logs/events`
 for stable API-backed log and event collection.

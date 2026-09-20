@@ -22,15 +22,20 @@ import re
 from datetime import datetime
 from typing import Dict, List, Any, Optional
 
-from opensandbox_server.config import AppConfig, DEFAULT_EGRESS_DISABLE_IPV6, EGRESS_MODE_DNS
+from opensandbox_server.config import AppConfig
 from opensandbox_server.extensions.keys import BOOTSTRAP_EXECD_ISOLATION_KEY
 from opensandbox_server.services.constants import OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT
 from opensandbox_server.services.helpers import format_ingress_endpoint
-from opensandbox_server.api.schema import Endpoint, ImageSpec, NetworkPolicy, PlatformSpec, Volume
+from opensandbox_server.api.schema import Endpoint, ImageSpec, PlatformSpec, Volume
 from opensandbox_server.services.k8s.agent_sandbox_template import AgentSandboxTemplateManager
 from opensandbox_server.services.validators import ensure_egress_runtime_compatible
 from opensandbox_server.services.k8s.client import K8sClient
 from opensandbox_server.services.k8s.egress_helper import apply_egress_to_spec
+from opensandbox_server.services.k8s.image_pull_secret_helper import (
+    build_image_pull_secret,
+    build_image_pull_secret_name,
+    merge_image_pull_secrets,
+)
 from opensandbox_server.services.k8s.provider_common import (
     _build_execd_init_container,
     _build_main_container,
@@ -39,7 +44,10 @@ from opensandbox_server.services.k8s.provider_common import (
     _workload_platform_constraint_scope,
 )
 from opensandbox_server.services.k8s.volume_helper import apply_volumes_to_pod_spec
-from opensandbox_server.services.k8s.workload_provider import WorkloadProvider
+from opensandbox_server.services.k8s.workload_provider import (
+    EgressWorkloadSettings,
+    WorkloadProvider,
+)
 from opensandbox_server.services.k8s.windows_profile import is_windows_profile
 from opensandbox_server.services.runtime_resolver import SecureRuntimeResolver
 
@@ -82,7 +90,7 @@ class AgentSandboxProvider(WorkloadProvider):
         self.k8s_client = k8s_client
 
         self.group = "agents.x-k8s.io"
-        self.version = "v1alpha1"
+        self.version = "v1beta1"
         self.plural = "sandboxes"
 
         k8s_config = app_config.kubernetes if app_config else None
@@ -94,16 +102,11 @@ class AgentSandboxProvider(WorkloadProvider):
         )
         self.ingress_config = app_config.ingress if app_config else None
         self.execd_init_resources = k8s_config.execd_init_resources if k8s_config else None
+        self.execd_run_as_init = bool(app_config and app_config.runtime.execd_run_as_init)
 
         self.resolver = SecureRuntimeResolver(app_config) if app_config else None
         self.runtime_class = (
             self.resolver.get_k8s_runtime_class() if self.resolver else None
-        )
-
-        self.egress_disable_ipv6 = (
-            bool(app_config.egress.disable_ipv6)
-            if app_config and app_config.egress is not None
-            else DEFAULT_EGRESS_DISABLE_IPV6
         )
 
     def _resource_name(self, sandbox_id: str) -> str:
@@ -132,16 +135,11 @@ class AgentSandboxProvider(WorkloadProvider):
         expires_at: Optional[datetime],
         execd_image: str,
         extensions: Optional[Dict[str, str]] = None,
-        network_policy: Optional[NetworkPolicy] = None,
-        egress_image: Optional[str] = None,
+        egress_settings: Optional[EgressWorkloadSettings] = None,
         volumes: Optional[List[Volume]] = None,
         platform: Optional[PlatformSpec] = None,
         annotations: Optional[Dict[str, str]] = None,
-        egress_auth_token: Optional[str] = None,
-        egress_mode: str = EGRESS_MODE_DNS,
-        credential_proxy_enabled: bool = False,
         resource_requests: Optional[Dict[str, str]] = None,
-        egress_env: Optional[Dict[str, Optional[str]]] = None,
     ) -> Dict[str, Any]:
         """Create an agent-sandbox Sandbox CRD workload."""
         if is_windows_profile(platform):
@@ -156,14 +154,10 @@ class AgentSandboxProvider(WorkloadProvider):
             env=env,
             resource_limits=resource_limits,
             execd_image=execd_image,
-            network_policy=network_policy,
-            egress_image=egress_image,
-            egress_auth_token=egress_auth_token,
-            egress_mode=egress_mode,
-            credential_proxy_enabled=credential_proxy_enabled,
+            egress_settings=egress_settings,
             resource_requests=resource_requests,
-            egress_env=egress_env,
             extensions=extensions,
+            sandbox_id=sandbox_id,
         )
 
         if volumes:
@@ -173,7 +167,8 @@ class AgentSandboxProvider(WorkloadProvider):
 
         resource_name = self._resource_name(sandbox_id)
         spec = {
-            "replicas": 1,
+            "operatingMode": "Running",
+            "service": True,
             "shutdownPolicy": self.shutdown_policy,
             "podTemplate": {
                 "metadata": {
@@ -201,8 +196,15 @@ class AgentSandboxProvider(WorkloadProvider):
         else:
             sandbox["spec"]["shutdownTime"] = expires_at.isoformat()
         merged_pod_spec = sandbox.get("spec", {}).get("podTemplate", {}).get("spec", {})
+        if image_spec.auth:
+            # Inject after the template merge: assigning before it would let
+            # the runtime override replace template-provided imagePullSecrets.
+            merged_pod_spec["imagePullSecrets"] = merge_image_pull_secrets(
+                merged_pod_spec.get("imagePullSecrets"),
+                build_image_pull_secret_name(sandbox_id),
+            )
         ensure_egress_runtime_compatible(
-            network_policy,
+            egress_settings.network_policy if egress_settings is not None else None,
             effective_runtime_class=merged_pod_spec.get("runtimeClassName"),
         )
         if platform is not None:
@@ -216,12 +218,47 @@ class AgentSandboxProvider(WorkloadProvider):
             body=sandbox,
         )
 
+        if image_spec.auth:
+            secret = build_image_pull_secret(
+                sandbox_id=sandbox_id,
+                image_uri=image_spec.uri,
+                auth=image_spec.auth,
+                owner_uid=created["metadata"]["uid"],
+                owner_name=created["metadata"]["name"],
+                owner_api_version=f"{self.group}/{self.version}",
+                owner_kind="Sandbox",
+            )
+            try:
+                self.k8s_client.create_secret(namespace=namespace, body=secret)
+                logger.info(f"Created imagePullSecret for sandbox {sandbox_id}")
+            except Exception:
+                logger.warning(
+                    f"Failed to create imagePullSecret for sandbox {sandbox_id}, "
+                    "rolling back Sandbox CR"
+                )
+                try:
+                    self.k8s_client.delete_custom_object(
+                        group=self.group,
+                        version=self.version,
+                        namespace=namespace,
+                        plural=self.plural,
+                        name=created["metadata"]["name"],
+                        grace_period_seconds=0,
+                    )
+                except Exception as del_exc:
+                    logger.warning(f"Failed to rollback Sandbox {sandbox_id}: {del_exc}")
+                raise
+
         return {
             "name": created["metadata"]["name"],
             "uid": created["metadata"]["uid"],
             "apiVersion": f"{self.group}/{self.version}",
             "kind": "Sandbox",
         }
+
+    def supports_image_auth(self) -> bool:
+        """agent-sandbox supports per-request image pull authentication."""
+        return True
 
     def _apply_platform_node_selector(
         self,
@@ -250,20 +287,15 @@ class AgentSandboxProvider(WorkloadProvider):
         env: Dict[str, str],
         resource_limits: Dict[str, str],
         execd_image: str,
-        network_policy: Optional[NetworkPolicy] = None,
-        egress_image: Optional[str] = None,
-        egress_auth_token: Optional[str] = None,
-        egress_mode: str = EGRESS_MODE_DNS,
-        credential_proxy_enabled: bool = False,
+        egress_settings: Optional[EgressWorkloadSettings] = None,
         resource_requests: Optional[Dict[str, str]] = None,
-        egress_env: Optional[Dict[str, Optional[str]]] = None,
         extensions: Optional[Dict[str, str]] = None,
+        sandbox_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Build pod spec dict for the Sandbox CRD."""
+        has_egress = egress_settings is not None
         disable_ipv6_for_egress = (
-            network_policy is not None
-            and egress_image is not None
-            and self.egress_disable_ipv6
+            egress_settings.disable_ipv6 if egress_settings is not None else False
         )
         init_container = _build_execd_init_container(
             execd_image,
@@ -271,7 +303,10 @@ class AgentSandboxProvider(WorkloadProvider):
             disable_ipv6_for_egress=disable_ipv6_for_egress,
         )
         main_env = dict(env)
-        if credential_proxy_enabled:
+        main_env["OPENSANDBOX_ID"] = sandbox_id
+        if self.execd_run_as_init:
+            main_env["EXECD_INIT"] = "1"
+        if egress_settings is not None and egress_settings.credential_proxy_enabled:
             main_env[OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT] = "true"
 
         main_container = _build_main_container(
@@ -279,7 +314,7 @@ class AgentSandboxProvider(WorkloadProvider):
             entrypoint=entrypoint,
             env=main_env,
             resource_limits=resource_limits,
-            has_network_policy=network_policy is not None,
+            has_network_policy=has_egress,
             isolation_enabled=(extensions or {}).get(BOOTSTRAP_EXECD_ISOLATION_KEY) == "enable",
             resource_requests=resource_requests,
         )
@@ -308,12 +343,8 @@ class AgentSandboxProvider(WorkloadProvider):
 
         apply_egress_to_spec(
             containers=containers,
-            network_policy=network_policy,
-            egress_image=egress_image,
-            egress_auth_token=egress_auth_token,
-            egress_mode=egress_mode,
-            credential_proxy_enabled=credential_proxy_enabled,
-            extra_env=egress_env,
+            egress_settings=egress_settings,
+            sandbox_id=sandbox_id,
         )
 
         return pod_spec
@@ -439,6 +470,12 @@ class AgentSandboxProvider(WorkloadProvider):
             state = "Running"
         elif reason == "SandboxExpired":
             state = "Terminated"
+        elif reason == "PodSucceeded":
+            state = "Terminated"
+            message = message or "Sandbox pod completed successfully."
+        elif reason == "PodFailed":
+            state = "Failed"
+            message = message or "Sandbox pod failed."
         elif cond_status == "False" and self.is_platform_unschedulable(
             reason,
             message,
@@ -524,6 +561,24 @@ class AgentSandboxProvider(WorkloadProvider):
         if pods:
             return ("Pending", "POD_PENDING", "Pod is pending")
 
+        return None
+
+    def get_internal_endpoint(
+        self, workload: Dict[str, Any], port: int, sandbox_id: str
+    ) -> Optional[Endpoint]:
+        """Resolve the internal endpoint from the Sandbox CR status."""
+        workload_status = workload.get("status")
+        if not isinstance(workload_status, dict):
+            return None
+
+        pod_ips = workload_status.get("podIPs")
+        if not isinstance(pod_ips, list) or not pod_ips:
+            return None
+
+        for pod_ip in pod_ips:
+            if isinstance(pod_ip, str) and pod_ip:
+                host = f"[{pod_ip}]" if ":" in pod_ip else pod_ip
+                return Endpoint(endpoint=f"{host}:{port}")
         return None
 
     def get_endpoint_info(self, workload: Dict[str, Any], port: int, sandbox_id: str) -> Optional[Endpoint]:

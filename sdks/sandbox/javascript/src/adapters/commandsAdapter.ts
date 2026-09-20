@@ -51,13 +51,13 @@ interface StreamingExecutionSpec<TBody> {
   fallbackErrorMessage: string;
 }
 
-function toRunCommandRequest(command: string, opts?: RunCommandOpts): ApiRunCommandRequest {
+function toRunCommandRequest(command: string | string[], opts?: RunCommandOpts): ApiRunCommandRequest {
   if (opts?.gid != null && opts.uid == null) {
     throw new Error("uid is required when gid is provided");
   }
 
   const body: ApiRunCommandRequest = {
-    command,
+    ...(typeof command === "string" ? { command } : { argv: command }),
     cwd: opts?.workingDirectory,
     background: !!opts?.background,
   };
@@ -142,10 +142,21 @@ export class CommandsAdapter implements ExecdCommands {
   }
 
   private buildRunStreamSpec(
-    command: string,
+    command: string | string[],
     opts?: RunCommandOpts,
   ): StreamingExecutionSpec<ApiRunCommandRequest> {
-    assertNonBlank(command, "command");
+    if (typeof command === "string") {
+      assertNonBlank(command, "command");
+    } else {
+      if (!Array.isArray(command) || !command.length || !command[0]) {
+        throw new Error("argv requires a non-empty executable and strings without NUL");
+      }
+      for (const arg of command) {
+        if (typeof arg !== "string" || arg.includes("\0")) {
+          throw new Error("argv requires a non-empty executable and strings without NUL");
+        }
+      }
+    }
     return {
       pathname: "/command",
       body: toRunCommandRequest(command, opts),
@@ -194,6 +205,7 @@ export class CommandsAdapter implements ExecdCommands {
     stream: AsyncIterable<ServerStreamEvent>,
     handlers?: ExecutionHandlers,
     inferExitCode = false,
+    isBackground = false,
   ): Promise<CommandExecution> {
     const execution: CommandExecution = {
       logs: { stdout: [], stderr: [] },
@@ -205,6 +217,13 @@ export class CommandsAdapter implements ExecdCommands {
         (ev as { text?: string }).text = execution.id;
       }
       await dispatcher.dispatch(ev as any);
+      if (isBackground && ev.type === "execution_complete") {
+        // Background commands are done once execution_complete arrives; do
+        // not wait for the chunked terminator, which execd sends only after
+        // a graceful-shutdown sleep and can be lost if the connection is
+        // closed early (#1528).
+        break;
+      }
     }
 
     if (inferExitCode) {
@@ -242,6 +261,10 @@ export class CommandsAdapter implements ExecdCommands {
   }
 
   async getBackgroundCommandLogs(commandId: string, cursor?: number): Promise<CommandLogs> {
+    if (cursor != null && cursor < 0) {
+      throw new Error("cursor cannot be negative");
+    }
+
     const { data, error, response } = await this.client.GET("/command/{id}/logs", {
       params: { path: { id: commandId }, query: cursor == null ? {} : { cursor } },
       parseAs: "text",
@@ -266,7 +289,7 @@ export class CommandsAdapter implements ExecdCommands {
   }
 
   async *runStream(
-    command: string,
+    command: string | string[],
     opts?: RunCommandOpts,
     signal?: AbortSignal,
   ): AsyncIterable<ServerStreamEvent> {
@@ -279,7 +302,7 @@ export class CommandsAdapter implements ExecdCommands {
   }
 
   async run(
-    command: string,
+    command: string | string[],
     opts?: RunCommandOpts,
     handlers?: ExecutionHandlers,
     signal?: AbortSignal,
@@ -288,6 +311,7 @@ export class CommandsAdapter implements ExecdCommands {
       this.runStream(command, opts, signal),
       handlers,
       !opts?.background,
+      !!opts?.background,
     );
   }
 

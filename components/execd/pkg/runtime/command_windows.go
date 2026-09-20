@@ -29,7 +29,6 @@ import (
 
 	"github.com/alibaba/opensandbox/execd/pkg/jupyter/execute"
 	"github.com/alibaba/opensandbox/execd/pkg/log"
-	"github.com/alibaba/opensandbox/execd/pkg/util/pathutil"
 	"github.com/alibaba/opensandbox/internal/safego"
 )
 
@@ -42,31 +41,34 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 	if err != nil {
 		return fmt.Errorf("failed to get stdlog descriptor: %w", err)
 	}
+	stdoutPath := c.stdoutFileName(session)
+	stderrPath := c.stderrFileName(session)
+	defer func() {
+		_ = stdout.Close()
+		_ = stderr.Close()
+		removeCommandOutputFiles(stdoutPath, stderrPath)
+	}()
 
 	startAt := time.Now()
-	log.Info("received command: %v", log.SanitizeCommand(request.Code))
-	cmd := exec.CommandContext(ctx, "cmd", "/C", request.Code)
-	extraEnv := mergeExtraEnvs(loadExtraEnvFromFile(), request.Envs)
-	cwd, err := pathutil.ExpandPathWithEnv(request.Cwd, extraEnv)
+	log.Info("command: received %v", log.SanitizeCommand(request.commandContent()))
+	cmd, err := prepareCommand(ctx, request)
 	if err != nil {
 		return fmt.Errorf("resolve cwd: %w", err)
 	}
 
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
-	cmd.Dir = cwd
-	cmd.Env = mergeEnvs(os.Environ(), extraEnv)
 
 	done := make(chan struct{}, 1)
 	var wg sync.WaitGroup
 	wg.Add(2)
 	safego.Go(func() {
 		defer wg.Done()
-		c.tailStdPipe(c.stdoutFileName(session), request.Hooks.OnExecuteStdout, done)
+		c.tailStdPipe(stdoutPath, request.Hooks.OnExecuteStdout, done)
 	})
 	safego.Go(func() {
 		defer wg.Done()
-		c.tailStdPipe(c.stderrFileName(session), request.Hooks.OnExecuteStderr, done)
+		c.tailStdPipe(stderrPath, request.Hooks.OnExecuteStderr, done)
 	})
 
 	err = cmd.Start()
@@ -74,13 +76,17 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 		close(done)
 		wg.Wait()
 		request.Hooks.OnExecuteError(&execute.ErrorOutput{EName: "CommandExecError", EValue: err.Error()})
-		log.Error("CommandExecError: error starting commands: %v", err)
+		log.Error("command: start failed: %v", err)
 		return nil
 	}
 
 	kernel := &commandKernel{
 		pid:          cmd.Process.Pid,
-		content:      request.Code,
+		stdoutPath:   stdoutPath,
+		stderrPath:   stderrPath,
+		startedAt:    startAt,
+		content:      request.commandContent(),
+		running:      true,
 		isBackground: false,
 	}
 	c.storeCommandKernel(session, kernel)
@@ -90,6 +96,7 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 	wg.Wait()
 	if err != nil {
 		var eName, eValue string
+		eCode := 1
 		var traceback []string
 
 		var exitError *exec.ExitError
@@ -97,6 +104,7 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 			exitCode := exitError.ExitCode()
 			eName = "CommandExecError"
 			eValue = strconv.Itoa(exitCode)
+			eCode = exitCode
 		} else {
 			eName = "CommandExecError"
 			eValue = err.Error()
@@ -109,9 +117,11 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 			Traceback: traceback,
 		})
 
-		log.Error("CommandExecError: error running commands: %v", err)
+		log.Error("command: run failed: %v", err)
+		c.markCommandFinished(session, eCode, err.Error())
 		return nil
 	}
+	c.markCommandFinished(session, 0, "")
 	request.Hooks.OnExecuteComplete(time.Since(startAt))
 	return nil
 }
@@ -129,18 +139,14 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 	stderrPath := c.combinedOutputFileName(session)
 
 	startAt := time.Now()
-	log.Info("received command: %v", log.SanitizeCommand(request.Code))
-	cmd := exec.CommandContext(ctx, "cmd", "/C", request.Code)
-	extraEnv := mergeExtraEnvs(loadExtraEnvFromFile(), request.Envs)
-	cwd, err := pathutil.ExpandPathWithEnv(request.Cwd, extraEnv)
+	log.Info("command: received %v", log.SanitizeCommand(request.commandContent()))
+	cmd, err := prepareCommand(ctx, request)
 	if err != nil {
 		return fmt.Errorf("resolve cwd: %w", err)
 	}
 
-	cmd.Dir = cwd
 	cmd.Stdout = pipe
 	cmd.Stderr = pipe
-	cmd.Env = mergeEnvs(os.Environ(), extraEnv)
 
 	devNull, _ := os.OpenFile(os.DevNull, os.O_RDWR, 0) // best-effort, ignore error
 	cmd.Stdin = devNull
@@ -150,7 +156,7 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 	// callers find the session immediately.
 	err = cmd.Start()
 	if err != nil {
-		log.Error("CommandExecError: error starting commands: %v", err)
+		log.Error("command: start failed: %v", err)
 		pipe.Close() // best-effort
 		cancel()
 		return fmt.Errorf("failed to start commands: %w", err)
@@ -158,7 +164,7 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 
 	kernel := &commandKernel{
 		pid:          cmd.Process.Pid,
-		content:      request.Code,
+		content:      request.commandContent(),
 		stdoutPath:   stdoutPath,
 		stderrPath:   stderrPath,
 		startedAt:    startAt,
@@ -181,7 +187,7 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 		devNull.Close() // best-effort
 
 		if err != nil {
-			log.Error("CommandExecError: error running commands: %v", err)
+			log.Error("command: run failed: %v", err)
 			exitCode := 1
 			var exitError *exec.ExitError
 			if errors.As(err, &exitError) {
@@ -195,4 +201,8 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 
 	request.Hooks.OnExecuteComplete(time.Since(startAt))
 	return nil
+}
+
+func newShellCommand(ctx context.Context, code string) *exec.Cmd {
+	return exec.CommandContext(ctx, "cmd", "/C", code)
 }

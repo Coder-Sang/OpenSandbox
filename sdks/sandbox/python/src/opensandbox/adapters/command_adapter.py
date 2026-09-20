@@ -64,9 +64,9 @@ def _resolve_run_in_session_timeout(timeout: timedelta | None) -> int | None:
     if timeout is None:
         return None
     if isinstance(timeout, timedelta):
-        timeout_ms = int(timeout.total_seconds() * 1000)
-        if timeout_ms < 0:
+        if timeout < timedelta(0):
             raise InvalidArgumentException("timeout must be positive")
+        timeout_ms = int(timeout.total_seconds() * 1000)
         return timeout_ms
     raise InvalidArgumentException("timeout must be a datetime.timedelta or None")
 
@@ -82,7 +82,7 @@ def _infer_foreground_exit_code(execution: Execution) -> int | None:
     return None
 
 
-def _build_run_command_request_body(command: str, opts: RunCommandOpts):
+def _build_run_command_request_body(command: str | list[str], opts: RunCommandOpts):
     return ExecutionConverter.to_api_run_command_request(command, opts)
 
 
@@ -153,13 +153,7 @@ class CommandsAdapter(Commands):
         timeout_seconds = self.connection_config.request_timeout.total_seconds()
         timeout = httpx.Timeout(timeout_seconds)
 
-        headers = {
-            "User-Agent": self.connection_config.user_agent,
-            **self.connection_config.headers,
-            **self.execd_endpoint.headers,
-        }
-
-        # Execd API does not require authentication
+        headers = self.execd_endpoint.build_request_headers(self.connection_config)
         self._client = Client(
             base_url=base_url,
             timeout=timeout,
@@ -198,7 +192,7 @@ class CommandsAdapter(Commands):
         )
 
     async def _get_client(self):
-        """Return the client for execd API (no auth required)."""
+        """Return the client for execd API."""
         return self._client
 
     def _get_execd_url(self, path: str) -> str:
@@ -218,6 +212,7 @@ class CommandsAdapter(Commands):
         handlers: ExecutionHandlers | None,
         infer_exit_code: bool,
         failure_message: str,
+        is_background: bool = False,
     ) -> Execution:
         execution = Execution(
             id=None,
@@ -241,6 +236,12 @@ class CommandsAdapter(Commands):
                 if event_node is None:
                     continue
                 await dispatcher.dispatch(event_node)
+                if is_background and event_node.type == "execution_complete":
+                    # Background commands are done once execution_complete
+                    # arrives; do not wait for the chunked terminator, which
+                    # execd sends only after a graceful-shutdown sleep and can
+                    # be lost if the connection is closed early (#1528).
+                    break
 
         if infer_exit_code:
             execution.exit_code = _infer_foreground_exit_code(execution)
@@ -249,17 +250,17 @@ class CommandsAdapter(Commands):
 
     async def run(
         self,
-        command: str,
+        command: str | list[str],
         *,
         opts: RunCommandOpts | None = None,
         handlers: ExecutionHandlers | None = None,
     ) -> Execution:
-        """Execute a shell command within the sandbox.
+        """Execute shell text or native executable arguments in the sandbox.
 
         This method uses direct httpx streaming to handle SSE responses
         from the execd service.
         """
-        if not command.strip():
+        if isinstance(command, str) and not command.strip():
             raise InvalidArgumentException("Command cannot be empty")
 
         try:
@@ -272,10 +273,11 @@ class CommandsAdapter(Commands):
                 handlers=handlers,
                 infer_exit_code=not opts.background,
                 failure_message="Failed to run command",
+                is_background=opts.background,
             )
 
         except Exception as e:
-            logger.error(f"Failed to run command (length: {len(command)})", exc_info=e)
+            logger.error("Failed to run command", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     async def interrupt(self, execution_id: str) -> None:

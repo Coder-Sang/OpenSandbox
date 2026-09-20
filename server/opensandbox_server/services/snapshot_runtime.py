@@ -34,6 +34,17 @@ class SnapshotRuntimeStatus:
     image: Optional[str] = None
     reason: Optional[str] = None
     message: Optional[str] = None
+    # Backend marker persisted into restore_config on READY (e.g. "fsb") so
+    # create-time routing can send restores to the owning backend.
+    backend: Optional[str] = None
+
+
+class SnapshotRuntimePreflightError(RuntimeError):
+    """Snapshot creation cannot safely start for the current source runtime."""
+
+
+class SnapshotRuntimeUnsupportedError(SnapshotRuntimePreflightError):
+    """The source runtime is known to be incompatible with snapshot creation."""
 
 
 class SnapshotRuntime(Protocol):
@@ -46,6 +57,14 @@ class SnapshotRuntime(Protocol):
         """
         Human-readable message used when snapshot creation is unsupported.
         """
+
+    def preflight_create_snapshot(
+        self,
+        sandbox_id: str,
+        *,
+        namespace: str | None = None,
+    ) -> None:
+        """Validate source-specific compatibility before persisting a snapshot."""
 
     def create_snapshot(
         self,
@@ -63,12 +82,29 @@ class SnapshotRuntime(Protocol):
         Return the most recent runtime view for a snapshot if known.
         """
 
-    def delete_snapshot(self, snapshot_id: str, image: Optional[str] = None, *, namespace: str | None = None) -> None:
+    def delete_snapshot(
+        self,
+        snapshot_id: str,
+        image: Optional[str] = None,
+        *,
+        namespace: str | None = None,
+        source_sandbox_id: str | None = None,
+    ) -> None:
         """
         Delete runtime-managed artifacts for a snapshot.
+
+        ``source_sandbox_id`` identifies the owning backend for composite
+        dispatch; runtimes that serve one backend only ignore it.
         """
 
-    def inspect_snapshot(self, snapshot_id: str, image: Optional[str] = None, *, namespace: str | None = None) -> SnapshotRuntimeStatus:
+    def inspect_snapshot(
+        self,
+        snapshot_id: str,
+        image: Optional[str] = None,
+        *,
+        namespace: str | None = None,
+        source_sandbox_id: str | None = None,
+    ) -> SnapshotRuntimeStatus:
         """
         Inspect runtime-managed artifacts for startup recovery.
         """
@@ -85,6 +121,16 @@ class NoopSnapshotRuntime:
     def create_snapshot_unsupported_message(self) -> str:
         return "Snapshot management is not implemented for this runtime."
 
+    def preflight_create_snapshot(
+        self,
+        sandbox_id: str,
+        *,
+        namespace: str | None = None,
+    ) -> None:
+        raise SnapshotRuntimeUnsupportedError(
+            self.create_snapshot_unsupported_message()
+        )
+
     def create_snapshot(
         self,
         snapshot_id: str,
@@ -97,10 +143,24 @@ class NoopSnapshotRuntime:
     def get_snapshot_status(self, snapshot_id: str) -> Optional[SnapshotRuntimeStatus]:
         return None
 
-    def delete_snapshot(self, snapshot_id: str, image: Optional[str] = None, *, namespace: str | None = None) -> None:
+    def delete_snapshot(
+        self,
+        snapshot_id: str,
+        image: Optional[str] = None,
+        *,
+        namespace: str | None = None,
+        source_sandbox_id: str | None = None,
+    ) -> None:
         return None
 
-    def inspect_snapshot(self, snapshot_id: str, image: Optional[str] = None, *, namespace: str | None = None) -> SnapshotRuntimeStatus:
+    def inspect_snapshot(
+        self,
+        snapshot_id: str,
+        image: Optional[str] = None,
+        *,
+        namespace: str | None = None,
+        source_sandbox_id: str | None = None,
+    ) -> SnapshotRuntimeStatus:
         return SnapshotRuntimeStatus(
             state=SnapshotState.FAILED,
             reason="snapshot_recovery_not_supported",
@@ -110,6 +170,8 @@ class NoopSnapshotRuntime:
 
 __all__ = [
     "SnapshotRuntime",
+    "SnapshotRuntimePreflightError",
     "SnapshotRuntimeStatus",
+    "SnapshotRuntimeUnsupportedError",
     "NoopSnapshotRuntime",
 ]

@@ -22,6 +22,7 @@ import { FilesystemAdapter } from "../adapters/filesystemAdapter.js";
 import { HealthAdapter } from "../adapters/healthAdapter.js";
 import { IsolatedSessionsAdapter } from "../adapters/isolatedSessionsAdapter.js";
 import { MetricsAdapter } from "../adapters/metricsAdapter.js";
+import { NetworkPolicyAdapter } from "../adapters/networkPolicyAdapter.js";
 import { SandboxesAdapter } from "../adapters/sandboxesAdapter.js";
 
 import type {
@@ -29,10 +30,46 @@ import type {
   CreateEgressStackOptions,
   CreateExecdStackOptions,
   CreateLifecycleStackOptions,
+  CreateNetworkPolicyStackOptions,
   EgressStack,
   ExecdStack,
   LifecycleStack,
 } from "./adapterFactory.js";
+
+const API_KEY_HEADER = "OPEN-SANDBOX-API-KEY";
+
+function createDataPlaneHeaders(
+  connectionHeaders: Record<string, string>,
+  endpointHeaders: Record<string, string> | undefined,
+  useServerProxy: boolean,
+  apiKey: string | undefined,
+): Record<string, string> {
+  const headers: Record<string, string> = {
+    ...connectionHeaders,
+    ...(endpointHeaders ?? {}),
+  };
+  const endpointApiKey = Object.entries(endpointHeaders ?? {}).find(
+    ([key]) => key.toLowerCase() === API_KEY_HEADER.toLowerCase(),
+  );
+
+  if (!useServerProxy || endpointApiKey || apiKey) {
+    for (const key of Object.keys(headers)) {
+      if (key.toLowerCase() === API_KEY_HEADER.toLowerCase()) {
+        delete headers[key];
+      }
+    }
+  }
+
+  if (useServerProxy) {
+    if (endpointApiKey) {
+      headers[endpointApiKey[0]] = endpointApiKey[1];
+    } else if (apiKey) {
+      headers[API_KEY_HEADER] = apiKey;
+    }
+  }
+
+  return headers;
+}
 
 export class DefaultAdapterFactory implements AdapterFactory {
   createLifecycleStack(opts: CreateLifecycleStackOptions): LifecycleStack {
@@ -51,10 +88,12 @@ export class DefaultAdapterFactory implements AdapterFactory {
   }
 
   createExecdStack(opts: CreateExecdStackOptions): ExecdStack {
-    const headers: Record<string, string> = {
-      ...(opts.connectionConfig.headers ?? {}),
-      ...(opts.endpointHeaders ?? {}),
-    };
+    const headers = createDataPlaneHeaders(
+      opts.connectionConfig.headers,
+      opts.endpointHeaders,
+      opts.connectionConfig.useServerProxy,
+      opts.connectionConfig.apiKey,
+    );
     const execdClient = createExecdClient({
       baseUrl: opts.execdBaseUrl,
       headers,
@@ -91,10 +130,12 @@ export class DefaultAdapterFactory implements AdapterFactory {
   }
 
   createEgressStack(opts: CreateEgressStackOptions): EgressStack {
-    const headers: Record<string, string> = {
-      ...(opts.connectionConfig.headers ?? {}),
-      ...(opts.endpointHeaders ?? {}),
-    };
+    const headers = createDataPlaneHeaders(
+      opts.connectionConfig.headers,
+      opts.endpointHeaders,
+      opts.connectionConfig.useServerProxy,
+      opts.connectionConfig.apiKey,
+    );
     const egressClient = createEgressClient({
       baseUrl: opts.egressBaseUrl,
       headers,
@@ -108,6 +149,18 @@ export class DefaultAdapterFactory implements AdapterFactory {
     return {
       egress,
       credentialVault: egress,
+    };
+  }
+
+  createNetworkPolicyStack(opts: CreateNetworkPolicyStackOptions): EgressStack {
+    const lifecycleClient = createLifecycleClient({
+      baseUrl: opts.lifecycleBaseUrl,
+      apiKey: opts.connectionConfig.apiKey,
+      headers: opts.connectionConfig.headers,
+      fetch: opts.connectionConfig.fetch,
+    });
+    return {
+      egress: new NetworkPolicyAdapter(lifecycleClient, opts.sandboxId),
     };
   }
 }

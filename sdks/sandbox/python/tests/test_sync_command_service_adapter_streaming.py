@@ -19,16 +19,35 @@ import json
 from datetime import timedelta
 
 import httpx
+import pytest
 
 from opensandbox.config.connection_sync import ConnectionConfigSync
+from opensandbox.exceptions import InvalidArgumentException, SandboxConnectionException
+from opensandbox.models.execd import RunCommandOpts
 from opensandbox.models.sandboxes import SandboxEndpoint
 from opensandbox.sync.adapters.command_adapter import CommandsAdapterSync
 
 _UNICODE_SEPARATORS = "before\u0085middle\u2028middle\u2029after"
 
+# Arguments a shell would rewrite: a literal "$HOME", an embedded space, a
+# single quote, and an empty string. They must reach the process verbatim.
+LITERAL_ARGV = [
+    "python3",
+    "-c",
+    "import sys; print(sys.argv[1:])",
+    "a b",
+    "$HOME",
+    "x'y",
+    "",
+]
+
 
 class _SseTransport(httpx.BaseTransport):
+    def __init__(self) -> None:
+        self.last_request: httpx.Request | None = None
+
     def handle_request(self, request: httpx.Request) -> httpx.Response:
+        self.last_request = request
         body = request.content.decode("utf-8") if isinstance(request.content, (bytes, bytearray)) else ""
         payload = json.loads(body) if body else {}
 
@@ -52,6 +71,32 @@ class _SseTransport(httpx.BaseTransport):
             events = [
                 {"type": "init", "text": "exec-unicode", "timestamp": 1},
                 {"type": "stdout", "text": _UNICODE_SEPARATORS, "timestamp": 2},
+                {
+                    "type": "execution_complete",
+                    "timestamp": 3,
+                    "execution_time": 4,
+                },
+            ]
+            sse = b"".join(
+                f"{json.dumps(event, ensure_ascii=False)}\n\n".encode()
+                for event in events
+            )
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "text/event-stream"},
+                content=sse,
+                request=request,
+            )
+
+        if request.url.path == "/command" and payload.get("argv") == LITERAL_ARGV:
+            # Simulate execd's native argv execution: run the payload as
+            # `python3 -c <code> <args...>` directly (no shell) and stream
+            # back what `print(sys.argv[1:])` produces — with -c, Python's
+            # sys.argv[1:] is exactly the trailing literal arguments.
+            printed = str(payload["argv"][3:]) + "\n"
+            events = [
+                {"type": "init", "text": "exec-argv", "timestamp": 1},
+                {"type": "stdout", "text": printed, "timestamp": 2},
                 {
                     "type": "execution_complete",
                     "timestamp": 3,
@@ -119,6 +164,19 @@ class _SseTransport(httpx.BaseTransport):
         )
 
 
+@pytest.mark.parametrize(
+    "timeout",
+    [timedelta(milliseconds=-1), timedelta(microseconds=-1), timedelta(microseconds=-999)],
+)
+def test_sync_run_command_rejects_negative_timeout(timeout: timedelta) -> None:
+    cfg = ConnectionConfigSync(protocol="http")
+    endpoint = SandboxEndpoint(endpoint="localhost:44772", port=44772)
+    adapter = CommandsAdapterSync(cfg, endpoint)
+
+    with pytest.raises(InvalidArgumentException):
+        adapter.run("pwd", opts=RunCommandOpts(timeout=timeout))
+
+
 def test_sync_run_command_streaming_happy_path_updates_execution() -> None:
     cfg = ConnectionConfigSync(protocol="http", transport=_SseTransport())
     endpoint = SandboxEndpoint(endpoint="localhost:44772", port=44772)
@@ -142,6 +200,25 @@ def test_sync_run_command_streaming_preserves_unicode_separators() -> None:
     assert execution.logs.stdout[0].text == _UNICODE_SEPARATORS
     assert execution.complete is not None
     assert execution.exit_code == 0
+
+
+def test_sync_run_command_argv_streams_literal_arguments() -> None:
+    transport = _SseTransport()
+    cfg = ConnectionConfigSync(protocol="http", transport=transport)
+    endpoint = SandboxEndpoint(endpoint="localhost:44772", port=44772)
+    adapter = CommandsAdapterSync(cfg, endpoint)
+
+    execution = adapter.run(LITERAL_ARGV)
+
+    assert execution.id == "exec-argv"
+    assert execution.logs.stdout[0].text == str(LITERAL_ARGV[3:]) + "\n"
+    assert "$HOME" in execution.logs.stdout[0].text
+    assert execution.complete is not None
+    assert execution.exit_code == 0
+
+    assert transport.last_request is not None
+    body = json.loads(transport.last_request.content.decode("utf-8"))
+    assert body == {"argv": LITERAL_ARGV}
 
 
 def test_sync_run_command_streaming_non_zero_exit_updates_exit_code() -> None:
@@ -202,3 +279,98 @@ def test_sync_run_in_session_non_zero_exit_updates_exit_code() -> None:
     assert execution.error.value == "7"
     assert execution.complete is None
     assert execution.exit_code == 7
+
+
+@pytest.mark.parametrize(
+    "timeout",
+    [timedelta(milliseconds=-1), timedelta(microseconds=-1), timedelta(microseconds=-999)],
+)
+def test_sync_run_in_session_rejects_negative_timeout(timeout: timedelta) -> None:
+    transport = _SseTransport()
+    cfg = ConnectionConfigSync(protocol="http", transport=transport)
+    endpoint = SandboxEndpoint(endpoint="localhost:44772", port=44772)
+    adapter = CommandsAdapterSync(cfg, endpoint)
+
+    with pytest.raises(InvalidArgumentException):
+        adapter.run_in_session("sess-1", "pwd", timeout=timeout)
+    assert transport.last_request is None
+
+
+class _EarlyCloseAfterCompleteStream(httpx.SyncByteStream):
+    """Byte stream that yields the SSE body then fails, simulating a peer
+    that closes the connection before sending the chunked terminator."""
+
+    def __init__(self, sse: bytes) -> None:
+        self._sse = sse
+
+    def __iter__(self):
+        yield self._sse
+        raise httpx.RemoteProtocolError(
+            "peer closed connection without sending complete message body "
+            "(incomplete chunked read)"
+        )
+
+
+class _EarlyCloseTransport(httpx.BaseTransport):
+    """Transport whose SSE response body closes early right after the
+    ``execution_complete`` event, before the chunked terminator is sent."""
+
+    def __init__(self, sse: bytes) -> None:
+        self._sse = sse
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "text/event-stream"},
+            stream=_EarlyCloseAfterCompleteStream(self._sse),
+            request=request,
+        )
+
+
+_EARLY_CLOSE_SSE = (
+    b'data: {"type":"init","text":"exec-bg","timestamp":1}\n\n'
+    b'data: {"type":"execution_complete","timestamp":2,"execution_time":3}\n\n'
+)
+
+
+def test_sync_run_background_command_breaks_on_complete_before_terminator() -> None:
+    """Background commands must not wait for the chunked terminator: once
+    ``execution_complete`` arrives, the SDK should stop reading the stream
+    even if the connection is closed early (#1528)."""
+    cfg = ConnectionConfigSync(
+        protocol="http", transport=_EarlyCloseTransport(_EARLY_CLOSE_SSE)
+    )
+    endpoint = SandboxEndpoint(endpoint="localhost:44772", port=44772)
+    adapter = CommandsAdapterSync(cfg, endpoint)
+
+    execution = adapter.run("sleep 1", opts=RunCommandOpts(background=True))
+
+    assert execution.id == "exec-bg"
+    assert execution.complete is not None
+    assert execution.complete.execution_time_in_millis == 3
+    # Background executions do not synthesize an exit code from the stream.
+    assert execution.exit_code is None
+
+
+def test_sync_run_foreground_command_still_waits_for_terminator() -> None:
+    """Foreground commands must keep waiting for the stream terminator
+    after ``execution_complete`` — an early close is still surfaced as an
+    error, proving the background early-break did not change this path."""
+    cfg = ConnectionConfigSync(
+        protocol="http", transport=_EarlyCloseTransport(_EARLY_CLOSE_SSE)
+    )
+    endpoint = SandboxEndpoint(endpoint="localhost:44772", port=44772)
+    adapter = CommandsAdapterSync(cfg, endpoint)
+
+    with pytest.raises(SandboxConnectionException):
+        adapter.run("sleep 1", opts=RunCommandOpts(background=False))
+
+
+@pytest.mark.parametrize("command", [("tool", "arg"), None, 123])
+def test_run_rejects_unsupported_command_types(command) -> None:
+    cfg = ConnectionConfigSync(protocol="http", transport=_SseTransport())
+    endpoint = SandboxEndpoint(endpoint="localhost:44772", port=44772)
+    adapter = CommandsAdapterSync(cfg, endpoint)
+
+    with pytest.raises(InvalidArgumentException, match="shell text or an argv list"):
+        adapter.run(command)

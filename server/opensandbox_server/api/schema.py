@@ -22,8 +22,9 @@ for request/response validation and serialization.
 from datetime import datetime
 from typing import Dict, List, Literal, Optional
 
-from pydantic import BaseModel, Field, RootModel, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, RootModel, model_validator
 
+from opensandbox_server.constants import OPENSANDBOX_LIFECYCLE
 
 # ============================================================================
 # Image Specification
@@ -136,6 +137,66 @@ class CredentialProxyConfig(BaseModel):
 
     class Config:
         populate_by_name = True
+
+
+class LifecycleHook(BaseModel):
+    """Command executed by execd before the user entrypoint starts."""
+
+    command: List[str] = Field(..., min_length=1)
+    timeout_seconds: Optional[int] = Field(None, alias="timeoutSeconds", ge=1, le=10800)
+
+    @model_validator(mode="after")
+    def validate_command(self) -> "LifecycleHook":
+        if not self.command[0].strip():
+            raise ValueError("Lifecycle hook command must not be empty.")
+        return self
+
+    class Config:
+        populate_by_name = True
+        extra = "forbid"
+
+
+class PeriodicLifecycleHook(BaseModel):
+    """Named command scheduled by execd while the sandbox is running."""
+
+    name: str = Field(..., min_length=1)
+    schedule: str = Field(..., min_length=1)
+    command: List[str] = Field(..., min_length=1)
+    timeout_seconds: Optional[int] = Field(None, alias="timeoutSeconds", ge=1, le=300)
+
+    @model_validator(mode="after")
+    def normalize_and_validate(self) -> "PeriodicLifecycleHook":
+        self.name = self.name.strip()
+        self.schedule = self.schedule.strip()
+        if not self.name:
+            raise ValueError("Periodic lifecycle hook name must not be blank.")
+        if not self.schedule:
+            raise ValueError("Periodic lifecycle hook schedule must not be blank.")
+        if not self.command[0].strip():
+            raise ValueError("Periodic lifecycle hook command must not be empty.")
+        return self
+
+    class Config:
+        populate_by_name = True
+        extra = "forbid"
+
+
+class SandboxLifecycle(BaseModel):
+    """Extensible lifecycle configuration transported internally to execd."""
+
+    pre_start: Optional[LifecycleHook] = Field(None, alias="preStart")
+    periodic: Optional[List[PeriodicLifecycleHook]] = None
+
+    @model_validator(mode="after")
+    def validate_periodic_names(self) -> "SandboxLifecycle":
+        names = [hook.name for hook in self.periodic or []]
+        if len(names) != len(set(names)):
+            raise ValueError("Periodic lifecycle hook names must be unique.")
+        return self
+
+    class Config:
+        populate_by_name = True
+        extra = "forbid"
 
 
 # ============================================================================
@@ -392,6 +453,11 @@ class CreateSandboxRequest(BaseModel):
     """
     Request to create a new sandbox from either a container image or a snapshot.
     """
+
+    # Internal routing hint: set by snapshot restore resolution to the backend
+    # that produced the snapshot (e.g. "fsb"); never serialized on the wire.
+    _resolved_snapshot_backend: Optional[str] = PrivateAttr(default=None)
+
     image: Optional[ImageSpec] = Field(
         None,
         description="Container image specification for the sandbox",
@@ -443,6 +509,10 @@ class CreateSandboxRequest(BaseModel):
         None,
         description="Custom key-value metadata for management, filtering, and tagging",
     )
+    lifecycle: Optional[SandboxLifecycle] = Field(
+        None,
+        description="Optional declarative lifecycle hooks executed by execd.",
+    )
     entrypoint: Optional[List[str]] = Field(
         None,
         min_length=1,
@@ -490,13 +560,61 @@ class CreateSandboxRequest(BaseModel):
         None,
         description="Opaque container for provider-specific or transient parameters not covered by the core API",
     )
+    template_id: Optional[str] = Field(
+        None,
+        alias="templateId",
+        min_length=1,
+        description=(
+            "Fsb template to create the sandbox from. Mutually "
+            "exclusive with image and snapshotId; in template mode the workload "
+            "shape is fixed by the template's golden image, so entrypoint, env, "
+            "resourceLimits, resourceRequests, volumes, platform, credentialProxy, "
+            "secureAccess and lifecycle are rejected. timeout is required."
+        ),
+    )
 
     @model_validator(mode="after")
     def validate_source_and_entrypoint(self) -> "CreateSandboxRequest":
+        if self.env and OPENSANDBOX_LIFECYCLE in self.env:
+            raise ValueError(
+                f"Environment variable '{OPENSANDBOX_LIFECYCLE}' is reserved. "
+                "Use the lifecycle request field instead."
+            )
+
+        # Template mode (fsb): the workload shape is fixed by the golden
+        # image, so workload-shaping fields are rejected, not ignored.
+        if self.template_id is not None and self.template_id.strip():
+            conflicts = {
+                "image": self.image is not None,
+                "snapshotId": bool((self.snapshot_id or "").strip()),
+                "entrypoint": self.entrypoint is not None,
+                "env": self.env is not None,
+                "resourceLimits": self.resource_limits is not None,
+                "resourceRequests": self.resource_requests is not None,
+                "volumes": self.volumes is not None,
+                "platform": self.platform is not None,
+                "credentialProxy": self.credential_proxy is not None,
+                "secureAccess": self.secure_access,
+                "lifecycle": self.lifecycle is not None,
+            }
+            present = [name for name, is_set in conflicts.items() if is_set]
+            if present:
+                raise ValueError(
+                    f"templateId cannot be combined with: {', '.join(sorted(present))}; "
+                    "the workload shape is fixed by the template's golden image."
+                )
+            if self.timeout is None:
+                raise ValueError("timeout is required when templateId is provided.")
+            return self
+        if self.template_id is not None:
+            self.template_id = None  # normalize blank templateId
+
         # When poolRef is set, image/snapshotId/entrypoint/resourceLimits are
         # all defined in the Pool CRD and not required from the caller.
         has_pool_ref = bool((self.extensions or {}).get("poolRef", "").strip())
         if has_pool_ref:
+            if self.lifecycle is not None:
+                raise ValueError("lifecycle cannot be used together with poolRef.")
             # Reject conflicting fields that would be ignored in pool mode
             if bool((self.snapshot_id or "").strip()):
                 raise ValueError("snapshotId cannot be used together with poolRef.")
@@ -533,6 +651,11 @@ class CreateSandboxRequest(BaseModel):
     class Config:
         populate_by_name = True
 
+    @property
+    def resolved_snapshot_backend(self) -> Optional[str]:
+        """Backend that produced the snapshot being restored, if resolved."""
+        return self._resolved_snapshot_backend
+
 
 class CreateSandboxResponse(BaseModel):
     """
@@ -566,6 +689,17 @@ class CreateSandboxResponse(BaseModel):
         populate_by_name = True
 
 
+class AllocationSummary(BaseModel):
+    """Current runtime-confirmed pool allocation summary."""
+    mode: Literal["pool"] = Field("pool", description="Allocation mode.")
+    pool_ref: str = Field(..., alias="poolRef", description="Concrete pool reference currently allocated.")
+    state: Literal["allocated"] = Field("allocated", description="Current confirmed allocation state.")
+
+    class Config:
+        populate_by_name = True
+        extra = "forbid"
+
+
 class Sandbox(BaseModel):
     """
     Runtime execution environment provisioned from a container image.
@@ -591,6 +725,14 @@ class Sandbox(BaseModel):
     extensions: Optional[Dict[str, str]] = Field(
         None,
         description="Opaque extension data restored from provider-specific storage",
+    )
+    allocation: Optional[AllocationSummary] = Field(
+        None,
+        description=(
+            "Current runtime-confirmed pool allocation summary. Omitted unless the runtime confirms "
+            "an active pool allocation; it is not a request echo, allocation history, readiness signal, "
+            "or Kubernetes introspection result."
+        ),
     )
     entrypoint: Optional[List[str]] = Field(None, description="The command to execute as the sandbox's entry process")
     expires_at: Optional[datetime] = Field(
@@ -982,6 +1124,136 @@ class ListPoolsResponse(BaseModel):
     Collection of pools.
     """
     items: List[PoolResponse] = Field(..., description="List of pools.")
+
+
+# ============================================================================
+# Fsb Templates
+# ============================================================================
+
+class FsbTemplateReadiness(BaseModel):
+    """
+    Build-side readiness gate for a fsb template.
+    """
+    probe: Optional[str] = Field(
+        None,
+        description=(
+            "Readiness probe checked first during the golden-image build; "
+            "e.g. 'tcp://127.0.0.1:44772' or 'cmd://<command>'."
+        ),
+    )
+    warmup_seconds: Optional[int] = Field(
+        None,
+        ge=0,
+        alias="warmupSeconds",
+        description="Fallback warmup window in seconds (default 60).",
+    )
+
+    class Config:
+        populate_by_name = True
+
+
+class CreateFsbTemplateRequest(BaseModel):
+    """
+    Request to create a fsb template: a fast-sandbox golden-image build.
+
+    The server persists the build intent, resolves it to a SandboxTemplate
+    CRD, and reports the asynchronous build through the template status.
+    Kernel, execd and guest init are server-side build inputs supplied from
+    the [kubernetes] configuration, not client fields.
+    """
+    image: str = Field(
+        ...,
+        min_length=1,
+        description="Source OCI image reference the golden image is built from",
+    )
+    resource_limits: Optional[ResourceLimits] = Field(
+        None,
+        alias="resourceLimits",
+        description=(
+            "Guest machine sizing: cpu -> guest vCPUs, memory -> guest memory, "
+            "disk -> logical size of the guest rootfs. The artifact set is "
+            "stored and P2P-pulled at the disk size, so keep it just above "
+            "the expanded source image. Defaults: cpu 1, memory 512Mi, "
+            "disk 2Gi."
+        ),
+    )
+    entrypoint: Optional[List[str]] = Field(
+        None,
+        min_length=1,
+        description="Guest business command (argv); empty defaults to ['tail', '-f', '/dev/null'].",
+    )
+    metadata: Optional[Dict[str, str]] = Field(
+        None,
+        description="Custom key-value metadata for management, filtering, and tagging",
+    )
+    readiness: Optional[FsbTemplateReadiness] = Field(
+        None,
+        description="Optional build-side readiness gate",
+    )
+    publish: str = Field(
+        ...,
+        min_length=1,
+        description="S3-compatible publish target for the built artifacts, e.g. 's3://bucket/publish'",
+    )
+    format: Literal["native", "overlaybd"] = Field(
+        "overlaybd",
+        description="Storage encoding of the produced snapshot set",
+    )
+
+    class Config:
+        populate_by_name = True
+        extra = "forbid"
+
+
+class FsbTemplateStatus(BaseModel):
+    """
+    Status of a fsb template build.
+    """
+    phase: Literal["Pending", "Building", "Succeeded", "Failed"] = Field(
+        ...,
+        description="Build lifecycle phase",
+    )
+    manifest_ref: Optional[str] = Field(
+        None,
+        alias="manifestRef",
+        description="S3 manifest reference of the published artifacts; present when Succeeded",
+    )
+    message: Optional[str] = Field(
+        None,
+        description="Failure reason when phase is Failed",
+    )
+
+    class Config:
+        populate_by_name = True
+
+
+class FsbTemplate(BaseModel):
+    """
+    A fsb template: a golden image whose build is declared and executed
+    by fast-sandbox.
+    """
+    template_id: str = Field(..., alias="templateId", description="Server-generated template ID (tpl_<uuid>)")
+    image: str = Field(..., description="Source OCI image reference")
+    resource_limits: Optional[ResourceLimits] = Field(None, alias="resourceLimits")
+    entrypoint: Optional[List[str]] = Field(None, description="Guest business command (argv)")
+    metadata: Optional[Dict[str, str]] = Field(None, description="Custom metadata from the creation request")
+    readiness: Optional[FsbTemplateReadiness] = Field(None, description="Build-side readiness gate")
+    publish: str = Field(..., description="S3-compatible publish target")
+    format: Literal["native", "overlaybd"] = Field(..., description="Snapshot storage encoding")
+    status: FsbTemplateStatus = Field(..., description="Build status")
+    created_at: datetime = Field(..., alias="createdAt", description="Creation timestamp")
+    updated_at: datetime = Field(..., alias="updatedAt", description="Last update timestamp")
+
+    class Config:
+        populate_by_name = True
+
+
+class ListFsbTemplatesResponse(BaseModel):
+    """
+    Paginated collection of fsb templates.
+    """
+    items: List[FsbTemplate] = Field(..., description="List of templates")
+    pagination: PaginationInfo = Field(..., description="Pagination metadata")
 
 
 # ============================================================================

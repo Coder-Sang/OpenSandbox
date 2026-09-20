@@ -22,18 +22,146 @@ from opensandbox_server.api.schema import (
     Host,
     ImageSpec,
     ListSnapshotsRequest,
+    LifecycleHook,
     OSSFS,
     PaginationInfo,
     PaginationRequest,
+    PeriodicLifecycleHook,
     PlatformSpec,
     PVC,
     ResourceLimits,
+    SandboxLifecycle,
     Snapshot,
     SnapshotFilter,
     SnapshotStatus,
     Volume,
 )
+from opensandbox_server.constants import OPENSANDBOX_LIFECYCLE
 
+
+class TestSandboxLifecycle:
+
+    def test_create_request_parses_lifecycle_aliases(self):
+        request = CreateSandboxRequest.model_validate(
+            {
+                "image": {"uri": "python:3.11"},
+                "entrypoint": ["python"],
+                "resourceLimits": {},
+                "lifecycle": {
+                    "preStart": {
+                        "command": ["/opt/hooks/restore.sh"],
+                        "timeoutSeconds": 30,
+                    },
+                    "periodic": [
+                        {
+                            "name": " checkpoint ",
+                            "schedule": " */5 * * * * ",
+                            "command": ["/opt/hooks/checkpoint.sh"],
+                        }
+                    ],
+                },
+            }
+        )
+
+        assert request.lifecycle is not None
+        assert request.lifecycle.pre_start is not None
+        assert request.lifecycle.pre_start.timeout_seconds == 30
+        assert request.lifecycle.periodic is not None
+        assert request.lifecycle.periodic[0].name == "checkpoint"
+        assert request.lifecycle.periodic[0].schedule == "*/5 * * * *"
+
+    def test_create_request_rejects_reserved_lifecycle_env(self):
+        with pytest.raises(ValidationError, match="is reserved"):
+            CreateSandboxRequest(
+                image=ImageSpec(uri="python:3.11"),
+                entrypoint=["python"],
+                resourceLimits=ResourceLimits(root={}),
+                env={OPENSANDBOX_LIFECYCLE: "{}"},
+            )
+
+    def test_create_request_rejects_lifecycle_with_pool_ref(self):
+        with pytest.raises(ValidationError, match="lifecycle cannot be used together with poolRef"):
+            CreateSandboxRequest(
+                extensions={"poolRef": "default/pool"},
+                lifecycle=SandboxLifecycle(
+                    preStart=LifecycleHook(command=["true"]),
+                ),
+            )
+
+    @pytest.mark.parametrize(
+        ("hook", "expected"),
+        [
+            (LifecycleHook(command=["true"], timeoutSeconds=10800), 10800),
+            (
+                PeriodicLifecycleHook(
+                    name="sync",
+                    schedule="@hourly",
+                    command=["true"],
+                    timeoutSeconds=300,
+                ),
+                300,
+            ),
+        ],
+    )
+    def test_lifecycle_accepts_maximum_timeout(self, hook, expected):
+        assert hook.timeout_seconds == expected
+
+    @pytest.mark.parametrize(
+        ("payload", "maximum"),
+        [
+            ({"preStart": {"command": ["true"], "timeoutSeconds": 10801}}, 10800),
+            (
+                {
+                    "periodic": [
+                        {
+                            "name": "sync",
+                            "schedule": "@hourly",
+                            "command": ["true"],
+                            "timeoutSeconds": 301,
+                        }
+                    ]
+                },
+                300,
+            ),
+        ],
+    )
+    def test_lifecycle_rejects_timeout_above_maximum(self, payload, maximum):
+        with pytest.raises(ValidationError, match=f"less than or equal to {maximum}"):
+            SandboxLifecycle.model_validate(payload)
+
+    @pytest.mark.parametrize("duplicate_name", ["sync", " sync "])
+    def test_lifecycle_rejects_duplicate_periodic_names(self, duplicate_name):
+        with pytest.raises(ValidationError, match="names must be unique"):
+            SandboxLifecycle.model_validate(
+                {
+                    "periodic": [
+                        {"name": "sync", "schedule": "@hourly", "command": ["true"]},
+                        {"name": duplicate_name, "schedule": "@daily", "command": ["true"]},
+                    ]
+                }
+            )
+
+    @pytest.mark.parametrize(
+        ("payload", "message"),
+        [
+            ({"preStart": {"command": [" "]}}, "command must not be empty"),
+            (
+                {"periodic": [{"name": " ", "schedule": "@hourly", "command": ["true"]}]},
+                "name must not be blank",
+            ),
+            (
+                {"periodic": [{"name": "sync", "schedule": "\t", "command": ["true"]}]},
+                "schedule must not be blank",
+            ),
+            (
+                {"periodic": [{"name": "sync", "schedule": "@hourly", "command": [" "]}]},
+                "command must not be empty",
+            ),
+        ],
+    )
+    def test_lifecycle_rejects_blank_required_values(self, payload, message):
+        with pytest.raises(ValidationError, match=message):
+            SandboxLifecycle.model_validate(payload)
 
 
 class TestHost:
@@ -84,7 +212,6 @@ class TestPVC:
         }
 
     def test_serialization_with_provisioning_hints(self):
-        """Provisioning hints should serialize with aliases."""
         backend = PVC(
             claim_name="my-pvc",
             storage_class="ssd",
@@ -674,7 +801,6 @@ class TestCreateSandboxRequestPoolMode:
         assert request.env == {"KEY": "value"}
 
     def test_pool_mode_rejects_snapshot_id_with_pool_ref(self):
-        """snapshotId and poolRef cannot be used together."""
         with pytest.raises(ValidationError) as exc_info:
             CreateSandboxRequest(
                 snapshotId="snap-001",
@@ -709,7 +835,6 @@ class TestCreateSandboxRequestPoolMode:
             )
 
     def test_pool_mode_normalizes_blank_snapshot_id(self):
-        """Blank snapshotId (e.g. whitespace) should be normalized to None in pool mode."""
         req = CreateSandboxRequest(
             extensions={"poolRef": "my-pool"},
             snapshotId="   ",
@@ -717,7 +842,6 @@ class TestCreateSandboxRequestPoolMode:
         assert req.snapshot_id is None
 
     def test_pool_mode_ignores_blank_pool_ref(self):
-        """Blank poolRef should not trigger pool mode."""
         with pytest.raises(ValidationError):
             CreateSandboxRequest(
                 extensions={"poolRef": "   "},

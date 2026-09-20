@@ -21,6 +21,7 @@ import (
 	"net"
 	"os"
 	"strings"
+	"sync/atomic"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -33,17 +34,42 @@ import (
 	tracenoop "go.opentelemetry.io/otel/trace/noop"
 )
 
+// meterProvider holds the provider Init installed, so ForceFlush can reach it. Set only
+// when metrics are enabled; nil otherwise.
+var meterProvider atomic.Pointer[sdkmetric.MeterProvider]
+
+// ForceFlush exports whatever the reader is holding, right now.
+//
+// Metrics leave through a PeriodicReader, so a measurement recorded shortly before the
+// process exits is normally lost: the deferred shutdown from Init never runs on a path that
+// calls os.Exit. Any code that records a metric and then terminates the process must flush
+// first. No-op when metrics are disabled.
+func ForceFlush(ctx context.Context) error {
+	mp := meterProvider.Load()
+	if mp == nil {
+		return nil
+	}
+	return mp.ForceFlush(ctx)
+}
+
 // Config controls OTLP metrics export. Endpoints follow standard OTEL env vars; see metricsEnabled.
 type Config struct {
 	ServiceName        string
 	ResourceAttributes []attribute.KeyValue
 	RegisterMetrics    func() error
+	// DisableEndpointFallback prevents HOST_IP and /etc/hostinfo from enabling
+	// metrics export when no standard OTLP endpoint is configured. Components
+	// keep the historical fallback behavior unless they opt in to this flag.
+	DisableEndpointFallback bool
 }
 
 const (
 	envOTLPMetricsEndpoint = "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"
 	envOTLPEndpoint        = "OTEL_EXPORTER_OTLP_ENDPOINT"
 	envHostIP              = "HOST_IP"
+	envSDKDisabled         = "OTEL_SDK_DISABLED"
+	envMetricsExporter     = "OTEL_METRICS_EXPORTER"
+	envTemporality         = "OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE"
 	otlpHTTPPort           = "4318"
 	hostInfoPath           = "/etc/hostinfo"
 )
@@ -67,10 +93,13 @@ func Init(ctx context.Context, cfg Config) (shutdown func(context.Context) error
 		shutdownFuncs []func(context.Context) error
 	)
 
-	if metricsEnabled() {
-		opts := append(metricsClientOptions(),
-			otlpmetrichttp.WithTemporalitySelector(deltaTemporalitySelector),
-		)
+	if metricsEnabled(cfg.DisableEndpointFallback) {
+		opts := metricsClientOptions(cfg.DisableEndpointFallback)
+		// Preserve historical aggregation only when no preference is supplied.
+		// Otherwise let the exporter parse the standard environment variable.
+		if strings.TrimSpace(os.Getenv(envTemporality)) == "" {
+			opts = append(opts, otlpmetrichttp.WithTemporalitySelector(deltaTemporalitySelector))
+		}
 		mexp, err := otlpmetrichttp.New(ctx, opts...)
 		if err != nil {
 			return nil, err
@@ -81,14 +110,19 @@ func Init(ctx context.Context, cfg Config) (shutdown func(context.Context) error
 			sdkmetric.WithReader(reader),
 		)
 		otel.SetMeterProvider(mp)
+		meterProvider.Store(mp)
 		shutdownFuncs = append(shutdownFuncs, mp.Shutdown)
 		if cfg.RegisterMetrics != nil {
 			if err := cfg.RegisterMetrics(); err != nil {
 				_ = mp.Shutdown(ctx)
 				otel.SetMeterProvider(noop.NewMeterProvider())
+				meterProvider.Store(nil)
 				return nil, err
 			}
 		}
+	} else {
+		otel.SetMeterProvider(noop.NewMeterProvider())
+		meterProvider.Store(nil)
 	}
 
 	shutdown = func(ctx context.Context) error {
@@ -114,16 +148,33 @@ func buildResource(ctx context.Context, serviceName string, extra []attribute.Ke
 }
 
 // Endpoint precedence: OTEL_EXPORTER_OTLP_*_ENDPOINT -> HOST_IP -> /etc/hostinfo.
-func metricsEnabled() bool {
+func metricsEnabled(disableEndpointFallback bool) bool {
+	if MetricsDisabled() {
+		return false
+	}
 	if otlpEndpointFromEnv() != "" {
 		return true
+	}
+	if disableEndpointFallback {
+		return false
 	}
 	_, ok := resolveNodeIP()
 	return ok
 }
 
-func metricsClientOptions() []otlpmetrichttp.Option {
+// MetricsDisabled reports whether a standard environment switch disables metrics.
+// Exporter initialization and telemetry-specific network policy must use the same
+// decision, so disabling export cannot leave an automatic collector allow rule.
+func MetricsDisabled() bool {
+	return strings.EqualFold(os.Getenv(envSDKDisabled), "true") ||
+		strings.EqualFold(os.Getenv(envMetricsExporter), "none")
+}
+
+func metricsClientOptions(disableEndpointFallback bool) []otlpmetrichttp.Option {
 	if otlpEndpointFromEnv() != "" {
+		return nil
+	}
+	if disableEndpointFallback {
 		return nil
 	}
 	ip, ok := resolveNodeIP()
@@ -171,9 +222,8 @@ func firstEndpoint(primary, fallback string) string {
 	return strings.TrimSpace(fallback)
 }
 
-// deltaTemporalitySelector returns delta temporality for monotonic instruments
-// (Counter, Histogram, ObservableCounter). Gauges and UpDownCounters keep
-// the default cumulative semantics.
+// deltaTemporalitySelector preserves the historical default: delta for synchronous
+// Counter and Histogram, cumulative for observable instruments and UpDownCounters.
 func deltaTemporalitySelector(kind sdkmetric.InstrumentKind) metricdata.Temporality {
 	switch kind {
 	case sdkmetric.InstrumentKindCounter,

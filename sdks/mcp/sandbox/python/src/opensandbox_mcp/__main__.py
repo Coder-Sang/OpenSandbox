@@ -33,6 +33,17 @@ def main() -> None:
         help="Transport to use. Default uses the MCP SDK default.",
     )
     parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="HTTP bind host for streamable-http transport.",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=8000,
+        help="HTTP bind port for streamable-http transport.",
+    )
+    parser.add_argument(
         "--api-key",
         default=None,
         help="OpenSandbox API key (overrides OPEN_SANDBOX_API_KEY).",
@@ -54,6 +65,12 @@ def main() -> None:
         default=30,
         help="HTTP request timeout in seconds.",
     )
+    parser.add_argument(
+        "--use-server-proxy",
+        action="store_true",
+        default=False,
+        help="Route sandbox traffic through the OpenSandbox server proxy (use when direct port access is blocked).",
+    )
 
     args = parser.parse_args()
     config_values = {}
@@ -67,12 +84,17 @@ def main() -> None:
         config_values["request_timeout"] = timedelta(
             seconds=args.request_timeout_seconds
         )
+    if args.use_server_proxy:
+        config_values["use_server_proxy"] = True
+
     connection_config = ConnectionConfig(**config_values) if config_values else None
     mcp = create_server(connection_config=connection_config)
 
     if args.transport == "streamable-http":
         mcp.run(
-            transport="streamable-http"
+            transport="streamable-http",
+            host=args.host,
+            port=args.port,
         )
         return
 

@@ -18,6 +18,7 @@ import (
 	"flag"
 	stdlog "log"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -31,17 +32,20 @@ const (
 	gracefulShutdownTimeoutEnv = "EXECD_API_GRACE_SHUTDOWN"
 	jupyterIdlePollIntervalEnv = "EXECD_JUPYTER_IDLE_POLL_INTERVAL"
 	isolationConfigEnv         = "EXECD_ISOLATION_CONFIG"
+	runtimeInitEnv             = "EXECD_RUNTIME_INIT"
 )
 
 // InitFlags registers CLI flags and env overrides.
 func InitFlags() {
-	// Set default values
 	ServerPort = 44772
 	ServerLogLevel = 6
 	ServerAccessToken = ""
-	ApiGracefulShutdownTimeout = time.Second * 1
+	ApiGracefulShutdownTimeout = 200 * time.Millisecond
 	JupyterIdlePollInterval = 100 * time.Millisecond
 	IsolationConfigPath = ""
+	InitMode = false
+	LifecycleStartupStatusFile = ""
+	RuntimeInit = false
 
 	// First, set default values from environment variables
 	if jupyterFromEnv := os.Getenv(jupyterHostEnv); jupyterFromEnv != "" {
@@ -86,14 +90,27 @@ func InitFlags() {
 		}
 	}
 
-	flag.DurationVar(&ApiGracefulShutdownTimeout, "graceful-shutdown-timeout", ApiGracefulShutdownTimeout, "API graceful shutdown timeout duration (default: 1s)")
+	flag.DurationVar(&ApiGracefulShutdownTimeout, "graceful-shutdown-timeout", ApiGracefulShutdownTimeout, "API graceful shutdown timeout duration (default: 200ms)")
 	flag.DurationVar(&JupyterIdlePollInterval, "jupyter-idle-poll-interval", JupyterIdlePollInterval, "Polling interval after Jupyter idle status before closing stream (default: 100ms)")
 
-	// Isolation config
 	if v := os.Getenv(isolationConfigEnv); v != "" {
 		IsolationConfigPath = v
 	}
 	flag.StringVar(&IsolationConfigPath, "isolation-config", IsolationConfigPath, "Path to isolation TOML config file (default: built-in defaults)")
+
+	// Init mode must be enabled explicitly; bootstrap.sh passes it together
+	// with EXECD_INIT so the shell's exec/background decision stays in lockstep.
+	flag.BoolVar(&InitMode, "init", false, "Run as the sandbox init: reap children, forward signals, own the container lifecycle")
+	flag.StringVar(&LifecycleStartupStatusFile, "lifecycle-startup-status-file", "", "Write the internal lifecycle startup result to this file")
+
+	if runtimeInitFromEnv := os.Getenv(runtimeInitEnv); runtimeInitFromEnv != "" {
+		enabled, err := strconv.ParseBool(runtimeInitFromEnv)
+		if err != nil {
+			stdlog.Panicf("Invalid %s=%s: must be a boolean value", runtimeInitEnv, runtimeInitFromEnv)
+		}
+		RuntimeInit = enabled
+	}
+	flag.BoolVar(&RuntimeInit, "runtime-init", RuntimeInit, "Gate preStart and the entrypoint on POST /internal/init; until then only /ping, /ready, and /internal/init are served")
 
 	// Parse flags - these will override environment variables if provided
 	flag.Parse()
@@ -102,7 +119,12 @@ func InitFlags() {
 		JupyterIdlePollInterval = 100 * time.Millisecond
 	}
 
-	// Log final values
-	log.Info("Jupyter server host is: %s", JupyterServerHost)
-	log.Info("Jupyter server token is: %s", log.MaskToken(JupyterServerToken))
+	log.Info("jupyter: server host=%s", JupyterServerHost)
+	log.Info("jupyter: server token=%s", log.MaskToken(JupyterServerToken))
+}
+
+// Args returns the non-flag arguments after flag.Parse — in init mode this is
+// the user command passed after "--" (e.g. `execd --init -- sh -c "..."`).
+func Args() []string {
+	return flag.Args()
 }

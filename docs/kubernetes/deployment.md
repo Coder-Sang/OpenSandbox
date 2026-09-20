@@ -19,6 +19,188 @@ The OpenSandbox Kubernetes operator manages `BatchSandbox`, `Pool`, and `Sandbox
 
 For installation instructions and Helm chart values, see the [Kubernetes operator documentation](https://github.com/opensandbox-group/OpenSandbox/tree/main/kubernetes).
 
+## Install the Lifecycle Server
+
+Install the controller and CRDs before the lifecycle server. The server runs in the cluster with a `ServiceAccount` and uses the Kubernetes API to create and manage sandbox resources.
+
+Choose a published `opensandbox-server` chart from [GitHub Releases](https://github.com/opensandbox-group/OpenSandbox/releases?q=helm%2Fopensandbox-server&expanded=true), then set both versions from that release:
+
+```sh
+CHART_VERSION="<chart-version>"
+APP_VERSION="<app-version>"
+CHART_URL="https://github.com/opensandbox-group/OpenSandbox/releases/download/helm/opensandbox-server/${CHART_VERSION}/opensandbox-server-${CHART_VERSION}.tgz"
+```
+
+::: info Versioning
+The release tag and `.tgz` filename identify the Helm chart version. The server application version is independent and is listed on each GitHub Release.
+:::
+
+### Configure API authentication
+
+By default, the server refuses to start without an API key in a non-interactive container. Create both the control-plane namespace and the default sandbox workload namespace, then store the key in a Kubernetes `Secret`:
+
+```bash
+kubectl create namespace opensandbox-system --dry-run=client -o yaml | kubectl apply -f -
+kubectl create namespace opensandbox --dry-run=client -o yaml | kubectl apply -f -
+
+read -s OPENSANDBOX_API_KEY
+kubectl create secret generic opensandbox-api-key \
+  --namespace opensandbox-system \
+  --from-literal=api-key="${OPENSANDBOX_API_KEY}" \
+  --dry-run=client -o yaml | kubectl apply -f -
+unset OPENSANDBOX_API_KEY
+```
+
+Reference the Secret from a values file:
+
+```yaml
+# values-server.yaml
+server:
+  replicaCount: 1
+  env:
+    - name: OPENSANDBOX_SERVER_API_KEY
+      valueFrom:
+        secretKeyRef:
+          name: opensandbox-api-key
+          key: api-key
+```
+
+Use an external secret manager instead of creating the Secret manually in production environments.
+
+The chart installs the server into `opensandbox-system`, while the default `configToml` creates sandbox and pool resources in `opensandbox`. If you change `[kubernetes].namespace` in `configToml`, create that namespace instead of `opensandbox` before submitting workloads.
+
+::: warning Single-active Server default
+The chart defaults to `server.replicaCount: 1`. Keep one active Lifecycle Server
+unless you deliberately use the PostgreSQL-backed Kubernetes public snapshot
+topology documented below. That exception coordinates public snapshots only; it
+does not provide general multi-replica Server HA. The Server Deployment uses the
+`Recreate` strategy so an upgrade stops the active Server before starting its
+replacement; expect a brief API interruption during upgrades.
+:::
+
+### Use PostgreSQL for server persistence
+
+Create a Secret containing the PostgreSQL connection string:
+
+```bash
+read -s OPENSANDBOX_POSTGRESQL_DSN
+kubectl create secret generic opensandbox-postgresql \
+  --namespace opensandbox-system \
+  --from-literal=dsn="${OPENSANDBOX_POSTGRESQL_DSN}" \
+  --dry-run=client -o yaml | kubectl apply -f -
+unset OPENSANDBOX_POSTGRESQL_DSN
+```
+
+In `values-server.yaml`, keep the default `server.replicaCount` at `1`, add the
+Secret-backed environment variable below, and add the shown `[store]` tables to
+the complete `configToml` value:
+
+```yaml
+server:
+  replicaCount: 1
+  env:
+    - name: OPENSANDBOX_STORE_POSTGRESQL_DSN
+      valueFrom:
+        secretKeyRef:
+          name: opensandbox-postgresql
+          key: dsn
+
+configToml: |
+  # Keep the rest of the chart's complete server configuration here.
+  [store]
+  type = "postgresql"
+
+  [store.postgresql]
+  min_pool_size = 1
+  max_pool_size = 10
+  snapshot_recovery_interval_seconds = 15
+```
+
+::: info
+The chart default remains one Server replica. You may explicitly set
+`server.replicaCount: 2` for multi-active public snapshot handling only when
+both replicas use the same PostgreSQL database and the Kubernetes runtime.
+SQLite and Docker snapshot execution do not support this multi-active topology.
+:::
+
+### Install and verify
+
+Inspect all available settings before installation:
+
+```sh
+helm show values "${CHART_URL}"
+```
+
+Install the server from the versioned chart artifact:
+
+```sh
+helm install opensandbox-server "${CHART_URL}" \
+  --namespace opensandbox-system \
+  --set-string server.image.tag="${APP_VERSION}" \
+  --values values-server.yaml
+```
+
+Wait for the Deployment and verify the API health endpoint:
+
+```sh
+kubectl rollout status deployment/opensandbox-server \
+  --namespace opensandbox-system \
+  --timeout=180s
+
+kubectl port-forward \
+  --namespace opensandbox-system \
+  service/opensandbox-server 8080:80
+```
+
+In another terminal:
+
+```sh
+curl --fail http://127.0.0.1:8080/health
+```
+
+### Important values
+
+| Value | Purpose | Notes |
+|-------|---------|-------|
+| `server.image.repository` | Server image registry and repository | Override for a private mirror or custom build. |
+| `server.image.tag` | Server image version | The release install command pins it to `APP_VERSION`. |
+| `server.replicaCount` | Number of server Pods | Defaults to `1`; multi-replica Server HA is not supported yet. |
+| `server.env` | Additional container environment variables | Use it with `secretKeyRef` for `OPENSANDBOX_SERVER_API_KEY`. |
+| `configToml` | Complete server configuration | Mounted at `/etc/opensandbox/config.toml`; overriding it replaces the complete default TOML, including the workload namespace. |
+| `server.gateway.enabled` | Deploy the ingress gateway with the server | Defaults to `false`. |
+| `server.service.type` | Service type for the server | Defaults to `ClusterIP`. Use `NodePort` or `LoadBalancer` for access from outside the cluster; pin the port with `server.service.nodePort`. |
+| `namespaceOverride` | Namespace used by chart resources | Defaults to `opensandbox-system`. |
+
+The server container and its Service use port `80`. Keep `[server].port = 80` when replacing `configToml` unless the chart templates are also updated to use a different port. The Service is `ClusterIP` by default; set `server.service.type` to reach the server from outside the cluster.
+
+### Configure egress sidecar resources
+
+When a create request includes `networkPolicy`, the lifecycle server adds an egress sidecar to each non-pooled sandbox Pod. Namespace `LimitRange` defaults apply to this container when it does not declare resources, which can reserve substantially more capacity than basic DNS/nft enforcement needs.
+
+Add optional resource settings to the `[egress]` section of `configToml`:
+
+```toml
+[egress]
+image = "opensandbox/egress:v1.1.7"
+requests = { cpu = "25m", memory = "64Mi" }
+limits = { cpu = "250m", memory = "256Mi" }
+```
+
+You can omit either `requests` or `limits`. Treat these values as a starting point and tune them from observed usage; Credential Vault and transparent mitmproxy generally need more headroom than basic DNS/nft enforcement.
+
+### Upgrade
+
+Select the application and chart versions from the target GitHub Release, update `CHART_URL`, and run:
+
+```sh
+helm upgrade opensandbox-server "${CHART_URL}" \
+  --namespace opensandbox-system \
+  --set-string server.image.tag="${APP_VERSION}" \
+  --values values-server.yaml
+```
+
+For the complete values reference and local development installation, see the [`opensandbox-server` chart README](https://github.com/opensandbox-group/OpenSandbox/tree/main/manifests/charts/server).
+
 ## Operator Metrics
 
 The operator (controller-manager) exposes standard [controller-runtime](https://book.kubebuilder.io/reference/metrics) Prometheus metrics — reconcile rate and latency (`controller_runtime_reconcile_*`), work-queue depth, client-go request counts, and Go runtime stats. The endpoint is **disabled by default** (`--metrics-bind-address=0`).
@@ -45,6 +227,29 @@ controller:
   - `opensandbox-metrics-reader` (**not** bound by the chart) — grants `get` on the `/metrics` non-resource URL. Bind it to your scraper's `ServiceAccount` (e.g. Prometheus) and have the scraper present that account's bearer token.
 
 Point your Prometheus stack at the `metrics` container port (for example via a `ServiceMonitor` or `PodMonitoring`).
+
+### Business capacity metrics
+
+The elected controller also exports low-cardinality business capacity metrics over OTLP/HTTP when `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` or `OTEL_EXPORTER_OTLP_ENDPOINT` is set. This is independent of the controller-runtime Prometheus endpoint and remains disabled when neither variable is configured.
+
+```yaml
+extraEnv:
+  - name: OTEL_EXPORTER_OTLP_METRICS_ENDPOINT
+    value: http://otel-collector.observability:4318/v1/metrics
+```
+
+| Metric | Unit | Attributes | Description |
+|--------|------|------------|-------------|
+| `controller.pool.pods` | `{pod}` | `namespace`, `pool_name`, `state` | Current Pool Pods, where `state` is `total`, `allocated`, `available`, or `updated` |
+| `controller.pool.cpu.requested` | `{cpu}` | `namespace`, `pool_name`, `state` | Scheduler-equivalent CPU requests represented by total, allocated, or available Pool Pods |
+| `controller.pool.memory.requested` | `By` | `namespace`, `pool_name`, `state` | Scheduler-equivalent memory requests represented by total, allocated, or available Pool Pods |
+| `controller.batchsandbox.count` | `{batchsandbox}` | `namespace`, `phase`, `allocation_mode` | Current BatchSandbox objects by lifecycle phase and pool/direct mode |
+| `controller.batchsandbox.pods` | `{pod}` | `namespace`, `state`, `allocation_mode` | Desired, current, allocated, and ready BatchSandbox Pod counts |
+| `controller.capacity.collect.duration` | `s` | None | Time spent reading cached objects and collecting one capacity snapshot |
+
+The metrics deliberately omit sandbox, BatchSandbox, and Pod identifiers. Only the leader exports them, so multiple controller replicas do not duplicate cluster totals. An unset initial BatchSandbox phase is exported as `Unknown`. Derive Pool utilization from `allocated / total` and calculate peak, valley, or percentile capacity in the telemetry backend. Actual CPU and memory usage remains available from kubelet/cAdvisor rather than being duplicated here.
+
+Each collection reads all Pools and BatchSandboxes from the controller manager's informer cache, then performs one cached, owner-UID-indexed Pod list for every non-deleting Pool. Collection CPU and memory therefore grow linearly with the number of cached Pools, BatchSandboxes, and Pool-owned Pods, without issuing one API-server list request per Pool. The OpenTelemetry periodic reader exports every 60 seconds by default; `OTEL_METRIC_EXPORT_INTERVAL` can change the interval in milliseconds. Monitor `controller.capacity.collect.duration` and validate the target cluster scale before shortening that interval. If OTLP setup fails after an endpoint is configured, the controller continues reconciling and logs the failed setup stage together with the endpoint environment variable and a credential-stripped endpoint.
 
 ## Configure the Server for Kubernetes
 

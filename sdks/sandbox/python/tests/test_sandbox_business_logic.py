@@ -23,9 +23,21 @@ import pytest
 
 from opensandbox.config import ConnectionConfig
 from opensandbox.constants import DEFAULT_EGRESS_PORT, DEFAULT_EXECD_PORT
-from opensandbox.exceptions import SandboxReadyTimeoutException
+from opensandbox.exceptions import (
+    InvalidArgumentException,
+    SandboxException,
+    SandboxInternalException,
+    SandboxReadyTimeoutException,
+)
 from opensandbox.models.diagnostics import DiagnosticContent
-from opensandbox.models.sandboxes import NetworkPolicy, NetworkRule, SandboxEndpoint
+from opensandbox.models.sandboxes import (
+    LifecycleHook,
+    NetworkPolicy,
+    NetworkRule,
+    SandboxEndpoint,
+    SandboxLifecycle,
+    SandboxOrigin,
+)
 from opensandbox.sandbox import Sandbox
 
 
@@ -157,6 +169,41 @@ async def test_check_ready_succeeds_after_retries_without_real_sleep(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_check_ready_limits_final_sleep_to_remaining_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = [0.0]
+    sleep_calls: list[float] = []
+
+    def _monotonic() -> float:
+        return clock[0]
+
+    async def _sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+        clock[0] += seconds
+
+    async def _always_false(_: Sandbox) -> bool:
+        return False
+
+    monkeypatch.setattr("opensandbox.sandbox.time.time", _monotonic)
+    monkeypatch.setattr("opensandbox.sandbox.time.monotonic", _monotonic)
+    monkeypatch.setattr("opensandbox.sandbox.asyncio.sleep", _sleep)
+    sbx = _make_sandbox(
+        health_service=_HealthServiceStub(),
+        sandbox_service=_SandboxServiceStub(),
+        custom_health_check=_always_false,
+    )
+
+    with pytest.raises(SandboxReadyTimeoutException):
+        await sbx.check_ready(
+            timeout=timedelta(milliseconds=10),
+            polling_interval=timedelta(milliseconds=200),
+        )
+
+    assert sleep_calls == [0.01]
+
+
+@pytest.mark.asyncio
 async def test_check_ready_timeout_raises() -> None:
     async def _always_false(_: Sandbox) -> bool:
         return False
@@ -172,7 +219,7 @@ async def test_check_ready_timeout_raises() -> None:
 
 
 @pytest.mark.asyncio
-async def test_check_ready_timeout_message_includes_troubleshooting_hints() -> None:
+async def test_check_ready_timeout_message_omits_network_configuration_hints() -> None:
     async def _always_false(_: Sandbox) -> bool:
         return False
 
@@ -188,7 +235,9 @@ async def test_check_ready_timeout_message_includes_troubleshooting_hints() -> N
 
     message = str(exc_info.value)
     assert "ConnectionConfig(domain=10.0.0.1:8080, use_server_proxy=False)" in message
-    assert "ConnectionConfig(use_server_proxy=True)" in message
+    assert "set connectionconfig(use_server_proxy=true)" not in message.lower()
+    assert "direct sandbox endpoint access" not in message
+    assert "[docker].host_ip" not in message
 
 
 @pytest.mark.asyncio
@@ -348,6 +397,212 @@ async def test_create_resolves_egress_endpoint_and_builds_service(
     ]
 
 
+class _GatedEndpointServiceStub:
+    """get_sandbox_endpoint that blocks the execd request until released.
+
+    Detects serial endpoint resolution: when the two endpoint requests are
+    awaited sequentially, the egress request cannot start while the execd
+    request is still blocked.
+    """
+
+    def __init__(self) -> None:
+        self.execd_entered = asyncio.Event()
+        self.egress_entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def get_sandbox_endpoint(
+        self, _sandbox_id, port: int, _use_server_proxy: bool = False
+    ) -> SandboxEndpoint:
+        if port == DEFAULT_EXECD_PORT:
+            self.execd_entered.set()
+            await self.release.wait()
+        else:
+            self.egress_entered.set()
+        return SandboxEndpoint(endpoint=f"sbx.internal:{port}")
+
+
+async def _assert_parallel_endpoint_resolution(
+    gate: _GatedEndpointServiceStub, op
+) -> None:
+    task = asyncio.create_task(op())
+    await asyncio.wait_for(gate.execd_entered.wait(), timeout=1)
+    try:
+        # Fails if the egress endpoint is requested only after the execd
+        # endpoint request has completed.
+        await asyncio.wait_for(gate.egress_entered.wait(), timeout=1)
+    finally:
+        gate.release.set()
+        await task
+
+
+@pytest.mark.parametrize("flow", ["create", "connect", "resume"])
+@pytest.mark.asyncio
+async def test_sandbox_endpoint_resolution_order(
+    monkeypatch: pytest.MonkeyPatch, flow: str
+) -> None:
+    gate = _GatedEndpointServiceStub()
+
+    class _CreateResponse:
+        id = "sbx-1"
+
+    class _SandboxServiceStub:
+        async def create_sandbox(self, *_args, **_kwargs):
+            return _CreateResponse()
+
+        async def resume_sandbox(self, _sandbox_id: str) -> None:
+            return None
+
+        async def kill_sandbox(self, _sandbox_id: str) -> None:
+            return None
+
+        async def get_sandbox_endpoint(
+            self, sandbox_id, port: int, use_server_proxy: bool = False
+        ) -> SandboxEndpoint:
+            return await gate.get_sandbox_endpoint(sandbox_id, port, use_server_proxy)
+
+    class _FactoryStub:
+        def __init__(self, _connection_config: ConnectionConfig) -> None:
+            pass
+
+        def create_sandbox_service(self):
+            return sandbox_service
+
+        def create_filesystem_service(self, _endpoint: SandboxEndpoint):
+            return _Noop()
+
+        def create_command_service(self, _endpoint: SandboxEndpoint):
+            return _Noop()
+
+        def create_health_service(self, _endpoint: SandboxEndpoint):
+            return _Noop()
+
+        def create_metrics_service(self, _endpoint: SandboxEndpoint):
+            return _Noop()
+
+        def create_egress_service(self, _endpoint: SandboxEndpoint):
+            return _EgressServiceStub()
+
+        def create_diagnostics_service(self):
+            return _DiagnosticsServiceStub()
+
+        def create_isolated_session_service(self, endpoint: SandboxEndpoint):
+            return _Noop()
+
+    sandbox_service = _SandboxServiceStub()
+    monkeypatch.setattr("opensandbox.sandbox.AdapterFactory", _FactoryStub)
+
+    async def _op() -> Sandbox:
+        if flow == "create":
+            return await Sandbox.create(
+                "python:3.11",
+                skip_health_check=True,
+                connection_config=ConnectionConfig(),
+            )
+        if flow == "connect":
+            return await Sandbox.connect(
+                "sbx-1",
+                skip_health_check=True,
+                connection_config=ConnectionConfig(),
+            )
+        return await Sandbox.resume(
+            "sbx-1",
+            skip_health_check=True,
+            connection_config=ConnectionConfig(),
+        )
+
+    if flow == "create":
+        await _assert_parallel_endpoint_resolution(gate, _op)
+    else:
+        task = asyncio.create_task(_op())
+        await asyncio.wait_for(gate.execd_entered.wait(), timeout=1)
+        try:
+            assert not gate.egress_entered.is_set()
+        finally:
+            gate.release.set()
+        sandbox = await asyncio.wait_for(task, timeout=1)
+        assert gate.egress_entered.is_set()
+        await sandbox.close()
+
+
+
+@pytest.mark.parametrize("flow", ["create", "connect", "resume"])
+@pytest.mark.parametrize("failing_port", [DEFAULT_EXECD_PORT, DEFAULT_EGRESS_PORT])
+@pytest.mark.asyncio
+async def test_sandbox_errors_when_either_endpoint_resolution_fails(
+    monkeypatch: pytest.MonkeyPatch, flow: str, failing_port: int
+) -> None:
+    class _CreateResponse:
+        id = "sbx-1"
+
+    class _SandboxServiceStub:
+        async def create_sandbox(self, *_args, **_kwargs):
+            return _CreateResponse()
+
+        async def resume_sandbox(self, _sandbox_id: str) -> None:
+            return None
+
+        async def kill_sandbox(self, _sandbox_id: str) -> None:
+            return None
+
+        async def get_sandbox_endpoint(
+            self, _sandbox_id, port: int, _use_server_proxy: bool = False
+        ) -> SandboxEndpoint:
+            if port == failing_port:
+                raise RuntimeError(f"endpoint resolution failed for port {port}")
+            return SandboxEndpoint(endpoint=f"sbx.internal:{port}")
+
+    class _FactoryStub:
+        def __init__(self, _connection_config: ConnectionConfig) -> None:
+            pass
+
+        def create_sandbox_service(self):
+            return sandbox_service
+
+        def create_filesystem_service(self, _endpoint: SandboxEndpoint):
+            return _Noop()
+
+        def create_command_service(self, _endpoint: SandboxEndpoint):
+            return _Noop()
+
+        def create_health_service(self, _endpoint: SandboxEndpoint):
+            return _Noop()
+
+        def create_metrics_service(self, _endpoint: SandboxEndpoint):
+            return _Noop()
+
+        def create_egress_service(self, _endpoint: SandboxEndpoint):
+            return _EgressServiceStub()
+
+        def create_diagnostics_service(self):
+            return _DiagnosticsServiceStub()
+
+        def create_isolated_session_service(self, endpoint: SandboxEndpoint):
+            return _Noop()
+
+    sandbox_service = _SandboxServiceStub()
+    monkeypatch.setattr("opensandbox.sandbox.AdapterFactory", _FactoryStub)
+
+    with pytest.raises(SandboxInternalException):
+        if flow == "create":
+            await Sandbox.create(
+                "python:3.11",
+                skip_health_check=True,
+                connection_config=ConnectionConfig(),
+            )
+        elif flow == "connect":
+            await Sandbox.connect(
+                "sbx-1",
+                skip_health_check=True,
+                connection_config=ConnectionConfig(),
+            )
+        else:
+            await Sandbox.resume(
+                "sbx-1",
+                skip_health_check=True,
+                connection_config=ConnectionConfig(),
+            )
+
+
 @pytest.mark.asyncio
 async def test_create_cancellation_cleans_up_created_sandbox(
     monkeypatch: pytest.MonkeyPatch,
@@ -491,6 +746,7 @@ async def test_create_passes_new_signature_keywords_even_when_unused(
             snapshot_id=None,
             credential_proxy=None,
             resource_requests=None,
+            lifecycle=None,
         ):
             assert spec is not None
             assert entrypoint is not None
@@ -504,6 +760,9 @@ async def test_create_passes_new_signature_keywords_even_when_unused(
             assert platform is None
             assert secure_access is False
             assert snapshot_id is None
+            assert lifecycle is not None
+            assert lifecycle.pre_start is not None
+            assert lifecycle.pre_start.command == ["/opt/hooks/restore.sh"]
             return _CreateResponse()
 
         async def get_sandbox_endpoint(self, _sandbox_id, port: int, _use_server_proxy: bool = False):
@@ -547,6 +806,9 @@ async def test_create_passes_new_signature_keywords_even_when_unused(
             defaultAction="deny",
             egress=[NetworkRule(action="allow", target="pypi.org")],
         ),
+        lifecycle=SandboxLifecycle(
+            preStart=LifecycleHook(command=["/opt/hooks/restore.sh"])
+        ),
         skip_health_check=True,
     )
 
@@ -578,6 +840,7 @@ async def test_create_restore_from_snapshot_passes_snapshot_id(
             snapshot_id=None,
             credential_proxy=None,
             resource_requests=None,
+            lifecycle=None,
         ):
             self.create_calls.append((spec, entrypoint))
             assert isinstance(env, dict)
@@ -656,6 +919,7 @@ async def test_create_restore_from_snapshot_preserves_custom_entrypoint(
             snapshot_id=None,
             credential_proxy=None,
             resource_requests=None,
+            lifecycle=None,
         ):
             assert isinstance(env, dict)
             assert isinstance(metadata, dict)
@@ -711,3 +975,260 @@ async def test_create_restore_from_snapshot_preserves_custom_entrypoint(
         entrypoint=["python", "app.py"],
         skip_health_check=True,
     )
+
+
+@pytest.mark.asyncio
+async def test_create_from_template_passes_only_allowed_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _CreateResponse:
+        id = "sbx-from-template"
+
+    class _SandboxServiceCreateStub:
+        def __init__(self) -> None:
+            self.template_calls: list[dict[str, object]] = []
+            self.endpoint_ports: list[int] = []
+
+        async def create_sandbox_from_template(
+            self,
+            template_id,
+            timeout,
+            metadata=None,
+            network_policy=None,
+            extensions=None,
+        ):
+            self.template_calls.append(
+                {
+                    "template_id": template_id,
+                    "timeout": timeout,
+                    "metadata": metadata,
+                    "network_policy": network_policy,
+                    "extensions": extensions,
+                }
+            )
+            return _CreateResponse()
+
+        async def get_sandbox_endpoint(
+            self, _sandbox_id, port: int, _use_server_proxy: bool = False
+        ):
+            self.endpoint_ports.append(port)
+            return SandboxEndpoint(endpoint=f"sbx.internal:{port}")
+
+        async def kill_sandbox(self, _sandbox_id: str) -> None:
+            return None
+
+    class _FactoryStub:
+        def __init__(self, _connection_config: ConnectionConfig) -> None:
+            self.service = _SandboxServiceCreateStub()
+
+        def create_sandbox_service(self):
+            return self.service
+
+        def create_filesystem_service(self, _endpoint):
+            return _Noop()
+
+        def create_command_service(self, _endpoint):
+            return _Noop()
+
+        def create_health_service(self, _endpoint):
+            return _Noop()
+
+        def create_metrics_service(self, _endpoint):
+            return _Noop()
+
+        def create_egress_service(self, _endpoint):
+            return _EgressServiceStub()
+
+        def create_network_policy_service(self, _sandbox_id):
+            return _Noop()
+
+        def create_diagnostics_service(self):
+            return _DiagnosticsServiceStub()
+
+        def create_isolated_session_service(self, endpoint: SandboxEndpoint):
+            return _Noop()
+
+    factory = _FactoryStub(ConnectionConfig())
+    monkeypatch.setattr("opensandbox.sandbox.AdapterFactory", lambda _c: factory)
+
+    sandbox = await Sandbox.create_from_template(
+        "tpl_1",
+        timeout=timedelta(minutes=5),
+        metadata={"team": "platform"},
+        skip_health_check=True,
+    )
+
+    assert sandbox.id == "sbx-from-template"
+    assert sandbox.origin == SandboxOrigin.TEMPLATE
+    # Template sandboxes must not resolve the egress sidecar endpoint.
+    assert factory.service.endpoint_ports == [DEFAULT_EXECD_PORT]
+    assert len(factory.service.template_calls) == 1
+    call = factory.service.template_calls[0]
+    assert call["template_id"] == "tpl_1"
+    assert call["timeout"] == timedelta(minutes=5)
+    assert call["metadata"] == {"team": "platform"}
+    assert call["network_policy"] is None
+    assert call["extensions"] is None
+
+
+@pytest.mark.asyncio
+async def test_create_from_template_rejects_blank_template_id() -> None:
+    with pytest.raises(InvalidArgumentException):
+        await Sandbox.create_from_template(
+            "  ", timeout=timedelta(minutes=5)
+        )
+
+
+@pytest.mark.asyncio
+async def test_credential_vault_raises_for_template_sandbox() -> None:
+    sandbox = await _make_template_sandbox()
+    with pytest.raises(SandboxException, match="Credential Vault"):
+        _ = sandbox.credential_vault
+
+
+@pytest.mark.asyncio
+async def test_connect_from_template_skips_egress_sidecar(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _SandboxServiceConnectStub:
+        def __init__(self) -> None:
+            self.endpoint_ports: list[int] = []
+
+        async def get_sandbox_endpoint(
+            self, _sandbox_id, port: int, _use_server_proxy: bool = False
+        ):
+            self.endpoint_ports.append(port)
+            return SandboxEndpoint(
+                endpoint=f"sbx.internal:{port}", origin=SandboxOrigin.TEMPLATE
+            )
+
+    class _FactoryStub:
+        def __init__(self, _connection_config: ConnectionConfig) -> None:
+            self.service = _SandboxServiceConnectStub()
+            self.network_policy_calls: list[str] = []
+
+        def create_sandbox_service(self):
+            return self.service
+
+        def create_filesystem_service(self, _endpoint):
+            return _Noop()
+
+        def create_command_service(self, _endpoint):
+            return _Noop()
+
+        def create_health_service(self, _endpoint):
+            return _Noop()
+
+        def create_metrics_service(self, _endpoint):
+            return _Noop()
+
+        def create_egress_service(self, _endpoint):
+            raise AssertionError("sidecar egress must not be constructed")
+
+        def create_network_policy_service(self, sandbox_id: str):
+            self.network_policy_calls.append(sandbox_id)
+            return _Noop()
+
+        def create_diagnostics_service(self):
+            return _DiagnosticsServiceStub()
+
+        def create_isolated_session_service(self, endpoint: SandboxEndpoint):
+            return _Noop()
+
+    factory = _FactoryStub(ConnectionConfig())
+    monkeypatch.setattr("opensandbox.sandbox.AdapterFactory", lambda _c: factory)
+
+    sandbox = await Sandbox.connect("sbx-1", skip_health_check=True)
+
+    assert sandbox.origin == SandboxOrigin.TEMPLATE
+    assert factory.service.endpoint_ports == [DEFAULT_EXECD_PORT]
+    assert factory.network_policy_calls == ["sbx-1"]
+    with pytest.raises(SandboxException, match="Credential Vault"):
+        _ = sandbox.credential_vault
+
+
+async def _make_template_sandbox() -> Sandbox:
+    from opensandbox.config import ConnectionConfig as _Cfg
+
+    return Sandbox(
+        sandbox_id="sbx-tpl",
+        sandbox_service=_SandboxServiceStub(),
+        filesystem_service=_Noop(),
+        command_service=_Noop(),
+        health_service=_Noop(),
+        metrics_service=_Noop(),
+        egress_service=_Noop(),
+        connection_config=_Cfg(),
+        origin=SandboxOrigin.TEMPLATE,
+    )
+
+
+@pytest.mark.asyncio
+async def test_create_snapshot_restore_reports_template_origin_via_server_header(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An fsb snapshot restore boots a template-backed microVM even though
+    the create used a snapshotId: the server reports origin=template on the
+    endpoint response and the egress service must be the lifecycle
+    control-plane adapter, not the sidecar."""
+
+    class _CreateResponse:
+        id = "fsb-restored"
+
+    class _SandboxServiceCreateStub:
+        async def create_sandbox(self, **kwargs):
+            assert kwargs["snapshot_id"] == "snap-1"
+            return _CreateResponse()
+
+        async def get_sandbox_endpoint(
+            self, _sandbox_id, port: int, _use_server_proxy: bool = False
+        ):
+            return SandboxEndpoint(
+                endpoint=f"sbx.internal:{port}", origin=SandboxOrigin.TEMPLATE
+            )
+
+        async def kill_sandbox(self, _sandbox_id: str) -> None:
+            return None
+
+    class _FactoryStub:
+        def __init__(self, _connection_config: ConnectionConfig) -> None:
+            self.service = _SandboxServiceCreateStub()
+            self.policy_service_ids: list[str] = []
+
+        def create_sandbox_service(self):
+            return self.service
+
+        def create_filesystem_service(self, _endpoint):
+            return _Noop()
+
+        def create_command_service(self, _endpoint):
+            return _Noop()
+
+        def create_health_service(self, _endpoint):
+            return _Noop()
+
+        def create_metrics_service(self, _endpoint):
+            return _Noop()
+
+        def create_egress_service(self, _endpoint):
+            raise AssertionError("sidecar egress must not be constructed")
+
+        def create_network_policy_service(self, sandbox_id: str):
+            self.policy_service_ids.append(sandbox_id)
+            return _Noop()
+
+        def create_diagnostics_service(self):
+            return _DiagnosticsServiceStub()
+
+        def create_isolated_session_service(self, endpoint: SandboxEndpoint):
+            return _Noop()
+
+    factory = _FactoryStub(ConnectionConfig())
+    monkeypatch.setattr("opensandbox.sandbox.AdapterFactory", lambda _c: factory)
+
+    sandbox = await Sandbox.create(
+        snapshot_id="snap-1", skip_health_check=True, connection_config=ConnectionConfig()
+    )
+
+    assert sandbox.origin == SandboxOrigin.TEMPLATE
+    assert factory.policy_service_ids == ["fsb-restored"]

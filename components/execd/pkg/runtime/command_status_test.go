@@ -108,6 +108,60 @@ func TestSeekBackgroundCommandOutput_Completed(t *testing.T) {
 	require.Equal(t, stdoutContent, string(output))
 }
 
+// TestSeekBackgroundCommandOutput_ClampsCursorPastEOF verifies a cursor beyond
+// the current end of the log returns empty output with the real end offset, so
+// later writes are still delivered on the next poll (#1010).
+func TestSeekBackgroundCommandOutput_ClampsCursorPastEOF(t *testing.T) {
+	c := NewController("", "")
+
+	tmpDir := t.TempDir()
+	session := "sess-past-eof"
+	stdoutPath := filepath.Join(tmpDir, session+".stdout")
+	require.NoError(t, os.WriteFile(stdoutPath, []byte("hello"), 0o644))
+
+	c.storeCommandKernel(session, &commandKernel{
+		pid:          789,
+		stdoutPath:   stdoutPath,
+		isBackground: true,
+		startedAt:    time.Now(),
+		running:      true,
+	})
+
+	output, cursor, err := c.SeekBackgroundCommandOutput(session, 10_000_000)
+	require.NoError(t, err)
+	require.Empty(t, output)
+	require.Equal(t, int64(5), cursor, "cursor should be clamped to the current end of the log")
+
+	require.NoError(t, os.WriteFile(stdoutPath, []byte("hello world"), 0o644))
+	output, cursor, err = c.SeekBackgroundCommandOutput(session, cursor)
+	require.NoError(t, err)
+	require.Equal(t, " world", string(output))
+	require.Equal(t, int64(11), cursor)
+}
+
+// TestSeekBackgroundCommandOutput_RejectsNegativeCursor verifies the cursor is
+// validated before seeking (the spec declares minimum: 0), instead of
+// surfacing a platform-specific seek error.
+func TestSeekBackgroundCommandOutput_RejectsNegativeCursor(t *testing.T) {
+	c := NewController("", "")
+
+	tmpDir := t.TempDir()
+	session := "sess-negative"
+	stdoutPath := filepath.Join(tmpDir, session+".stdout")
+	require.NoError(t, os.WriteFile(stdoutPath, []byte("hello"), 0o644))
+
+	c.storeCommandKernel(session, &commandKernel{
+		pid:          790,
+		stdoutPath:   stdoutPath,
+		isBackground: true,
+		startedAt:    time.Now(),
+		running:      true,
+	})
+
+	_, _, err := c.SeekBackgroundCommandOutput(session, -1)
+	require.ErrorContains(t, err, "negative")
+}
+
 func TestSeekBackgroundCommandOutput_WithRunBackgroundCommand(t *testing.T) {
 	c := NewController("", "")
 
@@ -119,7 +173,6 @@ func TestSeekBackgroundCommandOutput_WithRunBackgroundCommand(t *testing.T) {
 		Hooks: ExecuteResultHook{
 			OnExecuteInit:     func(id string) { session = id },
 			OnExecuteComplete: func(executionTime time.Duration) {},
-			// other hooks unused in this test
 		},
 	}
 
@@ -145,7 +198,6 @@ func TestSeekBackgroundCommandOutput_WithRunBackgroundCommand(t *testing.T) {
 	require.Equal(t, expected, string(output))
 	require.GreaterOrEqual(t, cursor, int64(len(expected)), "cursor should advance to end of file")
 
-	// incremental seek from current cursor should return empty data and same-or-higher cursor
 	output2, cursor2, err := c.SeekBackgroundCommandOutput(session, cursor)
 	require.NoError(t, err, "SeekBackgroundCommandOutput (second call) error")
 	require.Empty(t, output2, "expected no new output")

@@ -46,7 +46,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
     """
 
     # Paths that don't require authentication
-    EXEMPT_PATHS = ["/health", "/docs", "/redoc", "/openapi.json"]
+    EXEMPT_PATHS = ["/health", "/version", "/docs", "/redoc", "/openapi.json"]
 
     # Strict pattern for proxy-to-sandbox: /sandboxes/{id}/proxy/{port}/... with numeric port only.
     # Matches the actual route in proxy.py; rejects path traversal (..) and malformed port.
@@ -111,7 +111,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         try:
             tenant = await asyncio.to_thread(self.tenant_provider.lookup, api_key)
         except TenantProviderUnavailable as e:
-            logger.error("Tenant provider unavailable: %s", e)
+            logger.error(f"Tenant provider unavailable: {e}")
             return JSONResponse(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 content={

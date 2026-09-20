@@ -57,9 +57,64 @@ At a high level:
    substitutions.
 6. Secret values are redacted from vault responses and response headers.
 
+When the active-vault check succeeds, requests that do not match any credential
+binding are forwarded unchanged. Credential path-safety checks apply only after
+a binding matches and the request would otherwise receive credentials. The
+active-vault check itself runs before binding selection for every intercepted
+flow, including requests to hosts that would not match a binding.
+
 The active vault used by the MITM process is served over a local Unix domain
 socket inside the sidecar. The sandbox workload cannot fetch this active state
 over the normal server proxy path.
+
+Each new flow conditionally reads that private endpoint with the cached opaque
+snapshot tag in `If-None-Match`. A `304 Not Modified` response reuses the same
+immutable in-process snapshot without rendering or transferring secret values;
+a `200 OK` response carries a fully validated replacement snapshot and a new
+opaque `ETag`. Successful create and patch responses are acknowledged only after
+the store has changed that tag, so the next flow immediately observes the new
+credentials without a cache-TTL delay.
+
+The opaque tag is separate from the public vault revision. Deleting a vault and
+creating it again can reset the public revision to `1`, but the recreated vault
+receives a different tag and cannot reuse plaintext from the deleted snapshot.
+A `404 Not Found` from the private endpoint is the normal "no active vault"
+result: the MITM process clears its cached snapshot and continues without
+credential injection.
+
+::: warning Runtime availability dependency
+The private active-vault socket is a hard availability dependency for all
+traffic intercepted by Credential Proxy, not only traffic that ultimately
+matches a credential binding. A timeout, refused connection, unexpected EOF,
+`5xx` response, malformed snapshot, or invalid `ETag` clears the affected
+plaintext cache and fails the request closed before any upstream forwarding.
+Small requests whose bodies are safely buffered receive a local `503 Service
+Unavailable` response. Requests that are already streaming, may cross the
+streaming threshold, or have an unknown body length are terminated instead,
+because mitmproxy cannot safely synthesize a local response after streaming has
+started. Operators should monitor the sidecar and private socket as part of the
+egress data plane's availability.
+:::
+
+## Persistence Across Pause and Resume
+
+::: warning In-memory state
+Credential Vault entries are process-local memory in the egress sidecar; they
+are not part of the sandbox root filesystem or the `BatchSandbox` Pod template.
+Kubernetes pause deletes the Pod after snapshotting, so the fresh egress
+sidecar created by resume starts with an empty vault. Credential injection does
+not resume until a trusted client creates the credentials and bindings again.
+
+Keep the original vault request or an equivalent secret-manager reference in a
+trusted control plane outside the sandbox. After the sandbox returns to
+`Running`, call the Credential Vault create API again before allowing work that
+depends on those credentials. Do not persist real credential values in sandbox
+metadata, environment variables, snapshots, or logs.
+
+Docker pause/unpause retains the existing container processes, but any egress
+sidecar replacement or restart also creates a new in-memory vault and requires
+the same re-injection procedure.
+:::
 
 ## Service Mesh Compatibility
 
@@ -247,6 +302,12 @@ content-type: application/json
 | --- | --- | --- |
 | `OPENSANDBOX_EGRESS_CREDENTIAL_VAULT_REQUIRE_TLS` | off | When enabled (`true`/`1`/`on`), credential vault write operations (create, patch, delete) require TLS, loopback transport, or `X-Forwarded-Proto: https` from a configured trusted proxy. When disabled (default), any authenticated request is accepted regardless of transport. Enable this in deployments where the egress sidecar is directly reachable from untrusted networks without a TLS-terminating reverse proxy. |
 | `OPENSANDBOX_EGRESS_CREDENTIAL_VAULT_TRUSTED_PROXY_CIDRS` | empty | Comma-separated IP addresses or CIDRs allowed to assert `X-Forwarded-Proto: https`. Forwarded transport headers from all other peers are ignored. Configure this when TLS terminates at a reverse proxy before the egress sidecar. |
+| `OPENSANDBOX_EGRESS_CREDENTIAL_VAULT_REQUIRE_SCOPED_MATCH` | off | When enabled, every credential binding must explicitly provide non-empty `match.methods` and `match.paths`, and paths cannot contain the host-wide `/*` pattern. Vault create and patch requests that omit either field are rejected instead of receiving compatibility defaults. Enable this for control planes that translate higher-level API tool definitions into Credential Vault bindings. |
+
+The scoped-match setting is a fail-closed integration guard. It does not infer
+methods or paths from another platform's API tool definition. The caller that
+creates the vault must still copy the intended methods and paths into each
+binding and verify the sanitized binding readback.
 
 
 ## SDK Quick Reference
@@ -428,6 +489,12 @@ curl -fsS https://api.example.com/v1/projects/123/variables
 - Scope bindings by path whenever possible, for example `/v1/*`.
 - Avoid overlapping bindings at the same precedence; ambiguous matches are
   rejected.
+- Rejected requests (ambiguous paths, encoded separators crossing a binding
+  boundary) return `403` when the request body is small and fully known.
+  Requests with bodies above the mitmproxy streaming threshold (~1 MiB) or
+  with unknown length (chunked) cannot be answered with a `403` while the
+  body is being streamed, so the sidecar drops the connection instead —
+  either way the request is never forwarded upstream.
 - Do not put real secrets in sandbox `env`, command arguments, files, or
   metadata.
 - Keep fake environment variables when a CLI refuses to start without a key; the

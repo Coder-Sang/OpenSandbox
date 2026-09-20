@@ -139,11 +139,15 @@ def build_async_redirect_event_hooks(
 def build_redirect_client_options(
     config: _SyncRedirectConfig,
     base_url: str,
+    *,
+    additional_request_hooks: Sequence[SyncEventHook] = (),
 ) -> SyncRedirectClientOptions:
     """Build redirect options for a synchronous adapter client."""
+    event_hooks = build_redirect_event_hooks(base_url, config.event_hooks)
+    event_hooks.setdefault("request", [])[0:0] = additional_request_hooks
     return {
         "follow_redirects": config.follow_redirects,
-        "event_hooks": build_redirect_event_hooks(base_url, config.event_hooks),
+        "event_hooks": event_hooks,
     }
 
 

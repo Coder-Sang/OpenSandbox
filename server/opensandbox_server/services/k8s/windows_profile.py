@@ -19,6 +19,7 @@ import re
 from typing import Any, Dict, List, Optional
 
 from opensandbox_server.api.schema import PlatformSpec
+from opensandbox_server.services.k8s.egress_helper import prep_execd_init_for_egress
 from opensandbox_server.services.k8s.provider_common import DEFAULT_ENTRYPOINT
 from opensandbox_server.services.windows_common import (
     inject_windows_resource_limits_env,
@@ -31,7 +32,6 @@ WINDOWS_KVM_VOLUME_NAME = "opensandbox-win-kvm"
 WINDOWS_TUN_VOLUME_NAME = "opensandbox-win-tun"
 WINDOWS_STORAGE_VOLUME_NAME = "opensandbox-win-storage"
 WINDOWS_PROFILE_DEFAULT_USER_PORTS = ["44772", "8080", "3389/tcp", "3389/udp", "8006/tcp"]
-# Extra memory overhead (in Gi) reserved for QEMU process on top of guest RAM.
 WINDOWS_QEMU_MEMORY_OVERHEAD_GI = 2
 _SIZE_PATTERN = re.compile(r"^\s*(\d+)\s*([a-zA-Z]*)\s*$")
 
@@ -87,8 +87,9 @@ def apply_windows_profile_overrides(
         "chmod 0644 /oem/install.bat /oem/execd.exe"
     )
     if disable_ipv6_for_egress:
-        init_container["args"] = [f"set -e; echo 1 > /proc/sys/net/ipv6/conf/all/disable_ipv6 && {init_script}"]
-        init_container["securityContext"] = {"privileged": True}
+        init_script, security_context = prep_execd_init_for_egress(init_script)
+        init_container["args"] = [init_script]
+        init_container["securityContext"] = security_context
     else:
         init_container["args"] = [init_script]
         init_container.pop("securityContext", None)
@@ -109,7 +110,6 @@ def apply_windows_profile_overrides(
         main_container.pop("command", None)
     main_container.pop("args", None)
     main_container["env"] = windows_env if windows_env else None
-    # Set pod resources from resource_limits for proper K8s scheduling.
     # Memory includes overhead for the QEMU process itself.
     if resource_limits:
         limits: Dict[str, str] = {}

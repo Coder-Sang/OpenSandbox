@@ -212,7 +212,6 @@ func bwrapNamespaceSegment(opts WrapOptions, useUserns bool) []string {
 	return argv
 }
 
-// validateWrapOptions checks for invalid or conflicting options.
 func validateWrapOptions(opts WrapOptions) error {
 	if opts.Workspace.Path == "" {
 		return errors.New("isolation: workspace.path is required")
@@ -243,7 +242,6 @@ func validateWrapOptions(opts WrapOptions) error {
 	return nil
 }
 
-// bwrapTmpSegment returns the /tmp mount args for the given profile.
 func bwrapTmpSegment(p Profile) []string {
 	switch p {
 	case ProfileStrict:
@@ -254,7 +252,6 @@ func bwrapTmpSegment(p Profile) []string {
 	}
 }
 
-// bwrapWorkspaceSegment returns mount args for the workspace.
 func bwrapWorkspaceSegment(opts WrapOptions) ([]string, error) {
 	ws := opts.Workspace
 
@@ -282,16 +279,6 @@ func bwrapWorkspaceSegment(opts WrapOptions) ([]string, error) {
 	}
 }
 
-// execdConfigEnvBlacklist enumerates execd's own configuration env vars.
-// They are always stripped so execd's credentials never leak into the sandbox.
-var execdConfigEnvBlacklist = []string{
-	"EXECD_ACCESS_TOKEN",
-	"JUPYTER_HOST",
-	"JUPYTER_TOKEN",
-	"EXECD_ISOLATION_CONFIG",
-	"EXECD_ENVS",
-}
-
 func unsetExecdConfigEnv() []string {
 	argv := make([]string, 0, 2*len(execdConfigEnvBlacklist))
 	for _, key := range execdConfigEnvBlacklist {
@@ -300,7 +287,6 @@ func unsetExecdConfigEnv() []string {
 	return argv
 }
 
-// unsetBlacklistedEnv returns --unsetenv args for all env vars matching strictEnvBlacklist.
 func unsetBlacklistedEnv() []string {
 	var argv []string
 	for _, pattern := range strictEnvBlacklist {
@@ -386,9 +372,7 @@ func matchEnvPattern(name, pattern string) bool {
 	return name == pattern
 }
 
-// Wrap rewrites cmd to execute under bwrap.
 func wrapWithArgv(cmd *exec.Cmd, bwrapPath string, argv []string) {
-	// Prepend bwrap argv before the original command.
 	// argv already contains the bwrap separator and any lifecycle gate or
 	// identity-switch prefix. The original cmd.Args[0] follows that prefix.
 	userArgs := cmd.Args

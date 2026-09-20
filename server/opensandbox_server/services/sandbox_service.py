@@ -35,6 +35,7 @@ from opensandbox_server.api.schema import (
     RenewSandboxExpirationResponse,
     Sandbox,
 )
+from opensandbox_server.services.diagnostics import DiagnosticResult
 from opensandbox_server.services.validators import ensure_valid_port
 
 
@@ -48,6 +49,9 @@ class SandboxService(ABC):
 
     def set_tenant_provider(self, provider: object) -> None:
         """Inject tenant provider (no-op for non-K8s implementations)."""
+
+    def close(self) -> None:
+        """Release service-owned background readers and connections."""
 
     @staticmethod
     def generate_sandbox_id() -> str:
@@ -259,6 +263,40 @@ class SandboxService(ABC):
     # ------------------------------------------------------------------
 
     @abstractmethod
+    def get_sandbox_log_diagnostics(
+        self,
+        sandbox_id: str,
+        scope: str,
+    ) -> DiagnosticResult:
+        """Collect stable log diagnostics using runtime-specific policy.
+
+        Args:
+            sandbox_id: Unique sandbox identifier.
+            scope: Diagnostic scope requested by the caller.
+
+        Returns:
+            Runtime-provided stable diagnostic result.
+        """
+        pass
+
+    @abstractmethod
+    def get_sandbox_event_diagnostics(
+        self,
+        sandbox_id: str,
+        scope: str,
+    ) -> DiagnosticResult:
+        """Collect stable event diagnostics using runtime-specific policy.
+
+        Args:
+            sandbox_id: Unique sandbox identifier.
+            scope: Diagnostic scope requested by the caller.
+
+        Returns:
+            Runtime-provided stable diagnostic result.
+        """
+        pass
+
+    @abstractmethod
     def get_sandbox_logs(
         self,
         sandbox_id: str,
@@ -310,7 +348,8 @@ class SandboxService(ABC):
 
     @abstractmethod
     def get_endpoint(self, sandbox_id: str, port: int, resolve_internal: bool = False,
-                     expires: Optional[int] = None) -> Endpoint:
+                     expires: Optional[int] = None,
+                     use_proxy_host: bool = False) -> Endpoint:
         """
         Get sandbox access endpoint.
 
@@ -321,6 +360,10 @@ class SandboxService(ABC):
             expires: Unix epoch seconds for a signed route token. When provided, the
                 endpoint is wrapped in a cryptographically signed route per OSEP-0011.
                 Requires ingress gateway mode with secure_access keys configured.
+            use_proxy_host: Runtime-specific hint. Docker consumes it to build
+                host-mapped endpoints from the server-local proxy host when the
+                server-side proxy targets the host-mapped port. Other runtimes
+                currently ignore it.
 
         Returns:
             Endpoint: Public endpoint URL

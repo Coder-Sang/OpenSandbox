@@ -17,12 +17,10 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 
-from opensandbox._pool_reconciler import ReconcileState
 from opensandbox.pool_types import (
     AsyncPoolConfig,
     AsyncPoolStateStore,
@@ -38,33 +36,36 @@ async def run_async_reconcile_tick(
     *,
     config: AsyncPoolConfig,
     state_store: AsyncPoolStateStore,
-    create_one: Callable[[], Awaitable[str | None]],
     on_discard_sandbox: Callable[[str], Awaitable[None]],
-    reconcile_state: ReconcileState,
-) -> None:
+    warming_count: int,
+    submit_warmups: Callable[[int], None],
+    on_primary_acquired: Callable[[], None] = lambda: None,
+) -> bool:
     pool_name = config.pool_name
     owner_id = str(config.owner_id)
     ttl = config.primary_lock_ttl
 
     if not await state_store.try_acquire_primary_lock(pool_name, owner_id, ttl):
         logger.debug(f"Async reconcile skip (not primary): pool_name={pool_name}")
-        return
+        return False
+    on_primary_acquired()
     await _run_primary_replenish_once(
         config=config,
         state_store=state_store,
-        create_one=create_one,
         on_discard_sandbox=on_discard_sandbox,
-        reconcile_state=reconcile_state,
+        warming_count=warming_count,
+        submit_warmups=submit_warmups,
     )
+    return True
 
 
 async def _run_primary_replenish_once(
     *,
     config: AsyncPoolConfig,
     state_store: AsyncPoolStateStore,
-    create_one: Callable[[], Awaitable[str | None]],
     on_discard_sandbox: Callable[[str], Awaitable[None]],
-    reconcile_state: ReconcileState,
+    warming_count: int,
+    submit_warmups: Callable[[int], None],
 ) -> None:
     pool_name = config.pool_name
     owner_id = str(config.owner_id)
@@ -83,62 +84,16 @@ async def _run_primary_replenish_once(
         await _shrink_excess_idle(config, state_store, on_discard_sandbox, to_remove)
         return
 
-    deficit = max(0, config.max_idle - counters.idle_count)
-    to_create = min(deficit, int(config.warmup_concurrency or 1))
-    if to_create == 0 or reconcile_state.is_backoff_active(now):
+    deficit = max(0, config.max_idle - counters.idle_count - warming_count)
+    to_create = min(deficit, config.warmup_create_qps)
+    if to_create == 0:
         await state_store.renew_primary_lock(pool_name, owner_id, ttl)
         return
 
     if not await state_store.renew_primary_lock(pool_name, owner_id, ttl):
         return
 
-    results = await asyncio.gather(
-        *(create_one() for _ in range(to_create)),
-        return_exceptions=True,
-    )
-    created_ids: list[str] = []
-    failure_count = 0
-    last_error: str | None = None
-    for result in results:
-        if isinstance(result, BaseException):
-            failure_count += 1
-            last_error = str(result)
-        elif result is not None:
-            created_ids.append(result)
-        else:
-            failure_count += 1
-            last_error = None
-    reconcile_state.record_failures(failure_count, last_error)
-
-    created = 0
-    for index, sandbox_id in enumerate(created_ids):
-        if not await state_store.renew_primary_lock(pool_name, owner_id, ttl):
-            for orphaned_id in created_ids[index:]:
-                await _discard(on_discard_sandbox, orphaned_id)
-            logger.warning(
-                f"Async reconcile lost primary lock before put_idle; dropped {len(created_ids) - index} newly created sandbox(es): pool_name={pool_name}"
-            )
-            return
-        try:
-            await state_store.put_idle(pool_name, sandbox_id)
-            created += 1
-            reconcile_state.record_success()
-        except Exception as exc:
-            reconcile_state.record_failure(str(exc))
-            for orphaned_id in created_ids[index:]:
-                try:
-                    await state_store.remove_idle(pool_name, orphaned_id)
-                except Exception:
-                    pass
-                await _discard(on_discard_sandbox, orphaned_id)
-            logger.warning(
-                f"Async reconcile put_idle failed; dropped {len(created_ids) - index} newly created sandbox(es): pool_name={pool_name} error={exc}"
-            )
-            return
-    if created > 0:
-        logger.debug(
-            f"Async reconcile created {created} sandboxes: pool_name={pool_name}"
-        )
+    submit_warmups(to_create)
 
 
 async def _shrink_excess_idle(

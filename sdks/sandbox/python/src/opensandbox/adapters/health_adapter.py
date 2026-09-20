@@ -26,6 +26,7 @@ import httpx
 
 from opensandbox._httpx import build_async_redirect_client_options
 from opensandbox.config import ConnectionConfig
+from opensandbox.internal.readiness import is_readiness_auth_error
 from opensandbox.models.sandboxes import SandboxEndpoint
 from opensandbox.services.health import Health
 
@@ -62,13 +63,7 @@ class HealthAdapter(Health):
         timeout_seconds = self.connection_config.request_timeout.total_seconds()
         timeout = httpx.Timeout(timeout_seconds)
 
-        headers = {
-            "User-Agent": self.connection_config.user_agent,
-            **self.connection_config.headers,
-            **self.execd_endpoint.headers,
-        }
-
-        # Execd API does not require authentication
+        headers = self.execd_endpoint.build_request_headers(self.connection_config)
         self._client = Client(
             base_url=base_url,
             timeout=timeout,
@@ -85,7 +80,7 @@ class HealthAdapter(Health):
         self._client.set_async_httpx_client(self._httpx_client)
 
     async def _get_client(self):
-        """Return the client for execd API (no auth required)."""
+        """Return the client for execd API."""
         return self._client
 
     async def ping(self, sandbox_id: str) -> bool:
@@ -110,5 +105,7 @@ class HealthAdapter(Health):
             return True
 
         except Exception as e:
+            if is_readiness_auth_error(e):
+                raise
             logger.debug(f"Health check failed for sandbox {sandbox_id}: {e}")
             return False

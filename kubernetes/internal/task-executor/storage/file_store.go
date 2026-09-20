@@ -111,7 +111,6 @@ func (s *fileStore) Update(ctx context.Context, task *types.Task) error {
 		return fmt.Errorf("invalid task name: %w", err)
 	}
 
-	// Check if task exists
 	if _, err := os.Stat(taskDir); os.IsNotExist(err) {
 		return fmt.Errorf("task %s does not exist", task.Name)
 	}
@@ -138,7 +137,6 @@ func (s *fileStore) Get(ctx context.Context, name string) (*types.Task, error) {
 		return nil, fmt.Errorf("invalid task name: %w", err)
 	}
 
-	// Check if task exists
 	if _, err := os.Stat(taskDir); os.IsNotExist(err) {
 		return nil, fmt.Errorf("task %s not found", name)
 	}
@@ -195,7 +193,6 @@ func (s *fileStore) Delete(ctx context.Context, name string) error {
 		return fmt.Errorf("invalid task name: %w", err)
 	}
 
-	// Check if task exists
 	if _, err := os.Stat(taskDir); os.IsNotExist(err) {
 		klog.InfoS("task already deleted", "name", name)
 		return nil
@@ -227,18 +224,18 @@ func (s *fileStore) writeTaskFile(taskDir string, task *types.Task) error {
 		return fmt.Errorf("failed to write temp file: %w", err)
 	}
 
-	f, err := os.Open(tmpFile)
-	if err != nil {
-		os.Remove(tmpFile)
-		return fmt.Errorf("failed to open temp file for sync: %w", err)
-	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		os.Remove(tmpFile)
-		return fmt.Errorf("failed to sync temp file: %w", err)
-	}
-	f.Close()
-
+	// Publish atomically: rename(2) is atomic, so a reader never observes a
+	// partially written task file. That is the invariant callers rely on.
+	//
+	// Deliberately no fsync before the rename. fsync would only add durability
+	// across a machine crash (power loss / kernel panic), and this runs on the
+	// critical path of taskManager.Create, ahead of executor.Start -- on a
+	// congested device it was measured blocking sandbox process start by more
+	// than 6s, and it also ran every ReconcileInterval under the manager-wide
+	// lock. That durability was not actually being obtained either: the parent
+	// directory was never synced, so the rename itself was never durable. Losing
+	// this file is recoverable -- the controller re-issues setTask on its next
+	// reconcile. See #1613.
 	if err := os.Rename(tmpFile, taskFile); err != nil {
 		os.Remove(tmpFile)
 		return fmt.Errorf("failed to rename temp file: %w", err)

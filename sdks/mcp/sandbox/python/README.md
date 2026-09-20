@@ -42,13 +42,21 @@ Config fields:
 - `protocol`: `http` or `https` for API requests.
 - `request_timeout_seconds`: HTTP request timeout in seconds.
 - `transport`: `stdio` by default, or `streamable-http`.
+- `use-server-proxy`: when present, forces the SDK client to use server proxy mode.
 
 ### Streamable HTTP
 
 ```bash
 opensandbox-mcp \
-  --transport streamable-http
+  --transport streamable-http \
+  --host 0.0.0.0 \
+  --port 8000
 ```
+
+The HTTP transport defaults to `127.0.0.1:8000`. Set `--host 0.0.0.0` when
+the MCP server must be reached from another container, and use `--port` to
+select a different listening port. Keep the default loopback host unless the
+container network or an upstream gateway protects the exposed endpoint.
 
 ## 3. Integrations
 

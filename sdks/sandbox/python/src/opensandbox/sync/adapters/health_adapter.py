@@ -24,6 +24,10 @@ import httpx
 from opensandbox._httpx import build_redirect_client_options
 from opensandbox.adapters.converter.response_handler import handle_api_error
 from opensandbox.config.connection_sync import ConnectionConfigSync
+from opensandbox.internal.readiness import (
+    constrain_readiness_request,
+    is_readiness_auth_error,
+)
 from opensandbox.models.sandboxes import SandboxEndpoint
 from opensandbox.sync.services.health import HealthSync
 
@@ -40,11 +44,7 @@ class HealthAdapterSync(HealthSync):
 
         base_url = f"{self.connection_config.protocol}://{self.execd_endpoint.endpoint}"
         timeout = httpx.Timeout(self.connection_config.request_timeout.total_seconds())
-        headers = {
-            "User-Agent": self.connection_config.user_agent,
-            **self.connection_config.headers,
-            **self.execd_endpoint.headers,
-        }
+        headers = self.execd_endpoint.build_request_headers(self.connection_config)
 
         self._client = Client(
             base_url=base_url,
@@ -56,7 +56,11 @@ class HealthAdapterSync(HealthSync):
             headers=headers,
             timeout=timeout,
             transport=self.connection_config.transport,
-            **build_redirect_client_options(self.connection_config, base_url),
+            **build_redirect_client_options(
+                self.connection_config,
+                base_url,
+                additional_request_hooks=(constrain_readiness_request,),
+            ),
         )
         self._client.set_httpx_client(self._httpx_client)
 
@@ -68,5 +72,7 @@ class HealthAdapterSync(HealthSync):
             handle_api_error(response_obj, "Ping")
             return True
         except Exception as e:
+            if is_readiness_auth_error(e):
+                raise
             logger.debug(f"Health check failed for sandbox {sandbox_id}: {e}")
             return False

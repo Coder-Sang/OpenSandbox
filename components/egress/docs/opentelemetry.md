@@ -11,11 +11,38 @@ This page lists the OpenTelemetry metrics currently implemented in egress.
 | Metric | Type | Unit | Meaning |
 |---|---|---|---|
 | `egress.dns.query.duration` | Histogram | `s` | Upstream DNS forward latency (recorded for allowed queries). |
+| `egress.dns.query.failed_total` | Counter | - | Queries the proxy could not resolve, by `reason`. |
+| `egress.dns.reply.failed_total` | Counter | - | Reply writes that failed after a decision, by `stage`. A nonzero count means a query was handled but its answer never reached the client. |
 | `egress.policy.denied_total` | Counter | - | Number of DNS queries denied by policy. |
-| `egress.nftables.rules.count` | Observable Gauge | `{element}` | Approximate policy size after last successful static apply. |
+| `egress.nftables.rules.count` | Observable Gauge | `{element}` | Approximate policy size after last successful static apply (fast-sandbox profile: summed across every installed subject's policy, 0 while deny-first). |
 | `egress.nftables.updates.count` | Counter | - | Number of successful nftables updates (static apply + dynamic IP add). |
-| `egress.system.memory.usage_bytes` | Observable Gauge | `By` | System memory used bytes (Linux: gopsutil; non-Linux build: `0`). |
-| `egress.system.cpu.utilization` | Observable Gauge | `1` | CPU busy ratio in `[0,1]` (Linux: gopsutil; non-Linux build: `0`). |
+| `egress.nftables.updates.failed_total` | Counter | - | nftables updates that failed, by `operation`. |
+| `egress.system.memory.usage_bytes` | Observable Gauge | `By` | **Node** memory used bytes (Linux: gopsutil; non-Linux build: `0`). |
+| `egress.system.cpu.utilization` | Observable Gauge | `1` | **Node** CPU busy ratio in `[0,1]` (Linux: gopsutil; non-Linux build: `0`). |
+| `egress.process.memory.usage_bytes` | Observable Gauge | `By` | Memory charged to the sidecar's own cgroup. Only present when cgroupfs is readable. |
+| `egress.process.cpu.time` | Observable Counter | `s` | CPU seconds consumed by the sidecar's own cgroup. Only present when cgroupfs is readable. |
+
+### `system` vs `process`
+
+They measure different things, and the difference matters because this sidecar runs **per
+sandbox**:
+
+- `egress.system.*` comes from gopsutil, i.e. `/proc/meminfo` and `/proc/stat`, which inside
+  a container describe the **node**. Every sandbox on a node therefore publishes the same
+  figure under its own `sandbox_id`. Do not chart these "by sandbox": the series look
+  per-sandbox but are N copies of one node number. Prefer kubelet/cAdvisor or a node
+  exporter for node-level data.
+- `egress.process.*` is read from the sidecar's own cgroup (v2 `memory.current` and
+  `cpu.stat`, falling back to v1 `memory.usage_in_bytes` and `cpuacct.usage`), so it really
+  is per sandbox.
+
+`egress.process.cpu.time` is a **cumulative counter of consumed seconds**, not a sampled
+ratio: use `rate()` on it. A ratio depends on the exporter's sampling interval, so it cannot
+be re-aggregated or compared across differently configured deployments.
+
+Both `process` instruments are **registered only if their cgroup files can be read**. A
+runtime that does not expose cgroupfs — a sandbox pod under `secure_runtime`, for instance —
+gets no series at all, rather than a flat zero that reads like an idle sidecar.
 
 `egress.dns.query.duration` declares its bucket boundaries explicitly:
 
@@ -42,11 +69,63 @@ per-exchange cap — has bigger problems than a percentile.
 Note both successful and failed lookups feed this histogram, so its tail mixes slow
 resolutions with exhausted retry chains.
 
+## TLS shadow implementation
+
+The system addon emits fixed outcomes through the existing child stdout pipe;
+the Go relay consumes them via `RecordTLSShadow` as bounded-label OTLP samples.
+Unknown outcomes are discarded. The operator contract is maintained in
+[Egress: TLS shadow observations](../../../docs/components/egress.md#experimental-tls-shadow-observations).
+
+## Failure Signals
+
+`egress.dns.query.failed_total` and `egress.policy.denied_total` answer different
+questions, and confusing them inverts the diagnosis:
+
+- **denied** — the policy did its job. The workload asked for something it is not allowed
+  to reach. Expected traffic in a working system.
+- **failed** — the sidecar could not do its job. The workload asked for something allowed
+  and got `SERVFAIL`. Never expected.
+
+`reason` comes from a closed set, so the counter's cardinality is fixed and neither the
+queried name nor the error text is ever attached:
+
+| `reason` | Meaning |
+|---|---|
+| `no_upstreams` | No resolvers configured or discovered. |
+| `upstream_error` | Every resolver failed to answer (network error, timeout). |
+| `empty_response` | A resolver returned a nil message. |
+| `rcode` | The last resolver answered with a failover-worthy rcode, e.g. `SERVFAIL`. |
+
+`egress.nftables.updates.failed_total` covers the other silent failure. Its `operation`
+attribute is one of `static_apply`, `dynamic_add`, `remove`, or — in the fast-sandbox profile
+(OSEP-0022) — `deny_first`, `reset`; `dynamic_add` is the one to
+alert on, because a failed add means the kernel never learned about IPs the policy allows,
+so the chain drops traffic that should pass — which looks exactly like a policy denial from
+inside the sandbox while `egress.policy.denied_total` stays flat.
+
+`egress.dns.reply.failed_total` covers the last silent failure class: a query that was
+**handled** (decided, maybe forwarded and answered upstream) whose reply write then failed.
+Until the write error was surfaced, such windows were indistinguishable from "query never
+handled" — the fast-sandbox-profile case where guest-originated DNS is answered in the proxy but
+the reply never reaches the sandbox (issue #1704). Its `stage` attribute is one of
+`malformed`, `unknown_source`, `deny`, `upstream_error`, `answer`, and every failure also
+emits a `[dns] reply write failed (stage=… remote=… question=…)` warning with the remote
+address and query name, so the counter pinpoints the condition and the log line the flow.
+Alert on any nonzero value: like `dynamic_add`, an `answer`-stage failure means traffic the
+policy allows is not reaching the client.
+
+A `static_apply` failure happens during startup, where the sidecar logs and exits. Metrics
+leave through a periodic reader and `os.Exit` skips the deferred shutdown, so that path
+flushes telemetry explicitly before terminating — otherwise the one sample explaining why the
+sidecar died would never be exported.
+
 ## Shared Attributes
 
 All egress metrics may include shared attributes:
 
-- `sandbox_id` from `OPENSANDBOX_EGRESS_SANDBOX_ID` (when set)
+- `sandbox_id` from `OPENSANDBOX_EGRESS_SANDBOX_ID` (when set). Without it the sidecars of
+  different sandboxes export identical attribute sets, so their series collide in the
+  backend — which matters most for the per-sandbox `egress.process.*` gauges.
 - extra key/value attributes from `OPENSANDBOX_EGRESS_METRICS_EXTRA_ATTRS` (when set)
 
 ## OTEL Endpoint Configuration
@@ -58,10 +137,47 @@ Metric export is enabled only when at least one OTLP endpoint is set.
 
 If both are unset, egress keeps metrics local (no OTLP export).
 
+### Automatic Egress Allow Rule
+
+When an OTLP destination is configured — the endpoint env vars below, or the
+exporter fallback node IP (`HOST_IP` / `/etc/hostinfo`) when both are unset —
+egress automatically injects an always-allow egress rule for that host
+(domain or IP, any port), so telemetry export works under the default deny-all
+policy without manually managing allowlist rules. This also covers the egress
+sidecar's own metric export, which shares the sandbox network namespace and
+would otherwise be blocked by its own egress chain.
+
+- The rule follows the standard precedence: `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`
+  wins over `OTEL_EXPORTER_OTLP_ENDPOINT`; the fallback node IP applies only
+  when neither is set. A set-but-invalid endpoint never falls back (the
+  exporter does not either), so no rule is injected in that case.
+- The endpoint must be a URL (`https://host:4318/v1/metrics`) — the
+  `otlpmetrichttp` env-var form. Bare `host:port` or `host` values are not
+  accepted (the exporter parses them as opaque URLs with an empty host); a
+  trailing root dot on FQDNs is trimmed to match DNS policy normalization.
+- The rule lives in the always-allow layer: it survives user `POST`/`PATCH`/`DELETE`
+  policy updates and always-rule file reloads. Operators can still block the target
+  with `deny.always`, which takes precedence.
+- Rules are host-scoped (any port), matching the egress rule model; ports are not
+  enforced per rule.
+
+> **Note**: use a fully-qualified service name or an IP in the endpoint.
+> Single-label names (e.g. `otel-collector`) are subject to resolver
+> search-domain expansion, and the deny-all DNS proxy answers the expanded
+> names (e.g. `otel-collector.<ns>.svc.cluster.local`) with NXDOMAIN without
+> falling back to the bare name, so the auto-generated exact-host allow rule
+> would not be reached.
+
 ### Minimal Example
 
 ```bash
-export OTEL_EXPORTER_OTLP_METRICS_ENDPOINT="http://otel-collector:4318"
+export OTEL_EXPORTER_OTLP_METRICS_ENDPOINT="http://otel-collector.sandbox.svc.cluster.local:4318"
+```
+
+An IP endpoint works as well:
+
+```bash
+export OTEL_EXPORTER_OTLP_METRICS_ENDPOINT="http://10.0.0.5:4318"
 ```
 
 ### Service Name

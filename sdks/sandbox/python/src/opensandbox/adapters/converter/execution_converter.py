@@ -22,11 +22,13 @@ similar to the Kotlin SDK ExecutionConverter.
 This converter is designed to work with openapi-python-client generated models.
 """
 
+from datetime import timedelta
 from typing import Any
 
 from opensandbox.api.execd.models.run_command_request import (
     RunCommandRequest as ApiRunCommandRequest,
 )
+from opensandbox.exceptions import InvalidArgumentException
 from opensandbox.models.execd import RunCommandOpts
 
 
@@ -41,7 +43,7 @@ class ExecutionConverter:
     """
 
     @staticmethod
-    def to_api_run_command_request(command: str, opts: RunCommandOpts) -> ApiRunCommandRequest:
+    def to_api_run_command_request(command: str | list[str], opts: RunCommandOpts) -> ApiRunCommandRequest:
         """Convert domain command + options to API RunCommandRequest."""
         from opensandbox.api.execd.models.run_command_request_envs import (
             RunCommandRequestEnvs,
@@ -59,6 +61,8 @@ class ExecutionConverter:
 
         timeout_milliseconds = UNSET
         if opts.timeout is not None:
+            if opts.timeout < timedelta(0):
+                raise InvalidArgumentException("timeout must be positive")
             timeout_milliseconds = int(opts.timeout.total_seconds() * 1000)
 
         uid = UNSET
@@ -76,8 +80,16 @@ class ExecutionConverter:
                 envs_payload[key] = value
             envs = envs_payload
 
+        if not isinstance(command, (str, list)):
+            raise InvalidArgumentException("command must be shell text or an argv list")
+        if isinstance(command, list) and (
+            not command or not command[0]
+            or any(not isinstance(arg, str) or "\0" in arg for arg in command)
+        ):
+            raise InvalidArgumentException("argv requires a non-empty executable and strings without NUL")
         return ApiRunCommandRequest(
-            command=command,
+            command=command if isinstance(command, str) else UNSET,
+            argv=command if isinstance(command, list) else UNSET,
             background=background,
             cwd=cwd,  # Domain uses 'working_directory', API uses 'cwd'
             timeout=timeout_milliseconds,
@@ -88,7 +100,7 @@ class ExecutionConverter:
         )
 
     @staticmethod
-    def to_api_run_command_json(command: str, opts: RunCommandOpts) -> dict[str, Any]:
+    def to_api_run_command_json(command: str | list[str], opts: RunCommandOpts) -> dict[str, Any]:
         """
         Convert command + options to a plain JSON-serializable dict for httpx requests.
         Centralizes the attrs/pydantic differences behind one callsite.

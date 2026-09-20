@@ -17,6 +17,8 @@
 package com.alibaba.opensandbox.sandbox.infrastructure.adapters.service
 
 import com.alibaba.opensandbox.sandbox.HttpClientProvider
+import com.alibaba.opensandbox.sandbox.api.execd.CommandApi
+import com.alibaba.opensandbox.sandbox.api.execd.infrastructure.ClientException
 import com.alibaba.opensandbox.sandbox.config.ConnectionConfig
 import com.alibaba.opensandbox.sandbox.domain.exceptions.InvalidArgumentException
 import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxApiException
@@ -30,6 +32,7 @@ import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.toComma
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.mockwebserver.MockResponse
@@ -75,6 +78,21 @@ class CommandsAdapterTest {
     fun tearDown() {
         mockWebServer.shutdown()
         httpClientProvider.close()
+    }
+
+    @Test
+    fun `native argv preserves arguments and omits shell command`() {
+        val argv = listOf("tool", "", "a b", "$" + "HOME", "x'y")
+        mockWebServer.enqueue(
+            MockResponse().setResponseCode(200).setBody("""{"type":"execution_complete","execution_time":1}""" + "\n"),
+        )
+        commandsAdapter.run(RunCommandRequest.builder().argv(argv).workingDirectory("$" + "DIR").build())
+        val body = Json.parseToJsonElement(mockWebServer.takeRequest().body.readUtf8()).jsonObject
+        assertTrue("command" !in body)
+        assertEquals(argv, body["argv"]?.jsonArray?.map { it.jsonPrimitive.content })
+        assertThrows<IllegalArgumentException> { RunCommandRequest.builder().command("echo").argv(argv).build() }
+        assertThrows<IllegalArgumentException> { RunCommandRequest.builder().argv(emptyList()).build() }
+        assertEquals("$" + "DIR", body["cwd"]?.jsonPrimitive?.content)
     }
 
     @Test
@@ -127,6 +145,7 @@ class CommandsAdapterTest {
         assertEquals("POST", recordedRequest.method)
         val requestBodyJson = Json.parseToJsonElement(recordedRequest.body.readUtf8()).jsonObject
         assertEquals("echo Hello", requestBodyJson["command"]?.jsonPrimitive?.content)
+        assertTrue("argv" !in requestBodyJson)
         assertEquals(1000, requestBodyJson["uid"]?.jsonPrimitive?.intOrNull)
         assertEquals(1000, requestBodyJson["gid"]?.jsonPrimitive?.intOrNull)
         val envs = requestBodyJson["envs"]?.jsonObject
@@ -319,6 +338,45 @@ class CommandsAdapterTest {
     }
 
     @Test
+    fun `getBackgroundCommandLogs should include response body in client error`() {
+        val responseBody = """{"code":"INVALID_ARGUMENT","message":"cursor must be positive"}"""
+        mockWebServer.enqueue(
+            MockResponse()
+                .setResponseCode(400)
+                .setBody(responseBody),
+        )
+
+        val ex =
+            assertThrows(SandboxApiException::class.java) {
+                commandsAdapter.getBackgroundCommandLogs("exec-1")
+            }
+
+        assertEquals(400, ex.statusCode)
+        assertTrue(ex.message!!.contains(responseBody))
+        assertEquals(responseBody, ex.responseBody)
+    }
+
+    @Test
+    fun `generated client error message should include response body`() {
+        val responseBody = """{"code":"QUOTA_EXCEEDED","message":"sandbox quota exceeded"}"""
+        mockWebServer.enqueue(
+            MockResponse()
+                .setResponseCode(400)
+                .setBody(responseBody),
+        )
+
+        val api =
+            CommandApi(
+                "http://${mockWebServer.hostName}:${mockWebServer.port}",
+                httpClientProvider.httpClient,
+            )
+
+        val ex = assertThrows(ClientException::class.java) { api.getCommandStatus("exec-1") }
+
+        assertTrue(ex.message!!.contains(responseBody))
+    }
+
+    @Test
     fun `createSession should use generated api and return session id`() {
         mockWebServer.enqueue(
             MockResponse()
@@ -381,6 +439,7 @@ data: {"type":"execution_complete","execution_time":100,"timestamp":167253120100
         assertEquals("POST", recordedRequest.method)
         val requestBodyJson = Json.parseToJsonElement(recordedRequest.body.readUtf8()).jsonObject
         assertEquals("echo Hello", requestBodyJson["command"]?.jsonPrimitive?.content)
+        assertTrue("argv" !in requestBodyJson)
         assertEquals("/workspace", requestBodyJson["cwd"]?.jsonPrimitive?.content)
         assertEquals(5000L, requestBodyJson["timeout"]?.jsonPrimitive?.content?.toLong())
     }

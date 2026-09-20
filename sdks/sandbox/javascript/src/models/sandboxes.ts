@@ -426,6 +426,24 @@ export interface SandboxStatus extends Record<string, unknown> {
   message?: string;
 }
 
+/**
+ * Current runtime-confirmed Pool allocation for a sandbox.
+ */
+export interface AllocationSummary extends Record<string, unknown> {
+  /**
+   * Confirmed allocation mode.
+   */
+  mode: "pool";
+  /**
+   * Concrete Pool reference currently allocated to the sandbox.
+   */
+  poolRef: string;
+  /**
+   * Current confirmed allocation state.
+   */
+  state: "allocated";
+}
+
 export interface SandboxInfo extends Record<string, unknown> {
   id: SandboxId;
   image?: ImageSpec;
@@ -436,6 +454,10 @@ export interface SandboxInfo extends Record<string, unknown> {
   extensions?: Record<string, string>;
   status: SandboxStatus;
   /**
+   * Current runtime-confirmed Pool allocation, when available.
+   */
+  allocation?: AllocationSummary;
+  /**
    * Sandbox creation time.
    */
   createdAt: Date;
@@ -443,6 +465,38 @@ export interface SandboxInfo extends Record<string, unknown> {
    * Sandbox expiration time (server-side TTL).
    */
   expiresAt: Date | null;
+}
+
+export interface LifecycleHook extends Record<string, unknown> {
+  /** Command and arguments executed without implicit shell expansion. */
+  command: string[];
+  /** Maximum execution time in seconds, up to 3 hours (10800 seconds). Defaults to 60. */
+  timeoutSeconds?: number;
+}
+
+export interface PeriodicLifecycleHook extends Record<string, unknown> {
+  /** Name unique among periodic hooks in this sandbox. */
+  name: string;
+  /** Five-field cron expression or descriptor such as `@hourly` or `@every 30s`. */
+  schedule: string;
+  /** Command and arguments executed without implicit shell expansion. */
+  command: string[];
+  /** Maximum execution time in seconds, up to 300. Defaults to 60. */
+  timeoutSeconds?: number;
+}
+
+/** Extensible container for sandbox lifecycle hooks. */
+export interface SandboxLifecycle extends Record<string, unknown> {
+  /**
+   * Runs after execd is ready and before the user entrypoint on every container
+   * start. A failed or timed-out hook prevents the user entrypoint from starting.
+   */
+  preStart?: LifecycleHook;
+  /**
+   * Scheduled hooks run while the sandbox is running. Runs of the same named hook
+   * never overlap; a scheduled run is skipped while its previous run is active.
+   */
+  periodic?: PeriodicLifecycleHook[];
 }
 
 export interface CreateSandboxRequest extends Record<string, unknown> {
@@ -462,6 +516,7 @@ export interface CreateSandboxRequest extends Record<string, unknown> {
   resourceRequests?: ResourceLimits;
   env?: Record<string, string>;
   metadata?: Record<string, string>;
+  lifecycle?: SandboxLifecycle;
   /**
    * Optional outbound network policy for the sandbox.
    */
@@ -475,6 +530,30 @@ export interface CreateSandboxRequest extends Record<string, unknown> {
    */
   volumes?: Volume[];
   extensions?: Record<string, unknown>;
+}
+
+export interface CreateSandboxFromTemplateRequest extends Record<string, unknown> {
+  /**
+   * Succeeded fsb template to create the sandbox from.
+   *
+   * Template mode fixes the workload shape on the server: only metadata,
+   * network policy and extensions may accompany the template id, and the
+   * timeout is required.
+   */
+  templateId: string;
+  /**
+   * Sandbox timeout in seconds (server semantics). Required in template mode.
+   */
+  timeout: number;
+  metadata?: Record<string, string>;
+  /**
+   * Optional outbound network policy for the sandbox.
+   */
+  networkPolicy?: NetworkPolicy;
+  /**
+   * Opaque extension parameters passed through to the server as-is.
+   */
+  extensions?: Record<string, string>;
 }
 
 export interface CreateSandboxResponse extends Record<string, unknown> {
@@ -553,6 +632,36 @@ export interface Endpoint extends Record<string, unknown> {
    * (e.g. when the server requires them for routing or auth). Omit or empty if not required.
    */
   headers?: Record<string, string>;
+  /**
+   * Origin of the sandbox taken from the server's `OPEN-SANDBOX-ORIGIN`
+   * response header (see {@link SandboxOrigin}). Omitted when the server
+   * does not send it.
+   */
+  origin?: string;
+}
+
+/**
+ * Origin backing a sandbox.
+ *
+ * The protocol defines a single origin value: `template` (reported by the
+ * server via the `OPEN-SANDBOX-ORIGIN` response header, and set locally when
+ * the sandbox was explicitly created from a template). Anything else -
+ * including sandboxes created from an image or a snapshot - is `unknown`.
+ *
+ * The server may introduce new values in future versions; treat a missing or
+ * unknown value as "not template-backed" and keep using the egress sidecar.
+ */
+export enum SandboxOrigin {
+  /**
+   * Runs on a fsb golden-image template (no sandbox-side egress sidecar;
+   * egress policy goes through the lifecycle control plane).
+   */
+  TEMPLATE = "template",
+  /**
+   * The origin could not be determined (create from an image or snapshot,
+   * or an older server that does not send the header).
+   */
+  UNKNOWN = "unknown",
 }
 
 export interface ListSandboxesParams {

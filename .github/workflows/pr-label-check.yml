@@ -32,7 +32,7 @@ jobs:
               "**/package-lock.json",
               "**/yarn.lock",
               "**/Cargo.lock",
-              "kubernetes/charts/opensandbox/Chart.lock",
+              "manifests/charts/opensandbox/Chart.lock",
               "sdks/sandbox/kotlin/sandbox-api/src/main/kotlin/com/alibaba/opensandbox/sandbox/api/openapitools.json",
 
               // Unit / integration / e2e test sources and fixtures. Kept out
@@ -144,7 +144,6 @@ jobs:
               // SDK — layout: sdks/{sandbox,code-interpreter,mcp}/{go,python,...};
               // Kotlin code-interpreter lives under sdks/sandbox/kotlin/code-interpreter.
               if (dirs.has("sdks")) {
-                s.push("sdks");
                 const langMap = {
                   go: "sdk/go",
                   kotlin: "sdk/java",

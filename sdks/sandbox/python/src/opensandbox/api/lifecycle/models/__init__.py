@@ -1,5 +1,5 @@
 #
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,6 +16,12 @@
 
 """Contains all the data models used in inputs/outputs"""
 
+from .allocation_summary import AllocationSummary
+from .allocation_summary_mode import AllocationSummaryMode
+from .allocation_summary_state import AllocationSummaryState
+from .create_fsb_template_request import CreateFsbTemplateRequest
+from .create_fsb_template_request_format import CreateFsbTemplateRequestFormat
+from .create_fsb_template_request_metadata import CreateFsbTemplateRequestMetadata
 from .create_sandbox_request import CreateSandboxRequest
 from .create_sandbox_request_env import CreateSandboxRequestEnv
 from .create_sandbox_request_extensions import CreateSandboxRequestExtensions
@@ -28,9 +34,17 @@ from .credential_proxy_config import CredentialProxyConfig
 from .endpoint import Endpoint
 from .endpoint_headers import EndpointHeaders
 from .error_response import ErrorResponse
+from .fsb_template import FsbTemplate
+from .fsb_template_format import FsbTemplateFormat
+from .fsb_template_metadata import FsbTemplateMetadata
+from .fsb_template_readiness import FsbTemplateReadiness
+from .fsb_template_status import FsbTemplateStatus
+from .fsb_template_status_phase import FsbTemplateStatusPhase
 from .host import Host
 from .image_spec import ImageSpec
 from .image_spec_auth import ImageSpecAuth
+from .lifecycle_hook import LifecycleHook
+from .list_fsb_templates_response import ListFsbTemplatesResponse
 from .list_sandboxes_response import ListSandboxesResponse
 from .list_snapshots_response import ListSnapshotsResponse
 from .metrics_event import MetricsEvent
@@ -43,15 +57,18 @@ from .ossfs import OSSFS
 from .ossfs_version import OSSFSVersion
 from .pagination_info import PaginationInfo
 from .patch_sandbox_metadata_request import PatchSandboxMetadataRequest
+from .periodic_lifecycle_hook import PeriodicLifecycleHook
 from .platform_spec import PlatformSpec
 from .platform_spec_arch import PlatformSpecArch
 from .platform_spec_os import PlatformSpecOs
+from .policy_status_response import PolicyStatusResponse
 from .pvc import PVC
 from .renew_sandbox_expiration_request import RenewSandboxExpirationRequest
 from .renew_sandbox_expiration_response import RenewSandboxExpirationResponse
 from .resource_limits import ResourceLimits
 from .sandbox import Sandbox
 from .sandbox_extensions import SandboxExtensions
+from .sandbox_lifecycle import SandboxLifecycle
 from .sandbox_metadata import SandboxMetadata
 from .sandbox_status import SandboxStatus
 from .snapshot import Snapshot
@@ -59,6 +76,12 @@ from .snapshot_status import SnapshotStatus
 from .volume import Volume
 
 __all__ = (
+    "AllocationSummary",
+    "AllocationSummaryMode",
+    "AllocationSummaryState",
+    "CreateFsbTemplateRequest",
+    "CreateFsbTemplateRequestFormat",
+    "CreateFsbTemplateRequestMetadata",
     "CreateSandboxRequest",
     "CreateSandboxRequestEnv",
     "CreateSandboxRequestExtensions",
@@ -71,9 +94,17 @@ __all__ = (
     "Endpoint",
     "EndpointHeaders",
     "ErrorResponse",
+    "FsbTemplate",
+    "FsbTemplateFormat",
+    "FsbTemplateMetadata",
+    "FsbTemplateReadiness",
+    "FsbTemplateStatus",
+    "FsbTemplateStatusPhase",
     "Host",
     "ImageSpec",
     "ImageSpecAuth",
+    "LifecycleHook",
+    "ListFsbTemplatesResponse",
     "ListSandboxesResponse",
     "ListSnapshotsResponse",
     "MetricsEvent",
@@ -86,15 +117,18 @@ __all__ = (
     "OSSFSVersion",
     "PaginationInfo",
     "PatchSandboxMetadataRequest",
+    "PeriodicLifecycleHook",
     "PlatformSpec",
     "PlatformSpecArch",
     "PlatformSpecOs",
+    "PolicyStatusResponse",
     "PVC",
     "RenewSandboxExpirationRequest",
     "RenewSandboxExpirationResponse",
     "ResourceLimits",
     "Sandbox",
     "SandboxExtensions",
+    "SandboxLifecycle",
     "SandboxMetadata",
     "SandboxStatus",
     "Snapshot",

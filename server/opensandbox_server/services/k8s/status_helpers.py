@@ -16,6 +16,8 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
+POOL_CAPACITY_EXHAUSTED_REASON = "POOL_CAPACITY_EXHAUSTED"
+
 
 def _normalize_create_status(status_info: Dict[str, Any]) -> Dict[str, Any]:
     if status_info.get("state") != "Allocated":
@@ -30,3 +32,27 @@ def _normalize_create_status(status_info: Dict[str, Any]) -> Dict[str, Any]:
 def _is_unschedulable_status(status_info: Dict[str, Any]) -> bool:
     reason = str(status_info.get("reason") or "")
     return reason == "POD_PLATFORM_UNSCHEDULABLE"
+
+
+def _is_pool_capacity_exhausted_status(status_info: Dict[str, Any]) -> bool:
+    reason = str(status_info.get("reason") or "")
+    return reason == POOL_CAPACITY_EXHAUSTED_REASON
+
+
+QUOTA_EXCEEDED_MESSAGE_MARKER = "exceeded quota"
+
+
+def _is_quota_exhausted_status(status_info: Dict[str, Any]) -> bool:
+    """True when the workload condition reports a quota admission rejection.
+
+    The agent-sandbox controller surfaces K8s admission failures on the CR as
+    ``Ready=False, Reason=ReconcilerError`` with the API server's message.
+    Only the quota marker is matched — other ReconcilerError messages may be
+    transient and must keep polling.
+    """
+    reason = str(status_info.get("reason") or "")
+    message = str(status_info.get("message") or "")
+    return (
+        reason == "ReconcilerError"
+        and QUOTA_EXCEEDED_MESSAGE_MARKER in message.lower()
+    )

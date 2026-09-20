@@ -141,8 +141,6 @@ const (
 
 	   released --> $end
 	*/
-	//statePending   = "pending", endpoint is empty means pending, otherwise means assigned
-	//stateAssigned  = "assigned"
 	stateReleasing = "releasing"
 	stateReleased  = "released"
 	stateUnknown   = "unknown"
@@ -176,7 +174,6 @@ type defaultTaskScheduler struct {
 	taskNodeByNameIndex map[string]*taskNode
 
 	maxConcurrency int
-	once           sync.Once
 
 	taskStatusCollector       taskStatusCollector
 	taskClientCreator         taskClientCreator
@@ -298,7 +295,7 @@ func (sch *defaultTaskScheduler) collectTaskStatus(taskNodes []*taskNode) {
 	if len(ips) == 0 {
 		return
 	}
-	tasks := sch.taskStatusCollector.Collect(context.Background(), ips)
+	tasks, _ := sch.taskStatusCollector.Collect(context.Background(), ips)
 	for _, tNode := range taskNodes {
 		task, ok := tasks[tNode.IP]
 		tNode.Status = task

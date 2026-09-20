@@ -17,7 +17,7 @@ import { expect, test } from "vitest";
 import { Sandbox, SandboxReadyTimeoutException } from "@alibaba-group/opensandbox";
 
 test("waitUntilReady timeout includes last health-check error and connection context", async () => {
-  const fakeSandbox = {
+  const fakeSandbox = Object.assign(Object.create(Sandbox.prototype), {
     connectionConfig: {
       domain: "localhost:8080",
       useServerProxy: false,
@@ -27,11 +27,11 @@ test("waitUntilReady timeout includes last health-check error and connection con
         throw new Error("connect ECONNREFUSED 127.0.0.1:8080");
       },
     },
-  } as unknown as Sandbox;
+  }) as Sandbox;
 
   let thrown: unknown;
   try {
-    await Sandbox.prototype.waitUntilReady.call(fakeSandbox, {
+    await fakeSandbox.waitUntilReady({
       readyTimeoutSeconds: 0.01,
       pollingIntervalMillis: 1,
     });
@@ -45,12 +45,11 @@ test("waitUntilReady timeout includes last health-check error and connection con
   expect(message).toContain("Last health check error");
   expect(message).toContain("domain=localhost:8080");
   expect(message).toContain("useServerProxy=false");
-  expect(message).toContain("useServerProxy=true");
 });
 
 test("waitUntilReady timeout includes false-continuously hint when ping returns false", async () => {
   let pingCalls = 0;
-  const fakeSandbox = {
+  const fakeSandbox = Object.assign(Object.create(Sandbox.prototype), {
     connectionConfig: {
       domain: "localhost:8080",
       useServerProxy: true,
@@ -61,11 +60,11 @@ test("waitUntilReady timeout includes false-continuously hint when ping returns 
         return false;
       },
     },
-  } as unknown as Sandbox;
+  }) as Sandbox;
 
   let thrown: unknown;
   try {
-    await Sandbox.prototype.waitUntilReady.call(fakeSandbox, {
+    await fakeSandbox.waitUntilReady({
       readyTimeoutSeconds: 0.01,
       pollingIntervalMillis: 1,
     });

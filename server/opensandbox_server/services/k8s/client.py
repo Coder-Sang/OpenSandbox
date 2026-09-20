@@ -23,7 +23,7 @@ from functools import partial
 from typing import Any, Dict, List, Optional, Tuple
 
 from kubernetes import client, config
-from kubernetes.client import ApiException, CoreV1Api, CustomObjectsApi, NodeV1Api
+from kubernetes.client import ApiException, CoreV1Api, CustomObjectsApi, NodeV1Api, V1APIResourceList
 
 from opensandbox_server.config import KubernetesRuntimeConfig
 from opensandbox_server.services.k8s.informer import WorkloadInformer
@@ -104,7 +104,14 @@ class K8sClient:
         with self._informers_lock:
             return self._informers.get(key)
 
-    def _get_informer(self, group: str, version: str, plural: str, namespace: str) -> Optional[WorkloadInformer]:
+    def _get_informer(
+        self,
+        group: str,
+        version: str,
+        plural: str,
+        namespace: str,
+        event_handler=None,
+    ) -> Optional[WorkloadInformer]:
         """Return the informer for this resource+namespace, starting it lazily."""
         if not self.config.informer_enabled:
             return None
@@ -125,6 +132,7 @@ class K8sClient:
                     resync_period_seconds=self.config.informer_resync_seconds,
                     watch_timeout_seconds=self.config.informer_watch_timeout_seconds,
                     thread_name=f"workload-informer-{plural}-{namespace}",
+                    event_handler=event_handler,
                 )
                 self._informers[key] = informer
                 try:
@@ -133,7 +141,28 @@ class K8sClient:
                     logger.warning(f"Failed to start informer for {plural}/{namespace}: {exc}")
                     self._informers.pop(key, None)
                     return None
+            elif event_handler is not None:
+                # The informer was started lazily by a handler-less read path;
+                # late watch consumers still need their events delivered.
+                informer.add_event_handler(event_handler)
         return informer
+
+    def watch_custom_objects(
+        self,
+        group: str,
+        version: str,
+        namespace: str,
+        plural: str,
+        event_handler,
+    ) -> Optional[WorkloadInformer]:
+        """Start (or reuse) a LIST/WATCH informer that feeds ``event_handler``.
+
+        The handler fires for every watch event and for every item of an
+        initial or reconnecting LIST snapshot, turning the informer into an
+        event reactor. Returns None when informers are disabled. The watch
+        stops with ``stop_informers``.
+        """
+        return self._get_informer(group, version, plural, namespace, event_handler)
 
 
     def create_custom_object(
@@ -156,7 +185,7 @@ class K8sClient:
         )
         informer = self._lookup_informer(group, version, plural, namespace)
         if informer:
-            informer.update_cache(obj)
+            informer.invalidate()
         return obj
 
     def get_custom_object(
@@ -173,8 +202,8 @@ class K8sClient:
         Returns None on 404.
         """
         informer = self._get_informer(group, version, plural, namespace)
-        if informer and informer.has_synced:
-            cached = informer.get(name)
+        if informer:
+            cached = informer.get_if_synced(name)
             if cached is not None:
                 return cached
 
@@ -188,8 +217,8 @@ class K8sClient:
                 plural=plural,
                 name=name,
             )
-            if informer:
-                informer.update_cache(obj)
+            if not isinstance(obj, dict):
+                raise TypeError("Custom object GET returned a non-dict response")
             return obj
         except ApiException as e:
             if e.status == 404:
@@ -203,6 +232,7 @@ class K8sClient:
         namespace: str,
         plural: str,
         label_selector: str = "",
+        ignore_not_found: bool = True,
     ) -> List[Dict[str, Any]]:
         """List namespaced custom resources, returning the items list.
 
@@ -211,17 +241,18 @@ class K8sClient:
         a direct API call (with rate limiting) otherwise.
         """
         informer = self._get_informer(group, version, plural, namespace)
-        if informer and informer.has_synced:
+        if informer:
             terms = parse_selector(label_selector)
             if terms is not None:
-                cached = informer.list()
-                if not terms:
-                    return cached
-                return [
-                    obj
-                    for obj in cached
-                    if matches(obj.get("metadata", {}).get("labels") or {}, terms)
-                ]
+                cached = informer.list_if_synced()
+                if cached is not None:
+                    if not terms:
+                        return cached
+                    return [
+                        obj
+                        for obj in cached
+                        if matches(obj.get("metadata", {}).get("labels") or {}, terms)
+                    ]
 
         if self._read_limiter:
             self._read_limiter.acquire()
@@ -235,9 +266,39 @@ class K8sClient:
             )
             return resp.get("items", [])
         except ApiException as e:
-            if e.status == 404:
+            if e.status == 404 and ignore_not_found:
                 return []
             raise
+
+    def custom_resource_exists(self, group: str, version: str, plural: str) -> bool:
+        """Distinguish an uninstalled API from a failed namespaced list."""
+        if self._read_limiter:
+            self._read_limiter.acquire()
+        try:
+            resources = self.get_custom_objects_api().get_api_resources(
+                group, version, _request_timeout=(10, 30)
+            )
+        except ApiException as exc:
+            if exc.status == 404:
+                return False
+            raise
+        if not isinstance(resources, V1APIResourceList) or resources.resources is None:
+            raise TypeError("API discovery returned an invalid APIResourceList response")
+        return any(resource.name == plural for resource in resources.resources)
+
+    def invalidate_custom_objects(
+        self, group: str, version: str, plural: str, namespace: str
+    ) -> None:
+        """Invalidate reads after a mutation performed by an external control plane."""
+        informer = self._lookup_informer(group, version, plural, namespace)
+        if informer:
+            informer.invalidate()
+
+    def stop_informers(self) -> None:
+        with self._informers_lock:
+            for informer in self._informers.values():
+                informer.stop()
+            self._informers.clear()
 
     def delete_custom_object(
         self,
@@ -261,7 +322,7 @@ class K8sClient:
         )
         informer = self._lookup_informer(group, version, plural, namespace)
         if informer:
-            informer.delete_from_cache(name)
+            informer.invalidate()
 
     def patch_custom_object(
         self,
@@ -285,7 +346,7 @@ class K8sClient:
         )
         informer = self._lookup_informer(group, version, plural, namespace)
         if informer:
-            informer.update_cache(obj)
+            informer.invalidate()
         return obj
 
     # ------------------------------------------------------------------
@@ -365,16 +426,30 @@ class K8sClient:
 
         The pinned kubernetes-client picks ``application/json-patch+json`` by
         default (first entry in the generated content-type list) which would
-        reject our merge-shaped body. Force strategic-merge so list fields
-        like ``ownerReferences`` merge by key.
+        reject our merge-shaped body. Its generated high-level method does not
+        accept a content-type override, so use the underlying ``ApiClient`` to
+        preserve strategic-merge semantics for list fields like
+        ``ownerReferences``.
         """
         if self._write_limiter:
             self._write_limiter.acquire()
-        return self.get_core_v1_api().patch_namespaced_persistent_volume_claim(
-            name=name,
-            namespace=namespace,
+        api_client = self.get_core_v1_api().api_client
+        return api_client.call_api(
+            "/api/v1/namespaces/{namespace}/persistentvolumeclaims/{name}",
+            "PATCH",
+            path_params={"namespace": namespace, "name": name},
+            query_params=[],
+            header_params={
+                "Accept": "application/json",
+                "Content-Type": "application/strategic-merge-patch+json",
+            },
             body=body,
-            _content_type="application/strategic-merge-patch+json",
+            post_params=[],
+            files={},
+            response_type="V1PersistentVolumeClaim",
+            auth_settings=["BearerToken"],
+            _return_http_data_only=True,
+            collection_formats={},
         )
 
     # ------------------------------------------------------------------
@@ -404,6 +479,20 @@ class K8sClient:
             label_selector=label_selector,
         )
         return resp.items
+
+    def read_pod(self, namespace: str, name: str) -> Any | None:
+        """Read a Pod by name, returning None when it no longer exists."""
+        if self._read_limiter:
+            self._read_limiter.acquire()
+        try:
+            return self.get_core_v1_api().read_namespaced_pod(
+                namespace=namespace,
+                name=name,
+            )
+        except ApiException as exc:
+            if exc.status == 404:
+                return None
+            raise
 
     def read_runtime_class(self, name: str) -> Any:
         """Read a RuntimeClass from the cluster."""

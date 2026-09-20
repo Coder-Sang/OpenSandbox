@@ -36,6 +36,7 @@ import type { IsolationService, IsolationSession } from "./services/isolatedSess
 import type { CommandExecution } from "./models/execd.js";
 import type { IsolatedCapabilities, IsolatedSessionSummary } from "./models/isolated.js";
 import type {
+  CreateSandboxFromTemplateRequest,
   CreateSandboxRequest,
   CredentialProxyConfig,
   Endpoint,
@@ -45,12 +46,17 @@ import type {
   RenewSandboxExpirationResponse,
   SandboxId,
   SandboxInfo,
+  SandboxLifecycle,
   SandboxMetadataPatch,
   Volume,
 } from "./models/sandboxes.js";
-import { SandboxReadyTimeoutException } from "./core/exceptions.js";
+import { SandboxOrigin } from "./models/sandboxes.js";
+import { ReadinessBudget, validatePollingInterval } from "./internal/readiness.js";
 
 const HOST_PATH_PATTERN = /^([/]|[A-Za-z]:[\\/])/;
+
+const TEMPLATE_CREDENTIAL_VAULT_UNAVAILABLE =
+  "Credential Vault is not available for template-backed sandboxes: they have no sandbox-side egress sidecar.";
 
 const unavailableIsolation: IsolationService = {
   create(): Promise<IsolationSession> {
@@ -99,11 +105,11 @@ function isCredentialVault(value: unknown): value is CredentialVault {
   );
 }
 
-function unavailableCredentialVault(): CredentialVault {
+function unavailableCredentialVault(
+  message = "Credential Vault is not available for this adapter factory. Provide EgressStack.credentialVault to use Credential Vault with a custom adapter.",
+): CredentialVault {
   const fail = async (..._args: unknown[]): Promise<never> => {
-    throw new Error(
-      "Credential Vault is not available for this adapter factory. Provide EgressStack.credentialVault to use Credential Vault with a custom adapter."
-    );
+    throw new Error(message);
   };
   return {
     create: fail,
@@ -172,6 +178,10 @@ export interface SandboxCreateOptions {
    */
   extensions?: Record<string, string>;
   /**
+   * Optional declarative lifecycle hooks executed inside the sandbox.
+   */
+  lifecycle?: SandboxLifecycle;
+  /**
    * Optional runtime platform constraint used for provisioning.
    */
   platform?: PlatformSpec;
@@ -196,6 +206,10 @@ export interface SandboxCreateOptions {
    * Sandbox timeout in seconds. Set to `null` to require explicit cleanup.
    */
   timeoutSeconds?: number | null;
+  /**
+   * Optional signal used to cancel creation and readiness requests.
+   */
+  signal?: AbortSignal;
 
   /**
    * Skip readiness checks during create/connect.
@@ -206,6 +220,7 @@ export interface SandboxCreateOptions {
   skipHealthCheck?: boolean;
   /**
    * Optional custom readiness check used by {@link Sandbox.waitUntilReady}.
+   * Custom checks are not cancelled on timeout.
    *
    * If provided, the SDK will call this function during readiness checks instead of
    * using the default `execd` ping check.
@@ -230,26 +245,87 @@ export interface SandboxConnectOptions {
   sandboxId: SandboxId;
 
   /**
-   * Skip readiness checks after connecting.
+   * Skip health checks after connecting; required endpoints are still resolved.
    */
   skipHealthCheck?: boolean;
   /**
    * Optional custom readiness check used by {@link Sandbox.waitUntilReady}.
+   * Custom checks are not cancelled on timeout.
    */
   healthCheck?: (sbx: Sandbox) => boolean | Promise<boolean>;
   /**
-   * Max time to wait for readiness.
+   * Total budget for endpoint publication and health checks.
+   * Custom checks and adapters must not block the event loop.
    */
   readyTimeoutSeconds?: number;
   /**
-   * Polling interval for readiness checks (milliseconds).
+   * Polling interval for endpoint publication and health checks (milliseconds).
    */
+  healthCheckPollingInterval?: number;
+  /**
+   * Optional signal used to cancel connection and readiness requests.
+   */
+  signal?: AbortSignal;
+}
+
+export interface SandboxCreateFromTemplateOptions {
+  /**
+   * Connection configuration for calling the OpenSandbox Lifecycle API and the sandbox's execd API.
+   */
+  connectionConfig?: ConnectionConfig | ConnectionConfigOptions;
+  /**
+   * Advanced override: inject a custom adapter factory (custom transports, dependency injection).
+   */
+  adapterFactory?: AdapterFactory;
+  /**
+   * ID of a `Succeeded` fsb template (see {@link SandboxManager.createTemplate}).
+   */
+  templateId: string;
+  /**
+   * Sandbox timeout in seconds (server semantics). Required in template mode.
+   */
+  timeoutSeconds: number;
+  /**
+   * Custom metadata tags (used for filtering/management).
+   */
+  metadata?: Record<string, string>;
+  /**
+   * Optional outbound network policy for the sandbox.
+   * If provided without defaultAction, defaults to "deny".
+   */
+  networkPolicy?: NetworkPolicy;
+  /**
+   * Opaque extension parameters passed through to the server as-is.
+   * Prefer namespaced keys (e.g. `storage.id`).
+   */
+  extensions?: Record<string, string>;
+  /**
+   * Optional signal used to cancel creation and readiness requests.
+   */
+  signal?: AbortSignal;
+  /**
+   * Skip readiness checks during create.
+   *
+   * When true, the SDK will not wait for lifecycle state `Running` or perform the health check.
+   * The returned sandbox instance may not be ready yet.
+   */
+  skipHealthCheck?: boolean;
+  /**
+   * Optional custom readiness check used by {@link Sandbox.waitUntilReady}.
+   * Custom checks are not cancelled on timeout.
+   *
+   * If provided, the SDK will call this function during readiness checks instead of
+   * using the default `execd` ping check.
+   */
+  healthCheck?: (sbx: Sandbox) => boolean | Promise<boolean>;
+  readyTimeoutSeconds?: number;
   healthCheckPollingInterval?: number;
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
+function throwIfAborted(signal?: AbortSignal): void {
+  signal?.throwIfAborted();
 }
+
 
 function toImageSpec(
   image: NonNullable<SandboxCreateOptions["image"]>
@@ -258,9 +334,83 @@ function toImageSpec(
   return { uri: image.uri, auth: image.auth };
 }
 
+/**
+ * Resolve the egress stack for a sandbox.
+ *
+ * Template-backed sandboxes (origin `template`) have no sandbox-side egress
+ * sidecar: policy operations go through the lifecycle control plane, and the
+ * egress sidecar endpoint is never resolved. For any other origin the
+ * sandbox-side egress sidecar endpoint is resolved and used; when a
+ * `ReadinessBudget` is supplied (connect/resume), the lookup shares the execd
+ * endpoint's budget so transient failures are retried within the remaining
+ * `readyTimeoutSeconds`.
+ */
+async function resolveEgressStack(
+  adapterFactory: AdapterFactory,
+  sandboxes: Sandboxes,
+  connectionConfig: ConnectionConfig,
+  lifecycleBaseUrl: string,
+  sandboxId: SandboxId,
+  endpointOrigin: string | undefined,
+  budget?: ReadinessBudget,
+  interval?: number,
+  signal?: AbortSignal,
+): Promise<{ egress: Egress; credentialVault?: CredentialVault; origin: SandboxOrigin }> {
+  if (endpointOrigin === SandboxOrigin.TEMPLATE) {
+    const stack = adapterFactory.createNetworkPolicyStack?.({
+      connectionConfig,
+      lifecycleBaseUrl,
+      sandboxId,
+    });
+    if (!stack) {
+      throw new Error(
+        "The sandbox is template-backed but the adapter factory does not provide createNetworkPolicyStack; cannot route egress policy operations."
+      );
+    }
+    return {
+      egress: stack.egress,
+      credentialVault: unavailableCredentialVault(TEMPLATE_CREDENTIAL_VAULT_UNAVAILABLE),
+      origin: SandboxOrigin.TEMPLATE,
+    };
+  }
+  const fetchEgressEndpoint = (fetchSignal?: AbortSignal) => sandboxes.getSandboxEndpoint(
+    sandboxId,
+    DEFAULT_EGRESS_PORT,
+    connectionConfig.useServerProxy,
+    fetchSignal,
+  );
+  const egressEndpoint = budget && interval !== undefined
+    ? await budget.endpoint(fetchEgressEndpoint, interval)
+    : await fetchEgressEndpoint(signal);
+  const stack = adapterFactory.createEgressStack({
+    connectionConfig,
+    egressBaseUrl: `${connectionConfig.protocol}://${egressEndpoint.endpoint}`,
+    endpointHeaders: egressEndpoint.headers,
+  });
+  return {
+    egress: stack.egress,
+    credentialVault: stack.credentialVault,
+    origin: SandboxOrigin.UNKNOWN,
+  };
+}
+
 export class Sandbox {
   readonly id: SandboxId;
   readonly connectionConfig: ConnectionConfig;
+  /**
+   * Origin of this sandbox (see {@link SandboxOrigin}).
+   *
+   * `template` when the sandbox runs on a fsb golden-image template: set
+   * locally by {@link Sandbox.createFromTemplate}, and reported by the
+   * server's `OPEN-SANDBOX-ORIGIN` response header otherwise (also honored
+   * for snapshot restores, which boot the template's published artifact set).
+   * `unknown` for everything else.
+   *
+   * Template-backed sandboxes route egress policy operations through the
+   * lifecycle control plane (`/sandboxes/{sandboxId}/networkpolicy`) instead
+   * of the sandbox-side egress sidecar.
+   */
+  readonly origin: string;
 
   /**
    * Lifecycle (sandbox management) service.
@@ -312,6 +462,7 @@ export class Sandbox {
     isolation: IsolationService;
     egress: Egress;
     credentialVault?: CredentialVault;
+    origin?: string;
   }) {
     this.id = opts.id;
     this.connectionConfig = opts.connectionConfig;
@@ -328,6 +479,7 @@ export class Sandbox {
       egress: opts.egress,
     });
 
+    this.origin = opts.origin ?? SandboxOrigin.UNKNOWN;
     this.sandboxes = opts.sandboxes;
     this.commands = opts.commands;
     this.files = opts.files;
@@ -340,6 +492,9 @@ export class Sandbox {
   static async create(opts: SandboxCreateOptions): Promise<Sandbox> {
     if ((opts.image == null) === (opts.snapshotId == null)) {
       throw new Error("Exactly one of image or snapshotId must be provided");
+    }
+    if (!(opts.skipHealthCheck ?? false) && opts.healthCheckPollingInterval !== undefined) {
+      validatePollingInterval(opts.healthCheckPollingInterval);
     }
 
     // Validate volumes before allocating transport resources.
@@ -363,6 +518,7 @@ export class Sandbox {
         }
       }
     }
+    throwIfAborted(opts.signal);
 
     const baseConnectionConfig =
       opts.connectionConfig instanceof ConnectionConfig
@@ -412,6 +568,7 @@ export class Sandbox {
       credentialProxy: opts.credentialProxy,
       volumes: opts.volumes,
       extensions: opts.extensions ?? {},
+      lifecycle: opts.lifecycle,
       platform: opts.platform,
     };
     if (timeoutSeconds !== null) {
@@ -425,21 +582,32 @@ export class Sandbox {
         : opts.image?.uri ?? opts.snapshotId;
     const createStarted = Date.now();
     try {
-      const created = await sandboxes.createSandbox(req);
+      const created = await sandboxes.createSandbox(req, opts.signal);
       sandboxId = created.id as SandboxId;
 
       const endpoint = await sandboxes.getSandboxEndpoint(
         sandboxId,
         DEFAULT_EXECD_PORT,
-        connectionConfig.useServerProxy
-      );
-      const egressEndpoint = await sandboxes.getSandboxEndpoint(
-        sandboxId,
-        DEFAULT_EGRESS_PORT,
-        connectionConfig.useServerProxy
+        connectionConfig.useServerProxy,
+        opts.signal,
       );
       const execdBaseUrl = `${connectionConfig.protocol}://${endpoint.endpoint}`;
-      const egressBaseUrl = `${connectionConfig.protocol}://${egressEndpoint.endpoint}`;
+
+      // The server is authoritative about the runtime backing: for fsb
+      // template-backed sandboxes (including snapshot restores of a template)
+      // it reports origin `template` and there is no sidecar endpoint, so the
+      // egress stack is routed through the lifecycle control plane.
+      const egressStack = await resolveEgressStack(
+        adapterFactory,
+        sandboxes,
+        connectionConfig,
+        lifecycleBaseUrl,
+        sandboxId,
+        endpoint.origin,
+        undefined,
+        undefined,
+        opts.signal,
+      );
 
       const execdStack =
         adapterFactory.createExecdStack({
@@ -447,11 +615,6 @@ export class Sandbox {
           execdBaseUrl,
           endpointHeaders: endpoint.headers,
         });
-      const { egress, credentialVault } = adapterFactory.createEgressStack({
-        connectionConfig,
-        egressBaseUrl,
-        endpointHeaders: egressEndpoint.headers,
-      });
 
       const { commands, files, health, metrics, isolation } = execdStack;
 
@@ -467,8 +630,9 @@ export class Sandbox {
         health,
         metrics,
         isolation: isolation ?? unavailableIsolation,
-        egress,
-        credentialVault,
+        egress: egressStack.egress,
+        credentialVault: egressStack.credentialVault,
+        origin: egressStack.origin,
       });
 
       if (!(opts.skipHealthCheck ?? false)) {
@@ -479,6 +643,7 @@ export class Sandbox {
             opts.healthCheckPollingInterval ??
             DEFAULT_HEALTH_CHECK_POLLING_INTERVAL_MILLIS,
           healthCheck: opts.healthCheck,
+          signal: opts.signal,
         });
       }
 
@@ -497,11 +662,192 @@ export class Sandbox {
         createDurationMs: Date.now() - createStarted,
         success: false,
       });
+      if (opts.signal?.aborted) {
+        void (async () => {
+          try {
+            if (sandboxId) {
+              await sandboxes.deleteSandbox(sandboxId);
+            }
+          } catch {
+            // Preserve the caller's abort error if sandbox cleanup fails.
+          } finally {
+            await connectionConfig.closeTransport().catch(() => undefined);
+          }
+        })();
+        throw err;
+      }
       if (sandboxId) {
         try {
           await sandboxes.deleteSandbox(sandboxId);
         } catch {
-          // Ignore cleanup failure; surface original error.
+          // Preserve the original creation error if sandbox cleanup fails.
+        }
+      }
+      await connectionConfig.closeTransport();
+      throw err;
+    }
+  }
+
+  /**
+   * Create a new sandbox from a `Succeeded` fsb template.
+   *
+   * Template mode fixes the workload shape on the server: the entrypoint,
+   * env, resources, volumes, platform and lifecycle of the sandbox come
+   * from the template's golden image and cannot be overridden here. Only
+   * metadata, network policy and extensions may accompany the template id,
+   * and the timeout is required.
+   *
+   * The returned sandbox routes egress policy operations through the
+   * lifecycle control plane and has no Credential Vault (template-backed
+   * sandboxes have no sandbox-side egress sidecar).
+   */
+  static async createFromTemplate(opts: SandboxCreateFromTemplateOptions): Promise<Sandbox> {
+    if (!opts.templateId?.trim()) {
+      throw new Error("Template ID must be specified");
+    }
+    if (typeof opts.timeoutSeconds !== "number" || !Number.isFinite(opts.timeoutSeconds)) {
+      throw new Error(
+        `timeoutSeconds must be a finite number, got ${opts.timeoutSeconds}`
+      );
+    }
+    if (!(opts.skipHealthCheck ?? false) && opts.healthCheckPollingInterval !== undefined) {
+      validatePollingInterval(opts.healthCheckPollingInterval);
+    }
+    throwIfAborted(opts.signal);
+
+    const baseConnectionConfig =
+      opts.connectionConfig instanceof ConnectionConfig
+        ? opts.connectionConfig
+        : new ConnectionConfig(opts.connectionConfig);
+    const connectionConfig = baseConnectionConfig.withTransportIfMissing();
+    const lifecycleBaseUrl = connectionConfig.getBaseUrl();
+    const adapterFactory = opts.adapterFactory ?? createDefaultAdapterFactory();
+
+    let sandboxes: Sandboxes;
+    try {
+      sandboxes = adapterFactory.createLifecycleStack({
+        connectionConfig,
+        lifecycleBaseUrl,
+      }).sandboxes;
+    } catch (err) {
+      await connectionConfig.closeTransport();
+      throw err;
+    }
+
+    const req: CreateSandboxFromTemplateRequest = {
+      templateId: opts.templateId,
+      timeout: Math.floor(opts.timeoutSeconds),
+      metadata: opts.metadata ?? {},
+      networkPolicy: opts.networkPolicy
+        ? {
+            ...opts.networkPolicy,
+            defaultAction: opts.networkPolicy.defaultAction ?? "deny",
+          }
+        : undefined,
+      extensions: opts.extensions ?? {},
+    };
+
+    let sandboxId: SandboxId | undefined;
+    const startupSource = `template:${opts.templateId}`;
+    const createStarted = Date.now();
+    try {
+      const created = await sandboxes.createSandboxFromTemplate(req, opts.signal);
+      sandboxId = created.id as SandboxId;
+
+      const endpoint = await sandboxes.getSandboxEndpoint(
+        sandboxId,
+        DEFAULT_EXECD_PORT,
+        connectionConfig.useServerProxy,
+        opts.signal,
+      );
+      const execdBaseUrl = `${connectionConfig.protocol}://${endpoint.endpoint}`;
+
+      // Template-backed sandboxes have no sandbox-side egress sidecar:
+      // policy operations go through the lifecycle control plane.
+      const egressStack = await resolveEgressStack(
+        adapterFactory,
+        sandboxes,
+        connectionConfig,
+        lifecycleBaseUrl,
+        sandboxId,
+        SandboxOrigin.TEMPLATE,
+        undefined,
+        undefined,
+        opts.signal,
+      );
+
+      const execdStack =
+        adapterFactory.createExecdStack({
+          connectionConfig,
+          execdBaseUrl,
+          endpointHeaders: endpoint.headers,
+        });
+
+      const { commands, files, health, metrics, isolation } = execdStack;
+
+      const sbx = new Sandbox({
+        id: sandboxId,
+        connectionConfig,
+        adapterFactory,
+        lifecycleBaseUrl,
+        execdBaseUrl,
+        sandboxes,
+        commands,
+        files,
+        health,
+        metrics,
+        isolation: isolation ?? unavailableIsolation,
+        egress: egressStack.egress,
+        credentialVault: egressStack.credentialVault,
+        origin: egressStack.origin,
+      });
+
+      if (!(opts.skipHealthCheck ?? false)) {
+        await sbx.waitUntilReady({
+          readyTimeoutSeconds:
+            opts.readyTimeoutSeconds ?? DEFAULT_READY_TIMEOUT_SECONDS,
+          pollingIntervalMillis:
+            opts.healthCheckPollingInterval ??
+            DEFAULT_HEALTH_CHECK_POLLING_INTERVAL_MILLIS,
+          healthCheck: opts.healthCheck,
+          signal: opts.signal,
+        });
+      }
+
+      reportSandboxCreateMetric(connectionConfig, {
+        sandboxId,
+        image: startupSource,
+        createDurationMs: Date.now() - createStarted,
+        success: true,
+      });
+
+      return sbx;
+    } catch (err) {
+      reportSandboxCreateMetric(connectionConfig, {
+        sandboxId,
+        image: startupSource,
+        createDurationMs: Date.now() - createStarted,
+        success: false,
+      });
+      if (opts.signal?.aborted) {
+        void (async () => {
+          try {
+            if (sandboxId) {
+              await sandboxes.deleteSandbox(sandboxId);
+            }
+          } catch {
+            // Preserve the caller's abort error if sandbox cleanup fails.
+          } finally {
+            await connectionConfig.closeTransport().catch(() => undefined);
+          }
+        })();
+        throw err;
+      }
+      if (sandboxId) {
+        try {
+          await sandboxes.deleteSandbox(sandboxId);
+        } catch {
+          // Preserve the original creation error if sandbox cleanup fails.
         }
       }
       await connectionConfig.closeTransport();
@@ -510,6 +856,9 @@ export class Sandbox {
   }
 
   static async connect(opts: SandboxConnectOptions): Promise<Sandbox> {
+    throwIfAborted(opts.signal);
+    const interval = opts.healthCheckPollingInterval ?? DEFAULT_HEALTH_CHECK_POLLING_INTERVAL_MILLIS;
+    validatePollingInterval(interval);
     const baseConnectionConfig =
       opts.connectionConfig instanceof ConnectionConfig
         ? opts.connectionConfig
@@ -529,30 +878,37 @@ export class Sandbox {
       throw err;
     }
 
+    const budget = new ReadinessBudget(opts.readyTimeoutSeconds ?? DEFAULT_READY_TIMEOUT_SECONDS, opts.signal);
     try {
-      const endpoint = await sandboxes.getSandboxEndpoint(
-        opts.sandboxId,
-        DEFAULT_EXECD_PORT,
-        connectionConfig.useServerProxy
-      );
-      const egressEndpoint = await sandboxes.getSandboxEndpoint(
-        opts.sandboxId,
-        DEFAULT_EGRESS_PORT,
-        connectionConfig.useServerProxy
-      );
+      const endpoint = await budget.endpoint(signal => sandboxes.getSandboxEndpoint(
+        opts.sandboxId, DEFAULT_EXECD_PORT, connectionConfig.useServerProxy, signal,
+      ), interval);
       const execdBaseUrl = `${connectionConfig.protocol}://${endpoint.endpoint}`;
-      const egressBaseUrl = `${connectionConfig.protocol}://${egressEndpoint.endpoint}`;
+      // The server is authoritative about the runtime backing: template-backed
+      // sandboxes (origin `template`) have no sandbox-side egress sidecar, so
+      // policy operations go through the lifecycle control plane and the
+      // egress sidecar endpoint is never resolved.
+      const egressStack = await resolveEgressStack(
+        adapterFactory,
+        sandboxes,
+        connectionConfig,
+        lifecycleBaseUrl,
+        opts.sandboxId,
+        endpoint.origin,
+        // Same readiness budget as the execd lookup: transient 404
+        // POD_IP_NOT_AVAILABLE is retried and slow lookups stay bounded by
+        // the remaining readyTimeoutSeconds.
+        budget,
+        interval,
+        opts.signal,
+      );
+
       const execdStack =
         adapterFactory.createExecdStack({
           connectionConfig,
           execdBaseUrl,
           endpointHeaders: endpoint.headers,
         });
-      const { egress, credentialVault } = adapterFactory.createEgressStack({
-        connectionConfig,
-        egressBaseUrl,
-        endpointHeaders: egressEndpoint.headers,
-      });
 
       const { commands, files, health, metrics, isolation } = execdStack;
 
@@ -568,23 +924,21 @@ export class Sandbox {
         health,
         metrics,
         isolation: isolation ?? unavailableIsolation,
-        egress,
-        credentialVault,
+        egress: egressStack.egress,
+        credentialVault: egressStack.credentialVault,
+        origin: egressStack.origin,
       });
 
       if (!(opts.skipHealthCheck ?? false)) {
-        await sbx.waitUntilReady({
-          readyTimeoutSeconds:
-            opts.readyTimeoutSeconds ?? DEFAULT_READY_TIMEOUT_SECONDS,
-          pollingIntervalMillis:
-            opts.healthCheckPollingInterval ??
-            DEFAULT_HEALTH_CHECK_POLLING_INTERVAL_MILLIS,
-          healthCheck: opts.healthCheck,
-        });
+        await sbx.checkReadiness(budget, interval, opts.healthCheck);
       }
 
       return sbx;
     } catch (err) {
+      if (opts.signal?.aborted) {
+        void connectionConfig.closeTransport().catch(() => undefined);
+        throw err;
+      }
       await connectionConfig.closeTransport();
       throw err;
     }
@@ -624,6 +978,9 @@ export class Sandbox {
       healthCheckPollingInterval?: number;
     } = {}
   ): Promise<Sandbox> {
+    if (opts.healthCheckPollingInterval !== undefined) {
+      validatePollingInterval(opts.healthCheckPollingInterval);
+    }
     await this.sandboxes.resumeSandbox(this.id);
     return await Sandbox.connect({
       sandboxId: this.id,
@@ -639,6 +996,9 @@ export class Sandbox {
    * Resume a paused sandbox by id, then connect to its execd endpoint.
    */
   static async resume(opts: SandboxConnectOptions): Promise<Sandbox> {
+    if (opts.healthCheckPollingInterval !== undefined) {
+      validatePollingInterval(opts.healthCheckPollingInterval);
+    }
     const baseConnectionConfig =
       opts.connectionConfig instanceof ConnectionConfig
         ? opts.connectionConfig
@@ -727,51 +1087,34 @@ export class Sandbox {
     return `${this.connectionConfig.protocol}://${ep.endpoint}`;
   }
 
+  private async checkReadiness(
+    budget: ReadinessBudget,
+    interval: number,
+    healthCheck?: (sbx: Sandbox) => boolean | Promise<boolean>,
+  ): Promise<void> {
+    budget.healthContext(`domain=${this.connectionConfig.domain}, useServerProxy=${this.connectionConfig.useServerProxy}`);
+    while (true) {
+      try {
+        budget.attempt();
+        const healthy = await budget.run(async signal => healthCheck ? await healthCheck(this) : await this.health.ping(signal));
+        if (healthy) return;
+        budget.record("Health check returned false continuously.");
+      } catch (error) {
+        budget.remaining();
+        budget.record(error);
+      }
+      await budget.pause(interval);
+    }
+  }
+
   async waitUntilReady(opts: {
     readyTimeoutSeconds: number;
     pollingIntervalMillis: number;
     healthCheck?: (sbx: Sandbox) => boolean | Promise<boolean>;
+    signal?: AbortSignal;
   }): Promise<void> {
-    const deadline = Date.now() + opts.readyTimeoutSeconds * 1000;
-    let attempt = 0;
-    let errorDetail = "Health check returned false continuously.";
-
-    const buildTimeoutMessage = () => {
-      const context = `domain=${this.connectionConfig.domain}, useServerProxy=${this.connectionConfig.useServerProxy}`;
-      let suggestion =
-        "If this sandbox runs in Docker bridge or remote-network mode, consider enabling useServerProxy=true.";
-      if (!this.connectionConfig.useServerProxy) {
-        suggestion += " You can also configure server-side [docker].host_ip for direct endpoint access.";
-      }
-      return `Sandbox health check timed out after ${opts.readyTimeoutSeconds}s (${attempt} attempts). ${errorDetail} Connection context: ${context}. ${suggestion}`;
-    };
-
-    // Wait until execd becomes reachable and passes health check.
-    while (true) {
-      if (Date.now() > deadline) {
-        throw new SandboxReadyTimeoutException({
-          message: buildTimeoutMessage(),
-        });
-      }
-      attempt++;
-      try {
-        if (opts.healthCheck) {
-          const ok = await opts.healthCheck(this);
-          if (ok) {
-            return;
-          }
-        } else {
-          const ok = await this.health.ping();
-          if (ok) {
-            return;
-          }
-        }
-        errorDetail = "Health check returned false continuously.";
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        errorDetail = `Last health check error: ${message}`;
-      }
-      await sleep(opts.pollingIntervalMillis);
-    }
+    validatePollingInterval(opts.pollingIntervalMillis);
+    const budget = new ReadinessBudget(opts.readyTimeoutSeconds, opts.signal);
+    await this.checkReadiness(budget, opts.pollingIntervalMillis, opts.healthCheck);
   }
 }
