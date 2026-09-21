@@ -155,6 +155,11 @@ type WrapOptions struct {
 	MaskPaths []string
 	// DropCapabilities asks bubblewrap to clear the entire capability set.
 	DropCapabilities bool
+	// LifecycleControlStdin carries the fail-closed gate socket on fd 0. Stock
+	// bubblewrap closes unrelated descriptors before exec, so the long-lived
+	// pool anchor (which does not consume stdin) uses this preserved standard
+	// descriptor instead of depending on an unsupported preserve-fds option.
+	LifecycleControlStdin bool
 }
 
 // Isolator wraps an *exec.Cmd in a namespace-isolated execution environment.

@@ -1,0 +1,49 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: bwrap-e2e-probe-257b5f39
+  namespace: opensandbox
+  labels:
+    app: bwrap-e2e-probe-257b5f39
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  containers:
+    - name: execd
+      image: opensandbox/pool-runtime:bwrap-pool-probe-257b5f39-v10
+      imagePullPolicy: Never
+      command: [/opt/opensandbox/execd]
+      args: [--init]
+      env:
+        - name: EXECD_ACCESS_TOKEN
+          value: probe-control-token
+        - name: EXECD_RUNTIME_INIT
+          value: "true"
+        - name: EXECD_POOL_BWRAP
+          value: "1"
+        - name: EXECD_ISOLATION_CONFIG
+          value: /etc/execd/isolation.toml
+      securityContext:
+        privileged: false
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: [ALL]
+          add: [SYS_ADMIN, SYS_CHROOT, SETPCAP, SETGID]
+        seccompProfile:
+          type: Unconfined
+        appArmorProfile:
+          type: Unconfined
+      volumeMounts:
+        - name: storage
+          mountPath: /storage
+        - name: isolation-config
+          mountPath: /etc/execd/isolation.toml
+          subPath: isolation.toml
+          readOnly: true
+  volumes:
+    - name: storage
+      persistentVolumeClaim:
+        claimName: bwrap-e2e-storage-257b5f39
+    - name: isolation-config
+      configMap:
+        name: bwrap-e2e-isolation-v1

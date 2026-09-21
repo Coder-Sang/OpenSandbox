@@ -32,11 +32,13 @@
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/prctl.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
 #define GATE_FAILURE 125
 #define EXEC_FAILURE 126
+#define POOL_ANCHOR_ENV "OPENSANDBOX_POOL_ANCHOR"
 
 static const char waiting_frame[] = "OPENSANDBOX_SESSION_WAITING_V1";
 static const char ready_frame[] = "OPENSANDBOX_SESSION_READY_V1";
@@ -54,6 +56,26 @@ static int parse_fd(const char *value)
     return (int)parsed;
 }
 
+static int parse_control_fd(const char *value)
+{
+    char *end = NULL;
+    long parsed;
+
+    errno = 0;
+    parsed = strtol(value, &end, 10);
+    if (errno != 0 || end == value || *end != '\0' ||
+        parsed < 0 || parsed > INT_MAX)
+        return -1;
+    return (int)parsed;
+}
+
+static int parse_optional_fd(const char *value)
+{
+    if (strcmp(value, "-") == 0)
+        return -1;
+    return parse_fd(value);
+}
+
 static void fail_closed(int control_fd, int exec_fd)
 {
     if (control_fd >= 0)
@@ -61,6 +83,16 @@ static void fail_closed(int control_fd, int exec_fd)
     if (exec_fd >= 0 && exec_fd != control_fd)
         (void)close(exec_fd);
     _exit(GATE_FAILURE);
+}
+
+static void fail_closed_at(int control_fd, int exec_fd, const char *stage)
+{
+    static const char prefix[] = "opensandbox-session-gate: ";
+
+    (void)write(STDERR_FILENO, prefix, sizeof(prefix) - 1);
+    (void)write(STDERR_FILENO, stage, strlen(stage));
+    (void)write(STDERR_FILENO, "\n", 1);
+    fail_closed(control_fd, exec_fd);
 }
 
 int main(int argc, char **argv)
@@ -74,33 +106,48 @@ int main(int argc, char **argv)
     ssize_t sent;
 
     if (argc < 5 || strcmp(argv[3], "--") != 0)
-        fail_closed(-1, -1);
+        fail_closed_at(-1, -1, "invalid arguments");
 
-    control_fd = parse_fd(argv[1]);
-    exec_fd = parse_fd(argv[2]);
-    if (control_fd < 0 || exec_fd < 0 || control_fd == exec_fd)
-        fail_closed(control_fd, exec_fd);
+    control_fd = parse_control_fd(argv[1]);
+    exec_fd = parse_optional_fd(argv[2]);
+    if (control_fd < 0 || (exec_fd < 0 && strcmp(argv[2], "-") != 0) ||
+        control_fd == exec_fd)
+        fail_closed_at(control_fd, exec_fd, "invalid descriptors");
 
     if (fcntl(control_fd, F_GETFD) < 0)
-        fail_closed(control_fd, exec_fd);
-    if (fcntl(exec_fd, F_GETFD) < 0)
-        fail_closed(control_fd, exec_fd);
+        fail_closed_at(control_fd, exec_fd, "control descriptor unavailable");
+    if (exec_fd >= 0 && fcntl(exec_fd, F_GETFD) < 0)
+        fail_closed_at(control_fd, exec_fd, "executable descriptor unavailable");
     /*
      * bubblewrap starts this helper through /proc/self/fd/<exec_fd>. Once
      * main is running the executable is already mapped, so close that
      * descriptor before the workload handshake to avoid leaking it onward.
      */
-    if (close(exec_fd) != 0)
-        fail_closed(control_fd, -1);
+    if (exec_fd >= 0 && close(exec_fd) != 0)
+        fail_closed_at(control_fd, -1, "close executable descriptor");
     if (getsockopt(control_fd, SOL_SOCKET, SO_TYPE,
                    &socket_type, &socket_type_len) < 0 ||
         socket_type != SOCK_SEQPACKET)
-        fail_closed(control_fd, -1);
+        fail_closed_at(control_fd, -1, "control descriptor is not seqpacket");
+
+    /*
+     * The long-lived Pool PID-1 anchor shares the workload UID. A dedicated
+     * process-observation Pool grants read access to its private procfs, so
+     * protect the anchor before advertising that the gate is waiting. Ordinary
+     * commands do not carry this internal marker and remain observable by
+     * their fs-tracker parent.
+     */
+    if (getenv(POOL_ANCHOR_ENV) != NULL) {
+        if (prctl(PR_SET_DUMPABLE, 0, 0, 0, 0) != 0)
+            fail_closed_at(control_fd, -1, "protect pool anchor");
+        if (unsetenv(POOL_ANCHOR_ENV) != 0)
+            fail_closed_at(control_fd, -1, "clear pool anchor marker");
+    }
 
     sent = send(control_fd, waiting_frame, sizeof(waiting_frame) - 1,
                 MSG_NOSIGNAL);
     if (sent != (ssize_t)(sizeof(waiting_frame) - 1))
-        fail_closed(control_fd, -1);
+        fail_closed_at(control_fd, -1, "send waiting frame");
 
     /*
      * The buffer has room for one byte beyond the expected payload. This
@@ -109,7 +156,7 @@ int main(int argc, char **argv)
     received = recv(control_fd, incoming, sizeof(incoming), 0);
     if (received != (ssize_t)(sizeof(ready_frame) - 1) ||
         memcmp(incoming, ready_frame, sizeof(ready_frame) - 1) != 0)
-        fail_closed(control_fd, -1);
+        fail_closed_at(control_fd, -1, "receive ready frame");
 
     if (close(control_fd) != 0)
         _exit(GATE_FAILURE);

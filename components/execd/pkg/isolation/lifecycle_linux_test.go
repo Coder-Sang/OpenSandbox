@@ -982,6 +982,36 @@ func TestLifecycleArgvExecutesGateDescriptorAfterRestoringProc(t *testing.T) {
 	}
 }
 
+func TestLifecycleArgvPinsGateAndUsesStandardControlFD(t *testing.T) {
+	opts := WrapOptions{
+		Profile:               ProfileStrict,
+		SkipWorkspace:         true,
+		RootWritable:          true,
+		UidMode:               UidModeSetpriv,
+		LifecycleControlStdin: true,
+	}
+	argv, err := buildArgvWithLifecycle(
+		opts,
+		"3",
+		&bwrapLifecycleArgv{
+			gateExecFD: "4",
+			statusFD:   "5",
+			blockFD:    "6",
+			controlFD:  "0",
+			gatePath:   sessionGateRuntimeHostPath,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if indexArgvSequence(argv, "--ro-bind-fd", "4", sessionGateRuntimeHostPath) < 0 {
+		t.Fatalf("descriptor-pinned gate mount missing: %v", argv)
+	}
+	if indexArgvSequence(argv, sessionGateRuntimeHostPath, "0", "-", "--") < 0 {
+		t.Fatalf("stdin gate command missing: %v", argv)
+	}
+}
+
 func TestBwrapLifecycleEndToEnd(t *testing.T) {
 	originalBwrapPath := bwrapPath
 	bwrapPath = findBwrap()

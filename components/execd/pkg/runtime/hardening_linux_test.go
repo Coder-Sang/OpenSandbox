@@ -239,6 +239,26 @@ func TestHardeningRejectsUnknownCapability(t *testing.T) {
 	resetHardening()
 }
 
+func TestPoolLandlockPolicy(t *testing.T) {
+	tests := []struct {
+		state string
+		want  bool
+	}{
+		{state: "active", want: true},
+		{state: "unsupported", want: true},
+		{state: "degraded", want: false},
+		{state: "disabled", want: false},
+		{state: "", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.state, func(t *testing.T) {
+			if got := poolLandlockAcceptable(LayerState{State: tt.state}); got != tt.want {
+				t.Fatalf("poolLandlockAcceptable(%q) = %v, want %v", tt.state, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestHardeningDegradesWhenLauncherMissing(t *testing.T) {
 	launcherSearchPaths = nil
 	initHardeningForTest(t, hardenedCfg())
@@ -369,6 +389,25 @@ func TestLandlockActiveOrUnsupported(t *testing.T) {
 	}
 }
 
+func TestPrivateProcReadLandlockRule(t *testing.T) {
+	cfg := isolation.DefaultConfig()
+	cfg.Landlock = &isolation.LandlockConfig{Enabled: true}
+	for _, rule := range buildLandlockRules(cfg) {
+		if rule.Path == "/proc" && rule.Access&llReadFile != 0 {
+			t.Fatalf("default policy grants private proc read: %+v", rule)
+		}
+	}
+
+	cfg.Landlock.AllowPrivateProcRead = true
+	rules := buildLandlockRules(cfg)
+	assertLandlockRule(t, rules, "/proc", llReadFile|llReadDir)
+	for _, rule := range rules {
+		if rule.Path == "/proc" && rule.Access&(llWriteFile|llMakeDir|llMakeReg|llRemoveFile|llRefer|llTruncate) != 0 {
+			t.Fatalf("private proc rule grants mutation rights: %+v", rule)
+		}
+	}
+}
+
 func TestPathBeneath(t *testing.T) {
 	tests := []struct {
 		parent, path string
@@ -406,6 +445,18 @@ func TestRuleForPathMergesMatches(t *testing.T) {
 	}
 	if _, ok := ruleForPath(rules, "relative"); ok {
 		t.Fatal("ruleForPath accepted a relative path")
+	}
+}
+
+func TestLandlockAccessForFileMount(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "projected-file")
+	if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := landlockAccessForPath(path, llRwAccess|llExecute)
+	want := llReadFile | llWriteFile | llTruncate | llExecute
+	if got != want {
+		t.Fatalf("file access = %#x, want %#x", got, want)
 	}
 }
 

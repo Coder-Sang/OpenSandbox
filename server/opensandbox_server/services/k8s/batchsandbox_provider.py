@@ -384,6 +384,12 @@ class BatchSandboxProvider(WorkloadProvider):
                 forced_bwrap=forced_bwrap,
             ),
         }
+        if forced_bwrap:
+            # A bwrap runtime is deliberately one-shot. If execd exits after
+            # the runtime dies, release the allocation immediately so the
+            # Pool's Delete recycler replaces the Pod instead of retaining an
+            # unusable allocation until Sandbox deletion or expiry.
+            spec["taskResourcePolicyWhenCompleted"] = "Release"
         if expires_at is not None:
             spec["expireTime"] = expires_at.isoformat()
         runtime_manifest = {

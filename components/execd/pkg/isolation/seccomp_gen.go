@@ -76,6 +76,22 @@ func GenerateSeccompDenyBPF(override *SeccompOverride) ([]byte, error) {
 	return generateSeccompDenyBPF(override)
 }
 
+// PoolSeccompOverride derives the Pool denylist from the built-in floor.
+// Enabling nested notification removes only seccomp itself; every other
+// mandatory denial remains unchanged.
+func PoolSeccompOverride(allowUserNotification bool) *SeccompOverride {
+	if !allowUserNotification {
+		return nil
+	}
+	deny := make([]string, 0, len(denylistSyscalls)-1)
+	for _, name := range denylistSyscalls {
+		if name != "seccomp" {
+			deny = append(deny, name)
+		}
+	}
+	return &SeccompOverride{Deny: deny}
+}
+
 // generateSeccompDenyBPF returns BPF bytecode for a default-allow,
 // deny-listed syscall filter. The returned bytes are in struct sock_filter
 // format (8 bytes per instruction, native endian).

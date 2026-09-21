@@ -42,6 +42,7 @@ from opensandbox_server.services.constants import (
     SANDBOX_EGRESS_AUTH_TOKEN_METADATA_KEY,
 )
 from opensandbox_server.services.k8s.batchsandbox_provider import BatchSandboxProvider
+from opensandbox_server.services.k8s.pool_isolation import INTERNAL_BWRAP_EXTENSION
 from opensandbox_server.services.k8s.workload_provider import EgressWorkloadSettings
 from opensandbox_server.services.constants import OPENSANDBOX_EGRESS_TOKEN
 from opensandbox_server.services.k8s.image_pull_secret_helper import IMAGE_AUTH_SECRET_PREFIX
@@ -1668,6 +1669,7 @@ spec:
 
         body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
         assert body["spec"]["poolRef"] == "my-pool"
+        assert "taskResourcePolicyWhenCompleted" not in body["spec"]
         assert "taskTemplate" in body["spec"]
 
         task_template = body["spec"]["taskTemplate"]
@@ -1680,6 +1682,40 @@ spec:
         assert command[2] == "exec /opt/opensandbox/bootstrap.sh python app.py"
         assert task_template["spec"]["process"]["env"] == [
             {"name": "FOO", "value": "bar"},
+            {"name": "OPENSANDBOX_ID", "value": "test-id"},
+        ]
+
+    def test_create_workload_forced_bwrap_releases_completed_task(
+        self, mock_k8s_client
+    ):
+        """A dead one-shot runtime must release its Pool Pod for deletion."""
+        provider = BatchSandboxProvider(mock_k8s_client)
+        mock_k8s_client.create_custom_object.return_value = {
+            "metadata": {"name": "test-id", "uid": "test-uid"}
+        }
+
+        provider.create_workload(
+            sandbox_id="test-id",
+            namespace="test-ns",
+            image_spec=ImageSpec(uri=""),
+            entrypoint=["/bin/bash"],
+            env={"USER_VALUE": "must-not-pass"},
+            resource_limits={},
+            labels={},
+            expires_at=datetime(2025, 12, 31, tzinfo=timezone.utc),
+            execd_image="execd:latest",
+            extensions={
+                "poolRef": "bwrap-pool",
+                INTERNAL_BWRAP_EXTENSION: "enable",
+            },
+        )
+
+        body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
+        assert body["spec"]["taskResourcePolicyWhenCompleted"] == "Release"
+        assert body["spec"]["taskTemplate"]["spec"]["process"]["env"] == [
+            {"name": "EXECD_INIT", "value": "1"},
+            {"name": "EXECD_RUNTIME_INIT", "value": "1"},
+            {"name": "EXECD_POOL_BWRAP", "value": "1"},
             {"name": "OPENSANDBOX_ID", "value": "test-id"},
         ]
 

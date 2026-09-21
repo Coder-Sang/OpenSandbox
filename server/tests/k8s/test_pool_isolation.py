@@ -99,6 +99,76 @@ def test_valid_policy_returns_internal_runtime_binding() -> None:
     }
 
 
+def test_policy_allows_nested_targets_and_sorts_parent_first() -> None:
+    isolation = SandboxIsolation.model_validate(
+        {
+            "type": "bwrap",
+            "mounts": [
+                {
+                    "root": "shared",
+                    "subPath": "sdk",
+                    "target": "/workspace/cache/sdk",
+                    "mode": "ro",
+                },
+                {
+                    "root": "projects",
+                    "subPath": "project-A-cache",
+                    "target": "/workspace/cache",
+                    "mode": "rw",
+                },
+                {
+                    "root": "projects",
+                    "subPath": "project-Z",
+                    "target": "/workspace/z",
+                    "mode": "rw",
+                },
+                {
+                    "root": "projects",
+                    "subPath": "project-A",
+                    "target": "/workspace",
+                    "mode": "ro",
+                },
+            ],
+        }
+    )
+
+    result = validate_pool_isolation(_pool(), isolation)
+
+    assert result is not None
+    assert [mount["target"] for mount in result["mounts"]] == [
+        "/workspace",
+        "/workspace/cache",
+        "/workspace/z",
+        "/workspace/cache/sdk",
+    ]
+    assert result["mounts"][1]["mode"] == "rw"
+
+
+def test_policy_rejects_duplicate_target() -> None:
+    isolation = SandboxIsolation.model_validate(
+        {
+            "type": "bwrap",
+            "mounts": [
+                {
+                    "root": "projects",
+                    "subPath": "project-A",
+                    "target": "/workspace",
+                    "mode": "rw",
+                },
+                {
+                    "root": "shared",
+                    "subPath": "sdk",
+                    "target": "/workspace",
+                    "mode": "ro",
+                },
+            ],
+        }
+    )
+
+    with pytest.raises(PoolIsolationError, match="duplicate mount target"):
+        validate_pool_isolation(_pool(), isolation)
+
+
 @pytest.mark.parametrize(
     ("isolation", "message"),
     [

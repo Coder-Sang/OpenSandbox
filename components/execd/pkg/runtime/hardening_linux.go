@@ -120,6 +120,13 @@ func buildLandlockRules(cfg isolation.Config) []landlockRule {
 	for _, p := range []string{"/proc/self", "/proc/sys"} {
 		rules = append(rules, bestEffort(readExec, p))
 	}
+	if cfg.Landlock != nil && cfg.Landlock.AllowPrivateProcRead {
+		// Forced Pool isolation mounts a fresh procfs for its private PID
+		// namespace. Process-observation workloads need the target TID's mem,
+		// root, cwd and fd entries, so the grant must cover that procfs. The
+		// Pool startup path protects PID 1 before it releases the runtime gate.
+		rules = append(rules, required(llReadFile|llReadDir, "/proc"))
+	}
 
 	deviceRW := llReadFile | llWriteFile
 	for _, p := range []string{
@@ -167,9 +174,25 @@ func expandMountRules(rules []landlockRule) []landlockRule {
 		if !ok {
 			continue
 		}
+		access = landlockAccessForPath(mount, access)
+		if access == 0 {
+			continue
+		}
 		expanded = append(expanded, landlockRule{Access: access, Path: mount, Required: false})
 	}
 	return expanded
+}
+
+// landlockAccessForPath removes directory-only rights from file mount points.
+// Kubernetes projects resolv.conf, hostname and hosts as individual file
+// mounts; passing READ_DIR or MAKE_* for those paths makes add_rule fail with
+// EINVAL even though the corresponding read/write file rights are valid.
+func landlockAccessForPath(path string, access uint64) uint64 {
+	info, err := os.Stat(path)
+	if err != nil || info.IsDir() {
+		return access
+	}
+	return access & (llExecute | llReadFile | llWriteFile | llTruncate)
 }
 
 // ruleForPath returns the merged access of every rule covering path. A mount
@@ -458,7 +481,14 @@ func RequirePoolHardening() error {
 	if state := hardening.seccomp.Load(); state == nil || state.State != "active" {
 		return errors.New("pool bwrap runtime requires active seccomp")
 	}
+	if state := hardening.landlock.Load(); state == nil || !poolLandlockAcceptable(*state) {
+		return errors.New("pool bwrap runtime requires active landlock or an explicitly unsupported kernel")
+	}
 	return nil
+}
+
+func poolLandlockAcceptable(state LayerState) bool {
+	return state.State == "active" || state.State == "unsupported"
 }
 
 var launcherSearchPaths = []string{launcherRuntimePath}

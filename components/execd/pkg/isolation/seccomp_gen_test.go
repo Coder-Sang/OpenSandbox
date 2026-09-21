@@ -65,6 +65,18 @@ func TestGenerateSeccompDenyBPF_ArchSpecific(t *testing.T) {
 	t.Logf("generated %d BPF instructions (%d bytes)", len(bpf)/8, len(bpf))
 }
 
+func TestPoolSeccompOverrideKeepsFloorAndOnlyRemovesSeccomp(t *testing.T) {
+	assert.Nil(t, PoolSeccompOverride(false))
+
+	override := PoolSeccompOverride(true)
+	require.NotNil(t, override)
+	assert.NotContains(t, override.Deny, "seccomp")
+	for _, required := range []string{"mount", "ptrace", "process_vm_readv", "setns", "unshare", "bpf", "keyctl"} {
+		assert.Contains(t, override.Deny, required)
+	}
+	assert.Len(t, override.Deny, len(denylistSyscalls)-1)
+}
+
 func TestFilterKnownSyscalls(t *testing.T) {
 	// Use real arch info to test known vs unknown filtering.
 	archInfo, err := arch.GetInfo("")

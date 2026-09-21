@@ -5,6 +5,8 @@ package runtime
 import (
 	"errors"
 	"os/exec"
+
+	"github.com/alibaba/opensandbox/execd/pkg/isolation"
 )
 
 type PoolMountRoot struct {
@@ -24,16 +26,22 @@ type PoolIsolationSpec struct {
 	Roots  map[string]PoolMountRoot `json:"roots"`
 	Mounts []PoolMountSelector      `json:"mounts"`
 }
-type PoolRuntimeManager struct{}
+type PoolRuntimeManager struct {
+	fatal chan error
+}
 
-func NewPoolRuntimeManager(_ interface{}) *PoolRuntimeManager { return &PoolRuntimeManager{} }
+func NewPoolRuntimeManager(_ interface{}, _ isolation.ProbeResult) *PoolRuntimeManager {
+	return &PoolRuntimeManager{fatal: make(chan error)}
+}
 func ValidatePoolIsolation(_ *PoolIsolationSpec) error {
 	return errors.New("pool bwrap runtime requires Linux")
 }
 func (m *PoolRuntimeManager) Start(_ *PoolIsolationSpec) error {
 	return errors.New("pool bwrap runtime requires Linux")
 }
+func (m *PoolRuntimeManager) Fatal() <-chan error   { return m.fatal }
 func (m *PoolRuntimeManager) Close() error          { return nil }
 func PoolRuntimeHealthy() bool                      { return false }
+func PoolRuntimeUIDMode() string                    { return "" }
 func MapFilesystemPath(path string) (string, error) { return path, nil }
 func wrapPoolCommand(_ *exec.Cmd, _ bool) error     { return nil }

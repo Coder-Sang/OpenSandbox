@@ -62,6 +62,10 @@ int main(int argc, char **argv)
     }
 
     for (int i = 0; i < NS_COUNT; i++) {
+        if (strcmp(argv[i + 1], "-") == 0) {
+            fds[i] = -1;
+            continue;
+        }
         errno = 0;
         long fd = strtol(argv[i + 1], &end, 10);
         if (errno != 0 || end == argv[i + 1] || *end != '\0' || fd < 0)
@@ -70,6 +74,8 @@ int main(int argc, char **argv)
     }
 
     for (int i = 0; i < NS_COUNT; i++) {
+        if (fds[i] < 0)
+            continue;
         if (setns(fds[i], 0) != 0)
             die("setns");
         close(fds[i]);

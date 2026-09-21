@@ -1,0 +1,27 @@
+apiVersion: sandbox.opensandbox.io/v1alpha1
+kind: BatchSandbox
+metadata:
+  name: bwrap-nested-rofail-v1
+  namespace: opensandbox
+  labels:
+    app: bwrap-nested-e2e-v1
+spec:
+  replicas: 1
+  poolRef: bwrap-nested-e2e-v1
+  taskResourcePolicyWhenCompleted: Release
+  taskTemplate:
+    spec:
+      process:
+        command:
+          - /bin/sh
+          - -c
+          - exec /opt/opensandbox/bootstrap.sh tail -f /dev/null
+        env:
+          - name: EXECD_INIT
+            value: "1"
+          - name: EXECD_RUNTIME_INIT
+            value: "1"
+          - name: EXECD_POOL_BWRAP
+            value: "1"
+          - name: OPENSANDBOX_ID
+            value: bwrap-nested-rofail-v1

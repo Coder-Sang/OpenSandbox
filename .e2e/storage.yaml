@@ -1,0 +1,40 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: bwrap-e2e-storage-257b5f39
+  namespace: opensandbox
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: bwrap-e2e-seed-257b5f39
+  namespace: opensandbox
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  containers:
+    - name: seed
+      image: opensandbox/pool-runtime:bwrap-pool-probe-257b5f39-v10
+      imagePullPolicy: Never
+      command: [/bin/sh, -c]
+      args:
+        - |
+          set -eu
+          mkdir -p /storage/projects/project-A /storage/projects/project-B /storage/shared/sdk
+          printf 'A-SECRET-257b5f39\n' > /storage/projects/project-A/identity.txt
+          printf 'B-SECRET-257b5f39\n' > /storage/projects/project-B/identity.txt
+          printf 'SHARED-RO-257b5f39\n' > /storage/shared/sdk/shared.txt
+          chmod 0777 /storage/projects/project-A /storage/projects/project-B
+      volumeMounts:
+        - name: storage
+          mountPath: /storage
+  volumes:
+    - name: storage
+      persistentVolumeClaim:
+        claimName: bwrap-e2e-storage-257b5f39

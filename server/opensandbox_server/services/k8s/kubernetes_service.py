@@ -22,6 +22,7 @@ using Kubernetes resources for sandbox lifecycle management.
 import asyncio
 import base64
 import hashlib
+import json
 import logging
 import math
 import time
@@ -58,6 +59,7 @@ from opensandbox_server.config import (
     get_config,
 )
 from opensandbox_server.services.constants import (
+    SANDBOX_EXECD_ACCESS_ENABLED_METADATA_KEY,
     SANDBOX_ID_LABEL,
     SANDBOX_MANAGED_VOLUMES_LABEL,
     SANDBOX_SECURE_ACCESS_TOKEN_METADATA_KEY,
@@ -515,7 +517,13 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
         pod_ip = parsed.hostname
         if not pod_ip:
             raise PoolIsolationError("allocated Pool Pod execd endpoint has no host")
-        allocation = (workload.get("status") or {}).get("allocation") or {}
+        metadata = workload.get("metadata") or {}
+        annotations = metadata.get("annotations") or {}
+        raw_allocation = annotations.get("sandbox.opensandbox.io/alloc-status")
+        try:
+            allocation = json.loads(raw_allocation) if isinstance(raw_allocation, str) else {}
+        except (TypeError, ValueError):
+            allocation = {}
         pod_names = allocation.get("pods") or []
         if not isinstance(pod_names, list) or len(pod_names) != 1:
             raise PoolIsolationError("bwrap-v1 allocation must contain exactly one Pod")
@@ -1005,15 +1013,17 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
                 egress_token_factory=generate_egress_token,
                 secure_access_token_factory=generate_secure_access_token,
             )
-            if pool_policy is not None and context.secure_access_token is None:
+            if pool_policy is not None:
                 # Forced bwrap Pools always authenticate execd business APIs.
                 # The raw token is returned only as endpoint headers and its
                 # digest is installed in RuntimeBinding; it never enters the
                 # task environment or bwrap namespace.
-                context.secure_access_token = generate_secure_access_token()
-                context.annotations[SANDBOX_SECURE_ACCESS_TOKEN_METADATA_KEY] = (
-                    context.secure_access_token
-                )
+                if context.secure_access_token is None:
+                    context.secure_access_token = generate_secure_access_token()
+                    context.annotations[SANDBOX_SECURE_ACCESS_TOKEN_METADATA_KEY] = (
+                        context.secure_access_token
+                    )
+                context.annotations[SANDBOX_EXECD_ACCESS_ENABLED_METADATA_KEY] = "true"
             apply_access_renew_extend_seconds_to_mapping(context.annotations, request.extensions)
             apply_extensions_to_mapping(context.annotations, request.extensions)
 

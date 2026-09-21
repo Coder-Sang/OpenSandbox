@@ -72,11 +72,13 @@ func run() int {
 		log.Error("isolation: config: %v", err)
 		return 1
 	}
-	if os.Getenv("EXECD_POOL_BWRAP") == "1" {
-		// Forced Pool isolation must not inherit a policy that retains
-		// capabilities or weakens the mandatory syscall denylist.
-		isoCfg.Hardening = &isolation.HardeningConfig{Enabled: true}
-		isoCfg.Seccomp = nil
+	forcedPoolIsolation := os.Getenv("EXECD_POOL_BWRAP") == "1"
+	if err := validatePrivateProcReadMode(isoCfg, forcedPoolIsolation); err != nil {
+		log.Error("isolation config: %v", err)
+		return 1
+	}
+	if forcedPoolIsolation {
+		isoCfg = normalizePoolIsolationConfig(isoCfg)
 	}
 	_ = os.Unsetenv("EXECD_POOL_BWRAP")
 
@@ -168,7 +170,7 @@ func run() int {
 			log.Info("isolation: runner ready, upper_root=%s", isoCfg.UpperRoot)
 		}
 	}
-	poolRuntime := runtime.NewPoolRuntimeManager(poolRuntimeIsolator)
+	poolRuntime := runtime.NewPoolRuntimeManager(poolRuntimeIsolator, isolationProbe)
 	defer func() { _ = poolRuntime.Close() }()
 	if clone3Compat {
 		log.Warn("clone3: compatibility mode enabled (seccomp returns ENOSYS for clone3)")
@@ -208,6 +210,7 @@ func run() int {
 		stopInitStartupSignals,
 		lifecycleConfig,
 		initManager,
+		poolRuntime.Fatal(),
 	); err != nil {
 		if errors.Is(err, errStartupShutdown) {
 			log.Info("execd: shutdown requested before user entrypoint started: %v", err)
@@ -217,6 +220,35 @@ func run() int {
 		return 1
 	}
 	return 0
+}
+
+// validatePrivateProcReadMode keeps the broad private-proc grant exclusive to
+// forced Pool isolation. Only that path establishes a private PID namespace
+// and a protected PID-1 anchor before user code can execute.
+func validatePrivateProcReadMode(cfg isolation.Config, forcedPoolIsolation bool) error {
+	requested := cfg.Landlock != nil && cfg.Landlock.AllowPrivateProcRead
+	if requested && !forcedPoolIsolation {
+		return errors.New("landlock.allow_private_proc_read requires forced bwrap Pool isolation")
+	}
+	return nil
+}
+
+// normalizePoolIsolationConfig applies the non-configurable Pool security
+// floor while preserving the two narrow workload mechanisms selected by the
+// operator-owned isolation file.
+func normalizePoolIsolationConfig(cfg isolation.Config) isolation.Config {
+	allowUserNotification := cfg.Hardening != nil && cfg.Hardening.AllowSeccompUserNotification
+	allowPrivateProcRead := cfg.Landlock != nil && cfg.Landlock.AllowPrivateProcRead
+	cfg.Hardening = &isolation.HardeningConfig{
+		Enabled:                      true,
+		AllowSeccompUserNotification: allowUserNotification,
+	}
+	cfg.Landlock = &isolation.LandlockConfig{
+		Enabled:              true,
+		AllowPrivateProcRead: allowPrivateProcRead,
+	}
+	cfg.Seccomp = isolation.PoolSeccompOverride(allowUserNotification)
+	return cfg
 }
 
 // entryLauncher adapts a nil init-mode launcher (classic mode) into the
@@ -235,6 +267,7 @@ func runHTTPServer(
 	stopInitStartupSignals context.CancelFunc,
 	lifecycleConfig *lifecycle.Config,
 	initManager *controller.RuntimeInitManager,
+	poolRuntimeFatal <-chan error,
 ) error {
 	addr := fmt.Sprintf(":%d", flag.ServerPort)
 	listener, err := net.Listen("tcp4", addr)
@@ -287,7 +320,46 @@ func runHTTPServer(
 		initManager.MarkReady()
 		return nil
 	}
-	return serveHTTPUntilShutdown(serverCtx, listener, engine, startup)
+	return serveHTTPUntilShutdownOnFatal(
+		serverCtx,
+		listener,
+		engine,
+		startup,
+		poolRuntimeFatal,
+	)
+}
+
+func serveHTTPUntilShutdownOnFatal(
+	ctx context.Context,
+	listener net.Listener,
+	handler http.Handler,
+	startup func() error,
+	fatal <-chan error,
+) error {
+	if fatal == nil {
+		return serveHTTPUntilShutdown(ctx, listener, handler, startup)
+	}
+
+	serveCtx, cancelServe := context.WithCancelCause(ctx)
+	watchDone := make(chan struct{})
+	go func() {
+		defer close(watchDone)
+		select {
+		case fatalErr := <-fatal:
+			if fatalErr != nil {
+				cancelServe(fatalErr)
+			}
+		case <-serveCtx.Done():
+		}
+	}()
+
+	serveErr := serveHTTPUntilShutdown(serveCtx, listener, handler, startup)
+	cancelServe(nil)
+	<-watchDone
+	if cause := context.Cause(serveCtx); cause != nil && !errors.Is(cause, context.Canceled) {
+		return errors.Join(cause, serveErr)
+	}
+	return serveErr
 }
 
 func startLifecycle(

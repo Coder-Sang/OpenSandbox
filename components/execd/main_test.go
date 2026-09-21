@@ -25,9 +25,63 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alibaba/opensandbox/execd/pkg/isolation"
 	"github.com/alibaba/opensandbox/execd/pkg/lifecycle"
 	"github.com/alibaba/opensandbox/execd/pkg/runtime"
 )
+
+func TestNormalizePoolIsolationConfigPreservesOnlyNarrowOptIns(t *testing.T) {
+	cfg := isolation.DefaultConfig()
+	cfg.Hardening = &isolation.HardeningConfig{
+		Enabled:                      false,
+		KeepCapabilities:             []string{"CAP_SYS_ADMIN"},
+		AllowSeccompUserNotification: true,
+	}
+	cfg.Landlock = &isolation.LandlockConfig{
+		Enabled:              false,
+		AllowPrivateProcRead: true,
+		ExtraReadable:        []string{"/secret"},
+		ExtraWritable:        []string{"/"},
+	}
+	cfg.Seccomp = &isolation.SeccompOverride{Deny: []string{"getpid"}}
+
+	got := normalizePoolIsolationConfig(cfg)
+	if got.Hardening == nil || !got.Hardening.Enabled || !got.Hardening.AllowSeccompUserNotification {
+		t.Fatalf("normalized hardening = %#v", got.Hardening)
+	}
+	if len(got.Hardening.KeepCapabilities) != 0 {
+		t.Fatalf("normalized keep capabilities = %v", got.Hardening.KeepCapabilities)
+	}
+	if got.Landlock == nil || !got.Landlock.Enabled || !got.Landlock.AllowPrivateProcRead {
+		t.Fatalf("normalized landlock = %#v", got.Landlock)
+	}
+	if len(got.Landlock.ExtraReadable) != 0 || len(got.Landlock.ExtraWritable) != 0 {
+		t.Fatalf("normalized Landlock path grants leaked: %#v", got.Landlock)
+	}
+	if got.Seccomp == nil {
+		t.Fatal("nested seccomp opt-in must derive a mandatory Pool denylist")
+	}
+	for _, name := range got.Seccomp.Deny {
+		if name == "seccomp" || name == "getpid" {
+			t.Fatalf("normalized denylist contains unexpected syscall %q: %v", name, got.Seccomp.Deny)
+		}
+	}
+}
+
+func TestValidatePrivateProcReadMode(t *testing.T) {
+	cfg := isolation.DefaultConfig()
+	cfg.Landlock = &isolation.LandlockConfig{Enabled: true, AllowPrivateProcRead: true}
+	if err := validatePrivateProcReadMode(cfg, false); err == nil {
+		t.Fatal("private proc read outside forced Pool isolation must fail")
+	}
+	if err := validatePrivateProcReadMode(cfg, true); err != nil {
+		t.Fatalf("private proc read in forced Pool isolation failed: %v", err)
+	}
+	cfg.Landlock.AllowPrivateProcRead = false
+	if err := validatePrivateProcReadMode(cfg, false); err != nil {
+		t.Fatalf("default private proc policy failed: %v", err)
+	}
+}
 
 type fakeIsolatedRunnerCloser struct {
 	closeFn func() error
@@ -300,6 +354,45 @@ func TestServeHTTPUntilShutdownReturnsAfterContextCancellation(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("HTTP server did not stop after shutdown cancellation")
+	}
+}
+
+func TestServeHTTPUntilShutdownOnFatalReturnsFatalError(t *testing.T) {
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	fatal := make(chan error, 1)
+	serveDone := make(chan error, 1)
+	go func() {
+		serveDone <- serveHTTPUntilShutdownOnFatal(
+			ctx,
+			listener,
+			http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusNoContent)
+			}),
+			func() error { return nil },
+			fatal,
+		)
+	}()
+
+	response, err := http.Get("http://" + listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	wantErr := errors.New("pool runtime exited")
+	fatal <- wantErr
+
+	select {
+	case err := <-serveDone:
+		if !errors.Is(err, wantErr) {
+			t.Fatalf("server error = %v, want %v", err, wantErr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("HTTP server did not stop after fatal runtime error")
 	}
 }
 

@@ -462,6 +462,7 @@ func (c *IsolatedSessionController) Capabilities() {
 			resp.Message = isolatedProbeResult.Message
 			resp.SetprivAvailable = isolatedProbeResult.SetprivAvailable
 			resp.UsernsAvailable = isolatedProbeResult.UsernsAvailable
+			resp.PoolUIDMode = preferredPoolUIDMode(isolatedProbeResult)
 		}
 		c.RespondSuccess(resp)
 		return
@@ -473,6 +474,7 @@ func (c *IsolatedSessionController) Capabilities() {
 		Version:          caps.Version,
 		SetprivAvailable: caps.SetprivAvailable,
 		UsernsAvailable:  caps.UsernsAvailable,
+		PoolUIDMode:      preferredPoolUIDMode(isolatedProbeResult),
 		CommitSupported:  caps.CommitSupported,
 		DiffSupported:    caps.DiffSupported,
 		Hardening:        hardening,
@@ -483,6 +485,19 @@ func (c *IsolatedSessionController) Capabilities() {
 	resp.CommitSupported = false
 	resp.DiffSupported = false
 	c.RespondSuccess(resp)
+}
+
+func preferredPoolUIDMode(probe *isolation.ProbeResult) string {
+	if probe == nil {
+		return ""
+	}
+	if probe.UsernsAvailable {
+		return string(isolation.UidModeUserns)
+	}
+	if probe.SetprivAvailable {
+		return string(isolation.UidModeSetpriv)
+	}
+	return ""
 }
 
 // Filesystem proxy handlers are in isolated_session_files.go.

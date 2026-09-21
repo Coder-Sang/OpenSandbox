@@ -18,7 +18,9 @@ from typing import Any, Optional
 
 from opensandbox_server.api.schema import Endpoint
 from opensandbox_server.services.constants import (
+    OPEN_SANDBOX_EXECD_ACCESS_HEADER,
     SANDBOX_EGRESS_AUTH_TOKEN_METADATA_KEY,
+    SANDBOX_EXECD_ACCESS_ENABLED_METADATA_KEY,
     SANDBOX_SECURE_ACCESS_TOKEN_METADATA_KEY,
 )
 from opensandbox_server.services.endpoint_auth import (
@@ -65,7 +67,7 @@ def _attach_secure_access_headers(endpoint: Endpoint, workload: Any) -> None:
     token = _get_secure_access_token(workload)
     if not token:
         return
-    endpoint.headers = merge_endpoint_headers(
-        endpoint.headers,
-        build_secure_access_headers(token),
-    )
+    headers = build_secure_access_headers(token)
+    if _get_annotation(workload, SANDBOX_EXECD_ACCESS_ENABLED_METADATA_KEY) == "true":
+        headers[OPEN_SANDBOX_EXECD_ACCESS_HEADER] = token
+    endpoint.headers = merge_endpoint_headers(endpoint.headers, headers)

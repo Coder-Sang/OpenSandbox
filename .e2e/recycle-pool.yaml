@@ -1,0 +1,72 @@
+apiVersion: sandbox.opensandbox.io/v1alpha1
+kind: Pool
+metadata:
+  name: bwrap-recycle-e2e-v1
+  namespace: opensandbox
+  labels:
+    app: bwrap-recycle-e2e-v1
+spec:
+  recycleStrategy:
+    type: Delete
+  template:
+    metadata:
+      labels:
+        app: bwrap-recycle-e2e-v1
+      annotations:
+        opensandbox.io/execution-isolation: bwrap-v1
+        opensandbox.io/bwrap-mount-policy: |
+          {
+            "version": 1,
+            "roots": {
+              "projects": {
+                "mountRoot": "/storage",
+                "source": "/storage/projects",
+                "targetPrefixes": ["/workspace"],
+                "maxMode": "rw"
+              }
+            }
+          }
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: sandbox
+          image: opensandbox/pool-runtime:bwrap-pool-recycle-v1
+          imagePullPolicy: Never
+          command: ["/opt/opensandbox/task-executor"]
+          args: ["-listen-addr=0.0.0.0:5758", "-log-dir=/tmp"]
+          env:
+            - name: EXECD
+              value: /opt/opensandbox/execd
+            - name: EXECD_ENVS
+              value: /opt/opensandbox/.env
+            - name: EXECD_ISOLATION_CONFIG
+              value: /etc/execd/isolation.toml
+          securityContext:
+            privileged: false
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+              add: [SYS_ADMIN, SYS_CHROOT, SETPCAP, SETGID]
+            seccompProfile:
+              type: Unconfined
+            appArmorProfile:
+              type: Unconfined
+          volumeMounts:
+            - name: storage
+              mountPath: /storage
+            - name: isolation-config
+              mountPath: /etc/execd/isolation.toml
+              subPath: isolation.toml
+              readOnly: true
+      volumes:
+        - name: storage
+          persistentVolumeClaim:
+            claimName: bwrap-recycle-e2e-v1
+        - name: isolation-config
+          configMap:
+            name: bwrap-e2e-isolation-v1
+  capacitySpec:
+    bufferMin: 1
+    bufferMax: 1
+    poolMin: 1
+    poolMax: 1

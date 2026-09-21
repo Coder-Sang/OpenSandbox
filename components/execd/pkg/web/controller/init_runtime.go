@@ -189,6 +189,7 @@ func (c *InitController) Ready() {
 		resp.SandboxID = b.SandboxID
 		resp.Generation = b.Generation
 	}
+	resp.UIDMode = runtime.PoolRuntimeUIDMode()
 	c.ctx.JSON(status, resp)
 }
 

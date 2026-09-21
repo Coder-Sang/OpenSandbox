@@ -190,7 +190,7 @@ def validate_pool_isolation(
             "maxMode": max_mode,
         }
 
-    targets: list[str] = []
+    targets: set[str] = set()
     normalized_mounts: list[Dict[str, str]] = []
     for selector in isolation.mounts:
         root = normalized_roots.get(selector.root)
@@ -212,12 +212,14 @@ def validate_pool_isolation(
             raise PoolIsolationError(f"target {selector.target!r} overlaps a trusted mount root")
         if root["maxMode"] == "ro" and selector.mode == "rw":
             raise PoolIsolationError(f"root {selector.root!r} does not allow rw mounts")
-        if any(
-            _within(target, selector.target) or _within(selector.target, target)
-            for target in targets
-        ):
-            raise PoolIsolationError(f"target {selector.target!r} overlaps another mount target")
-        targets.append(selector.target)
+        if selector.target in targets:
+            raise PoolIsolationError(f"duplicate mount target {selector.target!r}")
+        targets.add(selector.target)
         normalized_mounts.append(selector.model_dump(by_alias=True))
+
+    # Mount operations are order-sensitive: a child bind must be installed
+    # after its parent. Request order is deliberately non-semantic, so emit a
+    # canonical parent-first binding for execd and other consumers.
+    normalized_mounts.sort(key=lambda mount: (mount["target"].count("/"), mount["target"]))
 
     return {"type": "bwrap", "roots": normalized_roots, "mounts": normalized_mounts}

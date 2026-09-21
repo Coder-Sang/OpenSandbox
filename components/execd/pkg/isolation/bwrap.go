@@ -31,6 +31,7 @@ type bwrapLifecycleArgv struct {
 	controlFD  string
 	blockFD    string
 	statusFD   string
+	gatePath   string
 }
 
 // buildArgv constructs the legacy bwrap command line from wrap options.
@@ -107,7 +108,7 @@ func buildArgvWithLifecycle(
 	// Hide trusted source roots and control-plane state before installing the
 	// descriptor-pinned destinations that are intentionally exposed.
 	for _, path := range opts.MaskPaths {
-		argv = append(argv, "--tmpfs", path, "--remount-ro", path)
+		argv = append(argv, "--tmpfs", path)
 	}
 
 	// 8b. Explicit source→dest bind mounts.
@@ -139,6 +140,18 @@ func buildArgvWithLifecycle(
 	// mount namespace as one trusted owner. Defending against that owner
 	// concurrently replacing the proc mount ancestor still requires a future
 	// execveat-based launcher.
+	if lifecycle != nil {
+		if lifecycle.gatePath != "" {
+			argv = append(argv, "--ro-bind-fd", lifecycle.gateExecFD, lifecycle.gatePath)
+		}
+	}
+	// Freeze masked roots only after their descriptor-pinned exceptions have
+	// been installed. Remounting the parent tmpfs earlier prevents bwrap from
+	// creating the bind targets; remount-ro is non-recursive, so the explicit
+	// child mounts retain their independently declared access modes.
+	for _, path := range opts.MaskPaths {
+		argv = append(argv, "--remount-ro", path)
+	}
 	if lifecycle != nil {
 		argv = append(argv, "--proc", "/proc")
 	}
@@ -177,11 +190,17 @@ func buildArgvWithLifecycle(
 	// CAP_SYS_PTRACE. Once READY arrives, the gate execs setpriv and the caller's
 	// command in the same PID and namespaces.
 	if lifecycle != nil {
+		gateCommand := "/proc/self/fd/" + lifecycle.gateExecFD
+		gateExecArg := lifecycle.gateExecFD
+		if lifecycle.gatePath != "" {
+			gateCommand = lifecycle.gatePath
+			gateExecArg = "-"
+		}
 		argv = append(
 			argv,
-			"/proc/self/fd/"+lifecycle.gateExecFD,
+			gateCommand,
 			lifecycle.controlFD,
-			lifecycle.gateExecFD,
+			gateExecArg,
 			"--",
 		)
 	}
@@ -243,14 +262,16 @@ func bwrapNamespaceSegment(opts WrapOptions, useUserns bool) []string {
 }
 
 func validateWrapOptions(opts WrapOptions) error {
-	if !opts.SkipWorkspace && opts.Workspace.Path == "" {
-		return errors.New("isolation: workspace.path is required")
+	if !opts.SkipWorkspace {
+		if opts.Workspace.Path == "" {
+			return errors.New("isolation: workspace.path is required")
+		}
+		if !opts.Workspace.Mode.Valid() {
+			return fmt.Errorf("isolation: unknown workspace mode %q", opts.Workspace.Mode)
+		}
 	}
 	if !opts.Profile.Valid() {
 		return fmt.Errorf("isolation: unknown profile %q", opts.Profile)
-	}
-	if !opts.Workspace.Mode.Valid() {
-		return fmt.Errorf("isolation: unknown workspace mode %q", opts.Workspace.Mode)
 	}
 	if !opts.EnvPassthrough.Mode.Valid() && opts.EnvPassthrough.Mode != "" {
 		return fmt.Errorf("isolation: unknown env mode %q", opts.EnvPassthrough.Mode)

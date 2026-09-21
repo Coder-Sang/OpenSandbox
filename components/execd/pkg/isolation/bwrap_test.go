@@ -156,6 +156,7 @@ func TestBuildArgv_PoolRuntimeHardening(t *testing.T) {
 	opts := basicWrapOpts()
 	opts.RootWritable = true
 	opts.SkipWorkspace = true
+	opts.Workspace = WorkspaceSpec{}
 	opts.DropCapabilities = true
 	opts.MaskPaths = []string{"/storage", "/opt/opensandbox"}
 	opts.Binds = []BindMount{{Source: "/source", sourceFD: "9", Dest: "/workspace/a", ReadOnly: true}}
@@ -166,7 +167,8 @@ func TestBuildArgv_PoolRuntimeHardening(t *testing.T) {
 	assert.Contains(t, joined, "--bind / /")
 	assert.NotContains(t, joined, "--ro-bind / /")
 	assert.Contains(t, joined, "--ro-bind /sys /sys")
-	assert.Contains(t, joined, "--tmpfs /storage --remount-ro /storage")
+	assert.Contains(t, joined, "--tmpfs /storage")
+	assert.Contains(t, joined, "--remount-ro /storage")
 	assert.Contains(t, joined, "--ro-bind-fd 9 /workspace/a")
 	assert.Contains(t, joined, "--cap-drop ALL")
 	assert.NotContains(t, joined, "--bind /workspace /workspace")

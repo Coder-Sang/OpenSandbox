@@ -352,7 +352,7 @@ func validateWorkloadIdentity(
 			netNamespaceID,
 		)
 	}
-	if controlFD < 3 || controlSocketInode == 0 {
+	if controlFD < 0 || controlSocketInode == 0 {
 		return WorkloadIdentity{}, errors.New("native workload gate socket identity is unavailable")
 	}
 	actualSocketInode, err := readControlSocketInode(workloadPID, controlFD)

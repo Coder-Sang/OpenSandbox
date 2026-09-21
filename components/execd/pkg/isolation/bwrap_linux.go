@@ -17,6 +17,7 @@
 package isolation
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -237,6 +238,19 @@ func (b *bwrapImpl) WrapWithLifecycle(
 	if err != nil {
 		return nil, fmt.Errorf("bwrap: parse native workload gate descriptor: %w", err)
 	}
+	gatePath := ""
+	if opts.LifecycleControlStdin {
+		if cmd.Stdin != nil {
+			return nil, errors.New("bwrap: lifecycle control stdin requires an unused command stdin")
+		}
+		// os/exec duplicates this file to fd 0 before bwrap starts. Keep the
+		// ExtraFiles entry as well so the caller's existing post-Start cleanup
+		// closes the parent copy without a second lifecycle API.
+		cmd.Stdin = controlChild
+		controlFD = "0"
+		controlChildFD = 0
+		gatePath = sessionGateRuntimeHostPath
+	}
 
 	argv, err := buildArgvWithLifecycle(
 		opts,
@@ -246,6 +260,7 @@ func (b *bwrapImpl) WrapWithLifecycle(
 			controlFD:  controlFD,
 			blockFD:    setupFD,
 			statusFD:   statusFD,
+			gatePath:   gatePath,
 		},
 	)
 	if err != nil {

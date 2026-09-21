@@ -100,6 +100,7 @@ type RuntimeReadyResponse struct {
 	Initialized bool   `json:"initialized"`
 	SandboxID   string `json:"sandboxId,omitempty"`
 	Generation  uint64 `json:"generation,omitempty"`
+	UIDMode     string `json:"uidMode,omitempty"`
 }
 
 // RuntimeInitStatus advertises the runtime-init protocol version on the

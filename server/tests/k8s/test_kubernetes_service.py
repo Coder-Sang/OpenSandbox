@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import base64
 import pytest
 from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
@@ -22,8 +23,10 @@ from fastapi import HTTPException
 from opensandbox_server.services.k8s.kubernetes_service import KubernetesSandboxService
 from opensandbox_server.services.constants import (
     OPEN_SANDBOX_EGRESS_AUTH_HEADER,
+    OPEN_SANDBOX_EXECD_ACCESS_HEADER,
     OPEN_SANDBOX_SECURE_ACCESS_HEADER,
     SANDBOX_EGRESS_AUTH_TOKEN_METADATA_KEY,
+    SANDBOX_EXECD_ACCESS_ENABLED_METADATA_KEY,
     SANDBOX_SECURE_ACCESS_TOKEN_METADATA_KEY,
     SANDBOX_ID_LABEL,
     SANDBOX_MANAGED_VOLUMES_LABEL,
@@ -90,6 +93,37 @@ class TestKubernetesSandboxServiceInit:
             assert exc_info.value.detail["code"] == SandboxErrorCodes.K8S_INITIALIZATION_ERROR
 
 class TestKubernetesSandboxServiceCreate:
+
+    def test_read_allocated_execd_token_uses_allocation_annotation(self, k8s_service):
+        pod_name = "bwrap-pool-pod"
+        workload = {
+            "metadata": {
+                "annotations": {
+                    "sandbox.opensandbox.io/alloc-status": (
+                        '{"pods":["bwrap-pool-pod"],"poolRef":"secure"}'
+                    )
+                }
+            }
+        }
+        k8s_service.workload_provider.get_internal_endpoint.return_value = Endpoint(
+            endpoint="10.0.0.9:44772"
+        )
+        k8s_service.k8s_client.read_pod.return_value = SimpleNamespace(
+            status=SimpleNamespace(pod_ip="10.0.0.9"),
+            metadata=SimpleNamespace(
+                annotations={"opensandbox.io/control-token-secret": "pod-control"}
+            ),
+        )
+        k8s_service.k8s_client.get_secret.return_value = SimpleNamespace(
+            data={"execd-token": base64.b64encode(b"control-token").decode()}
+        )
+
+        token = k8s_service._read_allocated_execd_token(workload, "sandbox-1")
+
+        assert token == "control-token"
+        k8s_service.k8s_client.read_pod.assert_called_once_with(
+            k8s_service._resolve_namespace(), pod_name
+        )
 
     def test_credential_proxy_requires_dns_nft_mode(
         self, k8s_service, create_sandbox_request
@@ -678,6 +712,26 @@ class TestKubernetesSandboxServiceCreate:
         assert endpoint.headers == {
             "OpenSandbox-Ingress-To": "sbx-123-44772",
             OPEN_SANDBOX_SECURE_ACCESS_HEADER: "secure-token",
+        }
+
+    def test_get_forced_pool_endpoint_adds_execd_business_auth_header(self, k8s_service):
+        k8s_service.workload_provider.get_workload.return_value = {
+            "metadata": {
+                "annotations": {
+                    SANDBOX_SECURE_ACCESS_TOKEN_METADATA_KEY: "secure-token",
+                    SANDBOX_EXECD_ACCESS_ENABLED_METADATA_KEY: "true",
+                }
+            }
+        }
+        k8s_service.workload_provider.get_endpoint_info.return_value = Endpoint(
+            endpoint="10.0.0.1:44772"
+        )
+
+        endpoint = k8s_service.get_endpoint("sbx-123", 44772)
+
+        assert endpoint.headers == {
+            OPEN_SANDBOX_SECURE_ACCESS_HEADER: "secure-token",
+            OPEN_SANDBOX_EXECD_ACCESS_HEADER: "secure-token",
         }
 
     def test_get_user_endpoint_also_merges_secure_access_header(

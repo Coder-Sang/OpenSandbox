@@ -187,6 +187,7 @@ type CapabilitiesResponse struct {
 	Message          string             `json:"message,omitempty"`
 	SetprivAvailable bool               `json:"setpriv_available"`
 	UsernsAvailable  bool               `json:"userns_available"`
+	PoolUIDMode      string             `json:"pool_uid_mode,omitempty"`
 	CommitSupported  bool               `json:"commit_supported"`
 	DiffSupported    bool               `json:"diff_supported"`
 	Hardening        *HardeningStatus   `json:"hardening,omitempty"`

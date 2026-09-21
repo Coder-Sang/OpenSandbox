@@ -88,6 +88,10 @@ type HardeningConfig struct {
 	// KeepCapabilities lists capabilities the workload retains (raised in
 	// the ambient set). Default: drop all.
 	KeepCapabilities []string `toml:"keep_capabilities"`
+	// AllowSeccompUserNotification permits workloads to install additional
+	// seccomp filters. Nested filters stack with the outer execd filter and
+	// cannot weaken it.
+	AllowSeccompUserNotification bool `toml:"allow_seccomp_user_notification"`
 }
 
 // LandlockConfig controls Landlock filesystem confinement (OSEP-0018 §5).
@@ -95,6 +99,9 @@ type LandlockConfig struct {
 	// Enabled applies a Landlock allowlist to user-code processes, on top
 	// of the [hardening] floor.
 	Enabled bool `toml:"enabled"`
+	// AllowPrivateProcRead is accepted only by forced Pool isolation after a
+	// private PID namespace and protected anchor have been established.
+	AllowPrivateProcRead bool `toml:"allow_private_proc_read"`
 	// ExtraWritable grants read+write (and file creation) beneath extra
 	// paths beyond the built-in set (system paths, /proc/self, /tmp, /run,
 	// allowed_writable).

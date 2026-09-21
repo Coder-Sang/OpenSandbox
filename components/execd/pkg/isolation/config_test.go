@@ -53,6 +53,14 @@ allowed_writable = ["/tmp", "/var/run"]
 
 [seccomp]
 deny = ["mount", "ptrace"]
+
+[hardening]
+enabled = true
+allow_seccomp_user_notification = true
+
+[landlock]
+enabled = true
+allow_private_proc_read = true
 `
 	path := writeTempTOML(t, content)
 
@@ -65,6 +73,10 @@ deny = ["mount", "ptrace"]
 	assert.Equal(t, []string{"/tmp", "/var/run"}, cfg.AllowedWritable)
 	require.NotNil(t, cfg.Seccomp)
 	assert.Equal(t, []string{"mount", "ptrace"}, cfg.Seccomp.Deny)
+	require.NotNil(t, cfg.Hardening)
+	assert.True(t, cfg.Hardening.AllowSeccompUserNotification)
+	require.NotNil(t, cfg.Landlock)
+	assert.True(t, cfg.Landlock.AllowPrivateProcRead)
 }
 
 func TestLoadConfig_InvalidTOML(t *testing.T) {

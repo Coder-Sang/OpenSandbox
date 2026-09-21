@@ -41,6 +41,11 @@ SANDBOX_ORIGIN_TEMPLATE = "template"
 SANDBOX_EGRESS_AUTH_TOKEN_METADATA_KEY = "opensandbox.io/egress-auth-token"
 OPEN_SANDBOX_SECURE_ACCESS_HEADER = "OpenSandbox-Secure-Access"
 SANDBOX_SECURE_ACCESS_TOKEN_METADATA_KEY = "opensandbox.io/secure-access-token"
+# Forced bwrap Pools reuse the secure-access token as execd's business API
+# credential. This marker prevents the execd-specific header from being
+# attached to ordinary secure-access workloads.
+OPEN_SANDBOX_EXECD_ACCESS_HEADER = "X-EXECD-ACCESS-TOKEN"
+SANDBOX_EXECD_ACCESS_ENABLED_METADATA_KEY = "opensandbox.io/execd-access-enabled"
 
 # Environment variable name for passing network policy to egress sidecar
 EGRESS_RULES_ENV = "OPENSANDBOX_EGRESS_RULES"
@@ -192,6 +197,8 @@ __all__ = [
     "SANDBOX_EGRESS_AUTH_TOKEN_METADATA_KEY",
     "OPEN_SANDBOX_SECURE_ACCESS_HEADER",
     "SANDBOX_SECURE_ACCESS_TOKEN_METADATA_KEY",
+    "OPEN_SANDBOX_EXECD_ACCESS_HEADER",
+    "SANDBOX_EXECD_ACCESS_ENABLED_METADATA_KEY",
     "EGRESS_RULES_ENV",
     "EGRESS_MODE_ENV",
     "OPENSANDBOX_EGRESS_TOKEN",

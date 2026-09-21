@@ -136,6 +136,21 @@ func TestCapabilities_ReportsModeSpecificProbeResults(t *testing.T) {
 	}
 }
 
+func TestPreferredPoolUIDMode(t *testing.T) {
+	if got := preferredPoolUIDMode(&isolation.ProbeResult{
+		SetprivAvailable: true,
+		UsernsAvailable:  true,
+	}); got != "userns" {
+		t.Fatalf("preferred mode = %q, want userns", got)
+	}
+	if got := preferredPoolUIDMode(&isolation.ProbeResult{SetprivAvailable: true}); got != "setpriv" {
+		t.Fatalf("fallback mode = %q, want setpriv", got)
+	}
+	if got := preferredPoolUIDMode(&isolation.ProbeResult{}); got != "" {
+		t.Fatalf("unavailable mode = %q, want empty", got)
+	}
+}
+
 func TestUnavailableAdmissionDoesNotBlockSessionCleanupRoutes(t *testing.T) {
 	previousRunner := isolatedRunner
 	runner, err := runtime.NewIsolatedRunner(
