@@ -66,13 +66,6 @@ RUN if [ -n "${CC}" ]; then export CC; fi; \
               -X 'github.com/alibaba/opensandbox/internal/version.GitCommit=${GIT_COMMIT}'" \
     -o /build/execd ./main.go
 
-RUN CGO_ENABLED=0 GOOS=windows go build ${GOFLAGS} -trimpath -buildvcs=false \
-    -ldflags "${LDFLAGS} -buildid= -B none \
-              -X 'github.com/alibaba/opensandbox/internal/version.Version=${VERSION}' \
-              -X 'github.com/alibaba/opensandbox/internal/version.BuildTime=${BUILD_TIME}' \
-              -X 'github.com/alibaba/opensandbox/internal/version.GitCommit=${GIT_COMMIT}'" \
-    -o /build/execd.exe ./main.go
-
 # Build static bubblewrap with musl.
 FROM alpine:latest AS bwrap-builder
 RUN apk add --no-cache git musl-dev meson ninja gcc libcap-dev libcap-static pkgconfig bash
@@ -154,7 +147,6 @@ COPY --from=bwrap-builder --chown=0:0 /build/opensandbox-launcher /opt/opensandb
 COPY --from=bwrap-builder --chown=0:0 /build/opensandbox-nsenter /usr/local/libexec/opensandbox-nsenter
 COPY --from=bwrap-builder --chown=0:0 /build/opensandbox-nsenter /opt/opensandbox/opensandbox-nsenter
 COPY --from=builder /build/execd .
-COPY --from=builder /build/execd.exe ./execd.exe
 COPY --from=builder /build/opensandbox-supervisor ./opensandbox-supervisor
 COPY --from=ebpf-builder /build/execd-ebpf ./execd-ebpf
 COPY components/execd/bootstrap.sh ./bootstrap.sh
@@ -164,7 +156,6 @@ COPY components/execd/install.bat ./install.bat
 # permissions or the builder's umask.
 RUN chmod 0755 \
     ./execd \
-    ./execd.exe \
     ./execd-ebpf \
     ./opensandbox-supervisor \
     ./bootstrap.sh \
