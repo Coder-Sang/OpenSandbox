@@ -220,6 +220,14 @@ type WorkloadLifecycle interface {
 	Close() error
 }
 
+// ProtectedAnchorLifecycle extends the startup gate for a Pool PID-1 anchor.
+// The method returns only after the native gate confirms that the anchor is
+// non-dumpable; ordinary workloads continue to use MarkReady.
+type ProtectedAnchorLifecycle interface {
+	WorkloadLifecycle
+	MarkAnchorReady() error
+}
+
 // LifecycleIsolator is required for secure isolated sessions. The legacy Wrap
 // method remains for ordinary callers, while WrapWithLifecycle adds the
 // fail-closed startup protocol. After WrapWithLifecycle returns successfully,

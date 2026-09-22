@@ -37,8 +37,9 @@ import (
 const (
 	sessionGateRuntimeHostPath = "/opt/opensandbox/opensandbox-session-gate"
 
-	sessionGateWaitingFrame = "OPENSANDBOX_SESSION_WAITING_V1"
-	sessionGateReadyFrame   = "OPENSANDBOX_SESSION_READY_V1"
+	sessionGateWaitingFrame  = "OPENSANDBOX_SESSION_WAITING_V1"
+	sessionGateReadyFrame    = "OPENSANDBOX_SESSION_READY_V1"
+	poolAnchorProtectedFrame = "OPENSANDBOX_POOL_ANCHOR_PROTECTED_V1"
 
 	maxBwrapStatusDocumentBytes = 64 * 1024
 	maxBwrapStatusDocuments     = 1024
@@ -437,6 +438,14 @@ func readNetNamespaceID(pid int) (uint64, error) {
 }
 
 func (l *bwrapLifecycle) MarkReady() error {
+	return l.markReady(false)
+}
+
+func (l *bwrapLifecycle) MarkAnchorReady() error {
+	return l.markReady(true)
+}
+
+func (l *bwrapLifecycle) markReady(waitForProtection bool) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
@@ -470,6 +479,29 @@ func (l *bwrapLifecycle) MarkReady() error {
 			n,
 			len(sessionGateReadyFrame),
 		)
+	}
+	if waitForProtection {
+		if err := l.control.SetReadDeadline(time.Now().Add(controlWriteTimeout)); err != nil {
+			l.abortLocked()
+			return fmt.Errorf("set pool anchor protection deadline: %w", err)
+		}
+		payload := make([]byte, len(poolAnchorProtectedFrame)+1)
+		oob := make([]byte, unix.CmsgSpace(unix.SizeofUcred))
+		n, oobn, flags, _, err := l.control.ReadMsgUnix(payload, oob)
+		if err != nil {
+			l.abortLocked()
+			return fmt.Errorf("wait for protected pool anchor: %w", err)
+		}
+		if flags&(unix.MSG_TRUNC|unix.MSG_CTRUNC) != 0 ||
+			string(payload[:n]) != poolAnchorProtectedFrame {
+			l.abortLocked()
+			return errors.New("pool anchor protection acknowledgement is invalid")
+		}
+		credentials, err := parseSingleUnixCredentials(oob[:oobn])
+		if err != nil || int(credentials.Pid) != l.identity.PID {
+			l.abortLocked()
+			return errors.New("pool anchor protection sender does not match workload")
+		}
 	}
 	// A complete SOCK_SEQPACKET write is the irreversible release point.
 	// Cleanup failures cannot make an already-released workload fail closed,

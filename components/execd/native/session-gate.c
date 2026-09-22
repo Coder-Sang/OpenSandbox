@@ -29,11 +29,13 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <signal.h>
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/prctl.h>
 #include <sys/socket.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #define GATE_FAILURE 125
@@ -42,6 +44,7 @@
 
 static const char waiting_frame[] = "OPENSANDBOX_SESSION_WAITING_V1";
 static const char ready_frame[] = "OPENSANDBOX_SESSION_READY_V1";
+static const char protected_frame[] = "OPENSANDBOX_POOL_ANCHOR_PROTECTED_V1";
 
 static int parse_fd(const char *value)
 {
@@ -95,6 +98,61 @@ static void fail_closed_at(int control_fd, int exec_fd, const char *stage)
     fail_closed(control_fd, exec_fd);
 }
 
+static void anchor_signal_handler(int signal_number)
+{
+    (void)signal_number;
+}
+
+static void run_pool_anchor(int control_fd)
+{
+    sigset_t signals;
+    struct sigaction action;
+    int signal_number;
+    ssize_t sent;
+
+    if (sigemptyset(&signals) != 0 ||
+        sigaddset(&signals, SIGCHLD) != 0 ||
+        sigaddset(&signals, SIGTERM) != 0 ||
+        sigaddset(&signals, SIGINT) != 0 ||
+        sigprocmask(SIG_BLOCK, &signals, NULL) != 0)
+        fail_closed_at(control_fd, -1, "block pool anchor signals");
+
+    /* Namespace PID 1 ignores default-action termination signals. Install
+     * dispositions before waiting so SIGTERM and SIGINT remain deliverable. */
+    memset(&action, 0, sizeof(action));
+    action.sa_handler = anchor_signal_handler;
+    if (sigemptyset(&action.sa_mask) != 0 ||
+        sigaction(SIGCHLD, &action, NULL) != 0 ||
+        sigaction(SIGTERM, &action, NULL) != 0 ||
+        sigaction(SIGINT, &action, NULL) != 0)
+        fail_closed_at(control_fd, -1, "install pool anchor signal handlers");
+
+    /* Execd has already authenticated the gate and pinned its root and
+     * namespaces before sending READY. Stay in this process: an execve of a
+     * normal shell would reset the dumpable attribute back to 1. */
+    if (prctl(PR_SET_DUMPABLE, 0, 0, 0, 0) != 0)
+        fail_closed_at(control_fd, -1, "protect pool anchor");
+
+    sent = send(control_fd, protected_frame, sizeof(protected_frame) - 1,
+                MSG_NOSIGNAL);
+    if (sent != (ssize_t)(sizeof(protected_frame) - 1))
+        fail_closed_at(control_fd, -1, "acknowledge protected pool anchor");
+    if (close(control_fd) != 0)
+        _exit(GATE_FAILURE);
+
+    for (;;) {
+        signal_number = sigwaitinfo(&signals, NULL);
+        if (signal_number == SIGTERM || signal_number == SIGINT)
+            _exit(0);
+        if (signal_number == SIGCHLD) {
+            while (waitpid(-1, NULL, WNOHANG) > 0)
+                ;
+        } else if (signal_number < 0 && errno != EINTR) {
+            fail_closed_at(-1, -1, "wait for pool anchor signal");
+        }
+    }
+}
+
 int main(int argc, char **argv)
 {
     int control_fd;
@@ -104,6 +162,7 @@ int main(int argc, char **argv)
     char incoming[sizeof(ready_frame)];
     ssize_t received;
     ssize_t sent;
+    int pool_anchor;
 
     if (argc < 5 || strcmp(argv[3], "--") != 0)
         fail_closed_at(-1, -1, "invalid arguments");
@@ -130,16 +189,10 @@ int main(int argc, char **argv)
         socket_type != SOCK_SEQPACKET)
         fail_closed_at(control_fd, -1, "control descriptor is not seqpacket");
 
-    /*
-     * The long-lived Pool PID-1 anchor shares the workload UID. A dedicated
-     * process-observation Pool grants read access to its private procfs, so
-     * protect the anchor before advertising that the gate is waiting. Ordinary
-     * commands do not carry this internal marker and remain observable by
-     * their fs-tracker parent.
-     */
-    if (getenv(POOL_ANCHOR_ENV) != NULL) {
-        if (prctl(PR_SET_DUMPABLE, 0, 0, 0, 0) != 0)
-            fail_closed_at(control_fd, -1, "protect pool anchor");
+    /* Only the Pool's internal anchor uses this marker. Defer protection
+     * until execd has completed its /proc identity and FD checks. */
+    pool_anchor = getenv(POOL_ANCHOR_ENV) != NULL;
+    if (pool_anchor) {
         if (unsetenv(POOL_ANCHOR_ENV) != 0)
             fail_closed_at(control_fd, -1, "clear pool anchor marker");
     }
@@ -157,6 +210,9 @@ int main(int argc, char **argv)
     if (received != (ssize_t)(sizeof(ready_frame) - 1) ||
         memcmp(incoming, ready_frame, sizeof(ready_frame) - 1) != 0)
         fail_closed_at(control_fd, -1, "receive ready frame");
+
+    if (pool_anchor)
+        run_pool_anchor(control_fd);
 
     if (close(control_fd) != 0)
         _exit(GATE_FAILURE);
