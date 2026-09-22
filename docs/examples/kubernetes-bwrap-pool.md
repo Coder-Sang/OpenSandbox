@@ -1,3 +1,8 @@
+---
+title: Dynamic PVC selection with a bwrap Pool
+description: Configure prewarmed Kubernetes Pods with request-scoped bwrap mounts and verify pool runtime readiness.
+---
+
 # Dynamic PVC selection with a bwrap Pool
 
 `bwrap-v1` Pools mount a PVC once while Pods are pre-warmed. A Create Sandbox
@@ -152,6 +157,15 @@ directories are created with mode `0755` only through a writable parent and
 remain on the PVC; a read-only parent requires the directory to exist.
 Failure to establish or verify the bwrap runtime leaves execd unready and the
 Pool Pod is deleted; it never falls back to direct execution.
+
+For startup latency diagnostics, correlate the `sandbox_id` in Server's
+`Pool allocation`, `Pool control token read`, and `Pool runtime init` log lines
+with execd's `pool runtime init` line. Server reports allocation, token read,
+execd ping, init POST, and ready-poll milliseconds. Execd reports source
+descriptor pinning, nested target preparation, bwrap preparation and launch,
+identity wait, and per-mount verification. These logs include counts and safe
+error types but no source paths, target paths, or tokens. A warm Pool Pod still
+requires request-specific isolation mounts and verification before it is ready.
 
 The selected UID mode is exposed as `uidMode` by `/ready` and as
 `pool_uid_mode` by the capabilities endpoint. In `setpriv` mode the user

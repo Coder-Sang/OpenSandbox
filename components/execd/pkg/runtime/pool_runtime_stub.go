@@ -36,7 +36,7 @@ func NewPoolRuntimeManager(_ interface{}, _ isolation.ProbeResult) *PoolRuntimeM
 func ValidatePoolIsolation(_ *PoolIsolationSpec) error {
 	return errors.New("pool bwrap runtime requires Linux")
 }
-func (m *PoolRuntimeManager) Start(_ *PoolIsolationSpec) error {
+func (m *PoolRuntimeManager) Start(_ *PoolIsolationSpec, _ string) error {
 	return errors.New("pool bwrap runtime requires Linux")
 }
 func (m *PoolRuntimeManager) Fatal() <-chan error   { return m.fatal }

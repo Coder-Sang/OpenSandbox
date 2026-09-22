@@ -297,7 +297,7 @@ func (m *RuntimeInitManager) Apply(req *model.RuntimeInitRequest) ([]string, mod
 	// is deliberately no direct-exec fallback.
 	if req.Isolation != nil {
 		m.poolRequired.Store(true)
-		if err := m.cfg.PoolRuntime.Start(req.Isolation); err != nil {
+		if err := m.cfg.PoolRuntime.Start(req.Isolation, req.SandboxID); err != nil {
 			return warnings, model.ErrorCodeRuntimeError, http.StatusInternalServerError,
 				fmt.Errorf("runtime init bwrap: %w", err)
 		}

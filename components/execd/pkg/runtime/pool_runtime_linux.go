@@ -77,6 +77,11 @@ type poolMountInfo struct {
 	mode   string
 }
 
+type poolMountTimings struct {
+	pinSources    time.Duration
+	nestedTargets time.Duration
+}
+
 type poolRuntimeState struct {
 	pid        int
 	uidMode    isolation.UidMode
@@ -247,9 +252,37 @@ func pathWithin(parent, child string) bool {
 }
 
 // Start creates and authenticates the long-lived bwrap runtime.
-func (m *PoolRuntimeManager) Start(spec *PoolIsolationSpec) error {
+func (m *PoolRuntimeManager) Start(spec *PoolIsolationSpec, sandboxID string) (resultErr error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	started := time.Now()
+	stageStarted := started
+	stage := "validation"
+	stages := make(map[string]time.Duration)
+	markStage := func(next string) {
+		stages[stage] = time.Since(stageStarted)
+		stage = next
+		stageStarted = time.Now()
+	}
+	mountTimings := poolMountTimings{}
+	defer func() {
+		stages[stage] = time.Since(stageStarted)
+		outcome := "success"
+		errorType := "none"
+		if resultErr != nil {
+			outcome = "failure"
+			errorType = fmt.Sprintf("%T", resultErr)
+		}
+		mountCount := 0
+		if spec != nil {
+			mountCount = len(spec.Mounts)
+		}
+		log.Info("pool runtime init sandbox_id=%s mount_count=%d outcome=%s stage=%s error_type=%s validation_ms=%d pin_sources_ms=%d nested_targets_ms=%d mount_prepare_ms=%d bwrap_prepare_ms=%d launch_ms=%d identity_ms=%d verify_ms=%d finalization_ms=%d total_ms=%d",
+			sandboxID, mountCount, outcome, stage, errorType,
+			stages["validation"].Milliseconds(), mountTimings.pinSources.Milliseconds(), mountTimings.nestedTargets.Milliseconds(),
+			stages["mount_prepare"].Milliseconds(), stages["bwrap_prepare"].Milliseconds(), stages["launch"].Milliseconds(),
+			stages["identity"].Milliseconds(), stages["verify"].Milliseconds(), stages["finalization"].Milliseconds(), time.Since(started).Milliseconds())
+	}()
 	if m.started {
 		return errors.New("pool bwrap runtime already started")
 	}
@@ -273,7 +306,8 @@ func (m *PoolRuntimeManager) Start(spec *PoolIsolationSpec) error {
 		return err
 	}
 
-	binds, expectations, masks, err := openPoolMounts(spec)
+	markStage("mount_prepare")
+	binds, expectations, masks, err := openPoolMountsWithTimings(spec, &mountTimings)
 	if err != nil {
 		return err
 	}
@@ -319,6 +353,7 @@ func (m *PoolRuntimeManager) Start(spec *PoolIsolationSpec) error {
 	// execd so a fail-closed startup identifies the failing boundary.
 	cmd.Stderr = os.Stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	markStage("bwrap_prepare")
 	lifecycle, err := m.isolator.WrapWithLifecycle(cmd, opts)
 	if err != nil {
 		return fmt.Errorf("prepare pool bwrap runtime: %w", err)
@@ -326,6 +361,7 @@ func (m *PoolRuntimeManager) Start(spec *PoolIsolationSpec) error {
 	if lifecycle == nil {
 		return errors.New("pool bwrap runtime lifecycle is unavailable")
 	}
+	markStage("launch")
 	mp, err := launchManaged(cmd, withoutHardening(), withoutPoolRuntime())
 	if err != nil {
 		lifecycle.Abort()
@@ -336,6 +372,7 @@ func (m *PoolRuntimeManager) Start(spec *PoolIsolationSpec) error {
 	closeCommandExtraFiles(cmd)
 	closeBinds = false
 
+	markStage("identity")
 	ctx, cancel := context.WithTimeout(context.Background(), poolRuntimeStartupTimeout)
 	identity, err := lifecycle.WaitForIdentity(ctx)
 	cancel()
@@ -349,11 +386,13 @@ func (m *PoolRuntimeManager) Start(spec *PoolIsolationSpec) error {
 		return fmt.Errorf("pin pool bwrap root: %w", err)
 	}
 	root := os.NewFile(uintptr(rootFD), "pool-bwrap-root")
+	markStage("verify")
 	if err := verifyPoolMounts(identity.PID, root, expectations); err != nil {
 		_ = root.Close()
 		lifecycle.Abort()
 		return fmt.Errorf("verify pool bwrap mounts: %w", err)
 	}
+	markStage("finalization")
 	namespaceFiles, err := pinPoolNamespaces(identity.PID, m.uidMode)
 	if err != nil {
 		_ = root.Close()
@@ -446,46 +485,66 @@ func poolRuntimeMaskPaths(storageMasks []string) []string {
 }
 
 func openPoolMounts(spec *PoolIsolationSpec) ([]isolation.BindMount, []poolMountExpectation, []string, error) {
+	return openPoolMountsWithTimings(spec, nil)
+}
+
+func openPoolMountsWithTimings(spec *PoolIsolationSpec, timings *poolMountTimings) ([]isolation.BindMount, []poolMountExpectation, []string, error) {
 	mounts := sortedPoolMounts(spec.Mounts)
 	binds := make([]isolation.BindMount, 0, len(mounts))
 	expectations := make([]poolMountExpectation, 0, len(mounts))
 	maskSet := make(map[string]struct{})
+	rootFDs := make(map[string]int, len(spec.Roots))
+	defer func() {
+		for _, fd := range rootFDs {
+			_ = unix.Close(fd)
+		}
+	}()
 	for _, root := range spec.Roots {
 		maskSet[root.MountRoot] = struct{}{}
 	}
+	pinStarted := time.Now()
+	pinFinished := false
+	defer func() {
+		if timings != nil && !pinFinished {
+			timings.pinSources = time.Since(pinStarted)
+		}
+	}()
 	// Open and pin every source before creating any nested destination. This
 	// prevents a directory created for one selector from changing which source
 	// a later selector resolves to.
 	for _, selector := range mounts {
-		root := spec.Roots[selector.Root]
-		mountRootFD, err := unix.Openat2(unix.AT_FDCWD, root.MountRoot, &unix.OpenHow{
-			Flags:   unix.O_PATH | unix.O_DIRECTORY | unix.O_CLOEXEC,
-			Resolve: unix.RESOLVE_NO_MAGICLINKS | unix.RESOLVE_NO_SYMLINKS,
-		})
-		if err != nil {
-			closePoolBinds(binds)
-			return nil, nil, nil, fmt.Errorf("open isolation mountRoot %q: %w", selector.Root, err)
-		}
-		sourceRelative, err := filepath.Rel(root.MountRoot, root.Source)
-		if err != nil {
+		rootFD, exists := rootFDs[selector.Root]
+		if !exists {
+			root := spec.Roots[selector.Root]
+			mountRootFD, err := unix.Openat2(unix.AT_FDCWD, root.MountRoot, &unix.OpenHow{
+				Flags:   unix.O_PATH | unix.O_DIRECTORY | unix.O_CLOEXEC,
+				Resolve: unix.RESOLVE_NO_MAGICLINKS | unix.RESOLVE_NO_SYMLINKS,
+			})
+			if err != nil {
+				closePoolBinds(binds)
+				return nil, nil, nil, fmt.Errorf("open isolation mountRoot %q: %w", selector.Root, err)
+			}
+			sourceRelative, err := filepath.Rel(root.MountRoot, root.Source)
+			if err != nil {
+				_ = unix.Close(mountRootFD)
+				closePoolBinds(binds)
+				return nil, nil, nil, fmt.Errorf("resolve isolation root %q: %w", selector.Root, err)
+			}
+			rootFD, err = unix.Openat2(mountRootFD, sourceRelative, &unix.OpenHow{
+				Flags:   unix.O_PATH | unix.O_DIRECTORY | unix.O_CLOEXEC,
+				Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_MAGICLINKS | unix.RESOLVE_NO_SYMLINKS,
+			})
 			_ = unix.Close(mountRootFD)
-			closePoolBinds(binds)
-			return nil, nil, nil, fmt.Errorf("resolve isolation root %q: %w", selector.Root, err)
-		}
-		rootFD, err := unix.Openat2(mountRootFD, sourceRelative, &unix.OpenHow{
-			Flags:   unix.O_PATH | unix.O_DIRECTORY | unix.O_CLOEXEC,
-			Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_MAGICLINKS | unix.RESOLVE_NO_SYMLINKS,
-		})
-		_ = unix.Close(mountRootFD)
-		if err != nil {
-			closePoolBinds(binds)
-			return nil, nil, nil, fmt.Errorf("open isolation root %q: %w", selector.Root, err)
+			if err != nil {
+				closePoolBinds(binds)
+				return nil, nil, nil, fmt.Errorf("open isolation root %q: %w", selector.Root, err)
+			}
+			rootFDs[selector.Root] = rootFD
 		}
 		fd, err := unix.Openat2(rootFD, selector.SubPath, &unix.OpenHow{
 			Flags:   unix.O_PATH | unix.O_DIRECTORY | unix.O_CLOEXEC,
 			Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_MAGICLINKS | unix.RESOLVE_NO_SYMLINKS,
 		})
-		_ = unix.Close(rootFD)
 		if err != nil {
 			closePoolBinds(binds)
 			return nil, nil, nil, fmt.Errorf("open isolation mount %q/%q: %w", selector.Root, selector.SubPath, err)
@@ -508,9 +567,20 @@ func openPoolMounts(spec *PoolIsolationSpec) ([]isolation.BindMount, []poolMount
 			ino:    stat.Ino,
 		})
 	}
+	pinFinished = true
+	if timings != nil {
+		timings.pinSources = time.Since(pinStarted)
+	}
+	nestedStarted := time.Now()
 	if err := prepareNestedPoolMountpoints(mounts, binds); err != nil {
+		if timings != nil {
+			timings.nestedTargets = time.Since(nestedStarted)
+		}
 		closePoolBinds(binds)
 		return nil, nil, nil, err
+	}
+	if timings != nil {
+		timings.nestedTargets = time.Since(nestedStarted)
 	}
 	masks := make([]string, 0, len(maskSet))
 	for mask := range maskSet {
@@ -521,8 +591,12 @@ func openPoolMounts(spec *PoolIsolationSpec) ([]isolation.BindMount, []poolMount
 }
 
 func prepareNestedPoolMountpoints(mounts []PoolMountSelector, binds []isolation.BindMount) error {
-	for childIndex, child := range mounts {
-		parentIndex := nearestPoolMountAncestor(mounts, childIndex)
+	byTarget := make(map[string]int, len(mounts))
+	for index, mount := range mounts {
+		byTarget[mount.Target] = index
+	}
+	for _, child := range mounts {
+		parentIndex := nearestPoolMountAncestor(child.Target, byTarget)
 		if parentIndex < 0 {
 			continue
 		}
@@ -550,21 +624,13 @@ func prepareNestedPoolMountpoints(mounts []PoolMountSelector, binds []isolation.
 	return nil
 }
 
-func nearestPoolMountAncestor(mounts []PoolMountSelector, childIndex int) int {
-	child := mounts[childIndex]
-	nearest := -1
-	nearestDepth := -1
-	for candidateIndex, candidate := range mounts {
-		if candidateIndex == childIndex || candidate.Target == child.Target || !pathWithin(candidate.Target, child.Target) {
-			continue
-		}
-		depth := strings.Count(candidate.Target, "/")
-		if depth > nearestDepth {
-			nearest = candidateIndex
-			nearestDepth = depth
+func nearestPoolMountAncestor(target string, byTarget map[string]int) int {
+	for parent := filepath.Dir(target); parent != "/" && parent != "."; parent = filepath.Dir(parent) {
+		if index, exists := byTarget[parent]; exists {
+			return index
 		}
 	}
-	return nearest
+	return -1
 }
 
 func openPoolDirectoryAt(parentFD int, relative string) (int, error) {
@@ -596,7 +662,6 @@ func mkdirAllPoolDirectoryAt(parentFD int, relative, guestTarget string) error {
 			}
 			nextFD, openErr = openPoolDirectoryAt(currentFD, part)
 			if openErr == nil {
-				log.Info("created nested Pool mount target %s", currentTarget)
 			}
 		}
 		if openErr != nil {
@@ -622,28 +687,25 @@ func verifyPoolMounts(pid int, root *os.File, expectations []poolMountExpectatio
 		if err != nil {
 			return fmt.Errorf("open mounted target %q: %w", expected.target, err)
 		}
-		var stat unix.Stat_t
-		statErr := unix.Fstat(fd, &stat)
-		if statErr != nil {
-			_ = unix.Close(fd)
-			return fmt.Errorf("stat mounted target %q: %w", expected.target, statErr)
+		var statx unix.Statx_t
+		statxErr := unix.Statx(fd, "", unix.AT_EMPTY_PATH|unix.AT_SYMLINK_NOFOLLOW, unix.STATX_BASIC_STATS|unix.STATX_MNT_ID, &statx)
+		_ = unix.Close(fd)
+		if statxErr != nil {
+			return fmt.Errorf("stat mounted target %q: %w", expected.target, statxErr)
 		}
-		if uint64(stat.Dev) != expected.dev || stat.Ino != expected.ino {
-			_ = unix.Close(fd)
+		if statx.Mask&unix.STATX_INO == 0 || statx.Mask&unix.STATX_MNT_ID == 0 {
+			return fmt.Errorf("mounted target %q lacks identity or mount ID", expected.target)
+		}
+		device := uint64(unix.Mkdev(statx.Dev_major, statx.Dev_minor))
+		if device != expected.dev || statx.Ino != expected.ino {
 			return fmt.Errorf(
 				"mounted target %q identity mismatch: got dev=%d ino=%d, want dev=%d ino=%d",
 				expected.target,
-				uint64(stat.Dev),
-				stat.Ino,
+				device,
+				statx.Ino,
 				expected.dev,
 				expected.ino,
 			)
-		}
-		var statx unix.Statx_t
-		statxErr := unix.Statx(fd, "", unix.AT_EMPTY_PATH|unix.AT_SYMLINK_NOFOLLOW, unix.STATX_MNT_ID, &statx)
-		_ = unix.Close(fd)
-		if statxErr != nil {
-			return fmt.Errorf("read mounted target %q mount ID: %w", expected.target, statxErr)
 		}
 		mount, exists := mounts[statx.Mnt_id]
 		if !exists {

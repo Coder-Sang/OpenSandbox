@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -86,6 +87,45 @@ func TestSortedPoolMountsUsesParentFirstCanonicalOrder(t *testing.T) {
 		"/workspace/z/child",
 	}, []string{sorted[0].Target, sorted[1].Target, sorted[2].Target, sorted[3].Target})
 	require.Equal(t, "/workspace/z/child", mounts[0].Target, "input order must not be mutated")
+}
+
+func TestNearestPoolMountAncestorUsesClosestPath(t *testing.T) {
+	byTarget := map[string]int{
+		"/workspace":         0,
+		"/workspace/a":       1,
+		"/workspace/a/deep":  2,
+		"/workspace/another": 3,
+	}
+	require.Equal(t, 2, nearestPoolMountAncestor("/workspace/a/deep/child", byTarget))
+	require.Equal(t, 0, nearestPoolMountAncestor("/workspace/new", byTarget))
+	require.Equal(t, -1, nearestPoolMountAncestor("/other/new", byTarget))
+}
+
+func TestNearestPoolMountAncestorMatchesPreviousScan(t *testing.T) {
+	targets := []string{
+		"/projects/a", "/projects/a/src", "/projects/a/src/pkg",
+		"/projects/a2", "/users/alice", "/users/alice/cache",
+		"/tmp/client-gateway/git-metadata/a", "/opt/client-gateway/runtime-packages/a",
+	}
+	byTarget := make(map[string]int, len(targets))
+	for index, target := range targets {
+		byTarget[target] = index
+	}
+	for _, target := range append(targets, "/projects/a/src/pkg/deep", "/projects/missing", "/unrelated") {
+		previous := -1
+		previousDepth := -1
+		for index, candidate := range targets {
+			if candidate == target || !pathWithin(candidate, target) {
+				continue
+			}
+			depth := strings.Count(candidate, "/")
+			if depth > previousDepth {
+				previous = index
+				previousDepth = depth
+			}
+		}
+		require.Equal(t, previous, nearestPoolMountAncestor(target, byTarget), target)
+	}
 }
 
 func TestValidatePoolIsolationRejectsControlTarget(t *testing.T) {
@@ -278,6 +318,64 @@ func TestOpenPoolMountsRejectsSymlinkRenameRace(t *testing.T) {
 	require.Positive(t, successes)
 }
 
+func TestOpenPoolMountsClosesPinnedRootAndSourceAfterFailure(t *testing.T) {
+	mountRoot := t.TempDir()
+	projects := filepath.Join(mountRoot, "projects")
+	require.NoError(t, os.MkdirAll(filepath.Join(projects, "present"), 0o755))
+	spec := validPoolIsolationSpec()
+	root := spec.Roots["projects"]
+	root.MountRoot = mountRoot
+	root.Source = projects
+	spec.Roots["projects"] = root
+	spec.Mounts = []PoolMountSelector{
+		{Root: "projects", SubPath: "present", Target: "/workspace/a", Mode: "rw"},
+		{Root: "projects", SubPath: "missing", Target: "/workspace/b", Mode: "rw"},
+	}
+	before, err := os.ReadDir("/proc/self/fd")
+	require.NoError(t, err)
+	_, _, _, err = openPoolMounts(spec)
+	require.Error(t, err)
+	after, err := os.ReadDir("/proc/self/fd")
+	require.NoError(t, err)
+	require.Len(t, after, len(before), "failed mount preparation leaked file descriptors")
+}
+
+func BenchmarkPrepareNestedPoolMountpointsUnrelated(b *testing.B) {
+	mounts := make([]PoolMountSelector, 1669)
+	for i := range mounts {
+		mounts[i].Target = fmt.Sprintf("/projects/%d", i)
+	}
+	binds := make([]isolation.BindMount, len(mounts))
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if err := prepareNestedPoolMountpoints(mounts, binds); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkPreviousNestedAncestorScanUnrelated(b *testing.B) {
+	mounts := make([]PoolMountSelector, 1669)
+	for i := range mounts {
+		mounts[i].Target = fmt.Sprintf("/projects/%d", i)
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		for childIndex, child := range mounts {
+			nearestDepth := -1
+			for candidateIndex, candidate := range mounts {
+				if candidateIndex == childIndex || candidate.Target == child.Target || !pathWithin(candidate.Target, child.Target) {
+					continue
+				}
+				depth := strings.Count(candidate.Target, "/")
+				if depth > nearestDepth {
+					nearestDepth = depth
+				}
+			}
+		}
+	}
+}
+
 func TestOpenPoolMountsCreatesMissingNestedTargetThroughWritableParent(t *testing.T) {
 	spec, parentSource := nestedPoolIsolationSpec(t, "rw", false)
 
@@ -369,6 +467,39 @@ func TestParsePoolMountInfo(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, poolMountInfo{target: "/workspace root", mode: "ro"}, mounts[36])
 	require.Equal(t, poolMountInfo{target: "/workspace root/cache", mode: "rw"}, mounts[37])
+}
+
+func TestVerifyPoolMountsChecksIdentityAndMode(t *testing.T) {
+	rootFD, err := unix.Open("/", unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	require.NoError(t, err)
+	root := os.NewFile(uintptr(rootFD), "root")
+	t.Cleanup(func() { _ = root.Close() })
+	mountFD, err := unix.Open("/proc", unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	require.NoError(t, err)
+	defer func() { _ = unix.Close(mountFD) }()
+	var stat unix.Stat_t
+	require.NoError(t, unix.Fstat(mountFD, &stat))
+	mountInfo, err := readPoolMountInfo(os.Getpid())
+	require.NoError(t, err)
+	mode := ""
+	for _, mount := range mountInfo {
+		if mount.target == "/proc" {
+			mode = mount.mode
+			break
+		}
+	}
+	require.NotEmpty(t, mode)
+	expected := poolMountExpectation{target: "/proc", mode: mode, dev: uint64(stat.Dev), ino: stat.Ino}
+	require.NoError(t, verifyPoolMounts(os.Getpid(), root, []poolMountExpectation{expected}))
+	expected.ino++
+	require.ErrorContains(t, verifyPoolMounts(os.Getpid(), root, []poolMountExpectation{expected}), "identity mismatch")
+	expected.ino--
+	if mode == "ro" {
+		expected.mode = "rw"
+	} else {
+		expected.mode = "ro"
+	}
+	require.ErrorContains(t, verifyPoolMounts(os.Getpid(), root, []poolMountExpectation{expected}), "mode is")
 }
 
 func nestedPoolIsolationSpec(t *testing.T, parentMode string, createTarget bool) (*PoolIsolationSpec, string) {

@@ -557,6 +557,47 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
         control_token: str,
         business_token: str,
     ) -> None:
+        """Time the one-shot pool runtime initialization without logging its payload."""
+        started = time.monotonic()
+        timings: Dict[str, Any] = {"phase": "prepare", "phase_started": started}
+        outcome = "success"
+        error_type = "none"
+        try:
+            await self._initialize_pool_bwrap_runtime_steps(
+                workload, request, sandbox_id, policy, control_token, business_token, timings
+            )
+        except BaseException as exc:
+            outcome = "failure"
+            error_type = type(exc).__name__
+            raise
+        finally:
+            phase = timings["phase"]
+            timings[f"{phase}_ms"] = int((time.monotonic() - timings["phase_started"]) * 1000)
+            logger.info(
+                "Pool runtime init sandbox_id=%s mount_count=%d outcome=%s error_type=%s "
+                "prepare_ms=%d ping_ms=%d post_ms=%d ready_ms=%d post_error_type=%s total_ms=%d",
+                sandbox_id,
+                len(policy.get("mounts") or []),
+                outcome,
+                error_type,
+                timings.get("prepare_ms", 0),
+                timings.get("ping_ms", 0),
+                timings.get("post_ms", 0),
+                timings.get("ready_ms", 0),
+                timings.get("post_error_type", "none"),
+                int((time.monotonic() - started) * 1000),
+            )
+
+    async def _initialize_pool_bwrap_runtime_steps(
+        self,
+        workload: Dict[str, Any],
+        request: CreateSandboxRequest,
+        sandbox_id: str,
+        policy: Dict[str, Any],
+        control_token: str,
+        business_token: str,
+        timings: Dict[str, Any],
+    ) -> None:
         """Apply one-shot execd runtime init and verify the bound identity."""
         endpoint = self.workload_provider.get_internal_endpoint(workload, 44772, sandbox_id)
         if endpoint is None:
@@ -578,8 +619,15 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
             payload["lifecycle"] = request.lifecycle.model_dump(by_alias=True, exclude_none=True)
         headers = {"X-EXECD-ACCESS-TOKEN": control_token}
 
+        def begin_phase(next_phase: str) -> None:
+            now = time.monotonic()
+            timings[f"{timings['phase']}_ms"] = int((now - timings["phase_started"]) * 1000)
+            timings["phase"] = next_phase
+            timings["phase_started"] = now
+
         async with httpx.AsyncClient(timeout=5.0) as client:
             deadline = time.monotonic() + 30.0
+            begin_phase("ping")
             while True:
                 try:
                     ping = await client.get(base_url + "/ping")
@@ -592,6 +640,7 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
                 await asyncio.sleep(0.25)
 
             post_error: Exception | None = None
+            begin_phase("post")
             try:
                 response = await client.post(
                     base_url + "/internal/init", json=payload, headers=headers
@@ -604,6 +653,11 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
                 # The response may have been lost after execd consumed its
                 # one-shot slot. Reconcile through /ready before deciding.
                 post_error = exc
+
+            timings["post_error_type"] = (
+                type(post_error).__name__ if post_error is not None else "none"
+            )
+            begin_phase("ready")
 
             while time.monotonic() < deadline:
                 try:
@@ -1153,17 +1207,50 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
             try:
                 kubernetes_config = self.app_config.kubernetes
                 assert kubernetes_config is not None
-                workload = await self._wait_for_sandbox_ready(
-                    sandbox_id=sandbox_id,
-                    timeout_seconds=kubernetes_config.sandbox_create_timeout_seconds,
-                    poll_interval_seconds=kubernetes_config.sandbox_create_poll_interval_seconds,
-                    pool_acquisition_timeout_seconds=kubernetes_config.pool_acquisition_timeout_seconds,
-                )
+                allocation_started = time.monotonic()
+                allocation_succeeded = False
+                allocation_error_type = "none"
+                try:
+                    workload = await self._wait_for_sandbox_ready(
+                        sandbox_id=sandbox_id,
+                        timeout_seconds=kubernetes_config.sandbox_create_timeout_seconds,
+                        poll_interval_seconds=kubernetes_config.sandbox_create_poll_interval_seconds,
+                        pool_acquisition_timeout_seconds=kubernetes_config.pool_acquisition_timeout_seconds,
+                    )
+                    allocation_succeeded = True
+                except BaseException as exc:
+                    allocation_error_type = type(exc).__name__
+                    raise
+                finally:
+                    if pool_policy is not None:
+                        logger.info(
+                            "Pool allocation sandbox_id=%s outcome=%s error_type=%s duration_ms=%d",
+                            sandbox_id,
+                            "success" if allocation_succeeded else "failure",
+                            allocation_error_type,
+                            int((time.monotonic() - allocation_started) * 1000),
+                        )
                 if pool_policy is not None:
                     try:
-                        pool_execd_token = await asyncio.to_thread(
-                            self._read_allocated_execd_token, workload, sandbox_id
-                        )
+                        token_started = time.monotonic()
+                        token_succeeded = False
+                        token_error_type = "none"
+                        try:
+                            pool_execd_token = await asyncio.to_thread(
+                                self._read_allocated_execd_token, workload, sandbox_id
+                            )
+                            token_succeeded = True
+                        except BaseException as exc:
+                            token_error_type = type(exc).__name__
+                            raise
+                        finally:
+                            logger.info(
+                                "Pool control token read sandbox_id=%s outcome=%s error_type=%s duration_ms=%d",
+                                sandbox_id,
+                                "success" if token_succeeded else "failure",
+                                token_error_type,
+                                int((time.monotonic() - token_started) * 1000),
+                            )
                         await self._initialize_pool_bwrap_runtime(
                             workload,
                             request,
