@@ -74,7 +74,7 @@ func TestPoolRuntimeClusterBenchmark(t *testing.T) {
 	if !ok {
 		t.Fatal("bwrap lifecycle unavailable")
 	}
-	manager := NewPoolRuntimeManager(isolator, probe)
+	manager := NewPoolRuntimeManager(isolator, probe, config.PoolRuntime.PreserveJitiCache)
 	defer func() { _ = manager.Close() }()
 	if err := manager.Start(spec, "pool-bench-"+sample); err != nil {
 		t.Fatal(err)

@@ -30,7 +30,7 @@ type PoolRuntimeManager struct {
 	fatal chan error
 }
 
-func NewPoolRuntimeManager(_ interface{}, _ isolation.ProbeResult) *PoolRuntimeManager {
+func NewPoolRuntimeManager(_ interface{}, _ isolation.ProbeResult, _ bool) *PoolRuntimeManager {
 	return &PoolRuntimeManager{fatal: make(chan error)}
 }
 func ValidatePoolIsolation(_ *PoolIsolationSpec) error {

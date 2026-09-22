@@ -174,6 +174,24 @@ func TestBuildArgv_PoolRuntimeHardening(t *testing.T) {
 	assert.NotContains(t, joined, "--bind /workspace /workspace")
 }
 
+func TestBuildArgv_PoolRuntimeJitiCacheInsidePrivateTmp(t *testing.T) {
+	opts := basicWrapOpts()
+	opts.Profile = ProfileStrict
+	opts.RootWritable = true
+	opts.SkipWorkspace = true
+	opts.Workspace = WorkspaceSpec{}
+	opts.Binds = []BindMount{{Source: "/tmp/jiti", sourceFD: "9", Dest: "/tmp/jiti"}}
+
+	argv, err := buildArgv(opts, "")
+	require.NoError(t, err)
+	joined := strings.Join(argv, " ")
+	tmpIndex := strings.Index(joined, "--tmpfs /tmp")
+	cacheIndex := strings.Index(joined, "--bind-fd 9 /tmp/jiti")
+	require.GreaterOrEqual(t, tmpIndex, 0)
+	require.Greater(t, cacheIndex, tmpIndex)
+	assert.NotContains(t, joined, "--bind /tmp /tmp")
+}
+
 func TestBuildArgv_EnvPassthrough(t *testing.T) {
 	t.Run("deny_with_keys", func(t *testing.T) {
 		opts := basicWrapOpts()

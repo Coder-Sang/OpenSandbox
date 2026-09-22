@@ -26,10 +26,11 @@ import (
 // Config holds all isolation-related settings, loaded from a TOML file.
 // Missing fields fall back to DefaultConfig values.
 type Config struct {
-	UpperRoot       string   `toml:"upper_root"`
-	UpperMaxBytes   int64    `toml:"upper_max_bytes"`
-	DiffMaxBytes    int64    `toml:"diff_max_bytes"`
-	AllowedWritable []string `toml:"allowed_writable"`
+	UpperRoot       string            `toml:"upper_root"`
+	UpperMaxBytes   int64             `toml:"upper_max_bytes"`
+	DiffMaxBytes    int64             `toml:"diff_max_bytes"`
+	AllowedWritable []string          `toml:"allowed_writable"`
+	PoolRuntime     PoolRuntimeConfig `toml:"pool_runtime"`
 
 	// Seccomp overrides the built-in syscall denylist. When nil (i.e. the
 	// [seccomp] section is absent), the built-in denylist is used. When
@@ -51,6 +52,13 @@ type Config struct {
 	// written as JSONL to a rotating audit file. Requires the execd-ebpf
 	// build variant. Defaults to off.
 	Ebpf *EbpfConfig `toml:"ebpf"`
+}
+
+// PoolRuntimeConfig controls trusted, one-shot bwrap Pool mounts.
+type PoolRuntimeConfig struct {
+	// PreserveJitiCache exposes only the image's /tmp/jiti inside the Pool's
+	// otherwise private /tmp. It is disabled by default.
+	PreserveJitiCache bool `toml:"preserve_jiti_cache"`
 }
 
 // execdConfigEnvBlacklist enumerates execd's own configuration env vars.

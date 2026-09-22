@@ -39,6 +39,13 @@ diff_max_bytes = 4294967296  # 4 GiB
 # Built-in default: ["/workspace", "/mnt", "/media", "/data"].
 allowed_writable = ["/workspace", "/mnt", "/media", "/data"]
 
+# Optional for one-shot bwrap Pools with an image-prewarmed Pi Jiti cache.
+# Keeps /tmp private but bind-mounts the image's /tmp/jiti into it. Missing or
+# invalid cache directories fail Pool startup. Do not point /tmp/jiti at a
+# shared host or PVC directory.
+# [pool_runtime]
+# preserve_jiti_cache = true
+
 # Seccomp is ALWAYS ACTIVE by default — the built-in denylist blocks ~30
 # dangerous syscalls (mount, ptrace, bpf, etc.) even without this section.
 #

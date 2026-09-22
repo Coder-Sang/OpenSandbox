@@ -36,6 +36,38 @@ func validPoolIsolationSpec() *PoolIsolationSpec {
 	}
 }
 
+func TestOpenPoolJitiCache(t *testing.T) {
+	cache := filepath.Join(t.TempDir(), "jiti")
+	require.NoError(t, os.Mkdir(cache, 0o700))
+	bind, err := openPoolJitiCache(cache)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = bind.SourceFile.Close() })
+	require.Equal(t, "/tmp/jiti", bind.Dest)
+	require.False(t, bind.ReadOnly)
+	require.NotNil(t, bind.SourceFile)
+
+	// The source is pinned even if its pathname changes before bwrap mounts it.
+	require.NoError(t, os.Rename(cache, cache+"-renamed"))
+	_, err = bind.SourceFile.Stat()
+	require.NoError(t, err)
+}
+
+func TestOpenPoolJitiCacheRejectsMissingOrUnsafeSource(t *testing.T) {
+	dir := t.TempDir()
+	_, err := openPoolJitiCache(filepath.Join(dir, "missing"))
+	require.Error(t, err)
+
+	file := filepath.Join(dir, "file")
+	require.NoError(t, os.WriteFile(file, nil, 0o600))
+	_, err = openPoolJitiCache(file)
+	require.Error(t, err)
+
+	symlink := filepath.Join(dir, "symlink")
+	require.NoError(t, os.Symlink(dir, symlink))
+	_, err = openPoolJitiCache(symlink)
+	require.Error(t, err)
+}
+
 func TestValidatePoolIsolation(t *testing.T) {
 	require.NoError(t, ValidatePoolIsolation(validPoolIsolationSpec()))
 }
@@ -199,7 +231,7 @@ func TestPoolRuntimeMaskPathsUsePrivateRun(t *testing.T) {
 }
 
 func TestPoolRuntimeExitSignalsFatalOnceAndCleansPins(t *testing.T) {
-	manager := NewPoolRuntimeManager(nil, isolation.ProbeResult{})
+	manager := NewPoolRuntimeManager(nil, isolation.ProbeResult{}, false)
 	root, err := os.CreateTemp(t.TempDir(), "root-pin")
 	require.NoError(t, err)
 	namespace, err := os.CreateTemp(t.TempDir(), "namespace-pin")
@@ -236,7 +268,7 @@ func TestPoolRuntimeExitSignalsFatalOnceAndCleansPins(t *testing.T) {
 }
 
 func TestPoolRuntimeExitDuringCloseDoesNotSignalFatal(t *testing.T) {
-	manager := NewPoolRuntimeManager(nil, isolation.ProbeResult{})
+	manager := NewPoolRuntimeManager(nil, isolation.ProbeResult{}, false)
 	require.NoError(t, manager.Close())
 	state := &poolRuntimeState{}
 	state.valid.Store(true)

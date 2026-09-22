@@ -118,23 +118,25 @@ var poolRuntimeRequired atomic.Bool
 // Pod. It is intentionally one-shot: a failed or exited runtime is never
 // replaced in the same Pod.
 type PoolRuntimeManager struct {
-	isolator  isolation.LifecycleIsolator
-	uidMode   isolation.UidMode
-	mu        sync.Mutex
-	started   bool
-	state     *poolRuntimeState
-	closing   atomic.Bool
-	fatal     chan error
-	fatalOnce sync.Once
+	isolator          isolation.LifecycleIsolator
+	uidMode           isolation.UidMode
+	preserveJitiCache bool
+	mu                sync.Mutex
+	started           bool
+	state             *poolRuntimeState
+	closing           atomic.Bool
+	fatal             chan error
+	fatalOnce         sync.Once
 }
 
 // NewPoolRuntimeManager creates a manager. A nil isolator is retained so a
 // forced bwrap request fails closed instead of falling back to direct exec.
-func NewPoolRuntimeManager(iso isolation.LifecycleIsolator, probe isolation.ProbeResult) *PoolRuntimeManager {
+func NewPoolRuntimeManager(iso isolation.LifecycleIsolator, probe isolation.ProbeResult, preserveJitiCache bool) *PoolRuntimeManager {
 	return &PoolRuntimeManager{
-		isolator: iso,
-		uidMode:  preferredPoolUIDMode(probe),
-		fatal:    make(chan error, 1),
+		isolator:          iso,
+		uidMode:           preferredPoolUIDMode(probe),
+		preserveJitiCache: preserveJitiCache,
+		fatal:             make(chan error, 1),
 	}
 }
 
@@ -336,6 +338,13 @@ func (m *PoolRuntimeManager) Start(spec *PoolIsolationSpec, sandboxID string) (r
 			closePoolBinds(binds)
 		}
 	}()
+	if m.preserveJitiCache {
+		cacheBind, cacheErr := openPoolJitiCache("/tmp/jiti")
+		if cacheErr != nil {
+			return fmt.Errorf("prepare Pool Jiti cache: %w", cacheErr)
+		}
+		binds = append(binds, cacheBind)
+	}
 
 	// The launcher is the only execd helper user commands need. Expose a
 	// descriptor-pinned, read-only copy after /opt/opensandbox is masked.
@@ -467,6 +476,17 @@ func (m *PoolRuntimeManager) Start(spec *PoolIsolationSpec, sandboxID string) (r
 	go m.monitorPoolRuntime(state)
 	log.Info("pool bwrap runtime ready pid=%d mounts=%d uid_mode=%s", identity.PID, len(spec.Mounts), m.uidMode)
 	return nil
+}
+
+func openPoolJitiCache(path string) (isolation.BindMount, error) {
+	fd, err := unix.Open(path, unix.O_PATH|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return isolation.BindMount{}, fmt.Errorf("open image Jiti cache: %w", err)
+	}
+	return isolation.BindMount{
+		SourceFile: os.NewFile(uintptr(fd), path),
+		Dest:       "/tmp/jiti",
+	}, nil
 }
 
 // requirePoolVarRunAlias ensures that bwrap's fresh /run tmpfs also hides

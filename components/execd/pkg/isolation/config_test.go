@@ -30,6 +30,7 @@ func TestDefaultConfig(t *testing.T) {
 	assert.Equal(t, int64(4*1024*1024*1024), cfg.DiffMaxBytes)
 	assert.Equal(t, []string{"/workspace", "/mnt", "/media", "/data"}, cfg.AllowedWritable)
 	assert.Nil(t, cfg.Seccomp)
+	assert.False(t, cfg.PoolRuntime.PreserveJitiCache)
 }
 
 func TestLoadConfig_EmptyPath(t *testing.T) {
@@ -61,6 +62,9 @@ allow_seccomp_user_notification = true
 [landlock]
 enabled = true
 allow_private_proc_read = true
+
+[pool_runtime]
+preserve_jiti_cache = true
 `
 	path := writeTempTOML(t, content)
 
@@ -77,6 +81,7 @@ allow_private_proc_read = true
 	assert.True(t, cfg.Hardening.AllowSeccompUserNotification)
 	require.NotNil(t, cfg.Landlock)
 	assert.True(t, cfg.Landlock.AllowPrivateProcRead)
+	assert.True(t, cfg.PoolRuntime.PreserveJitiCache)
 }
 
 func TestLoadConfig_InvalidTOML(t *testing.T) {

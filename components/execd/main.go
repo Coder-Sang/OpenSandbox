@@ -170,7 +170,7 @@ func run() int {
 			log.Info("isolation: runner ready, upper_root=%s", isoCfg.UpperRoot)
 		}
 	}
-	poolRuntime := runtime.NewPoolRuntimeManager(poolRuntimeIsolator, isolationProbe)
+	poolRuntime := runtime.NewPoolRuntimeManager(poolRuntimeIsolator, isolationProbe, isoCfg.PoolRuntime.PreserveJitiCache)
 	defer func() { _ = poolRuntime.Close() }()
 	if clone3Compat {
 		log.Warn("clone3: compatibility mode enabled (seccomp returns ENOSYS for clone3)")

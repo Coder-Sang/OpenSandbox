@@ -34,6 +34,23 @@ data:
     allow_private_proc_read = false
 ```
 
+The Pool normally gives each bubblewrap runtime a fresh `/tmp`. Images that
+prewarm Pi's Jiti cache at `/tmp/jiti` can opt in to preserving only that
+directory:
+
+```toml
+[pool_runtime]
+preserve_jiti_cache = true
+```
+
+Add this section to the Pool's trusted `isolation.toml` ConfigMap only when the
+image contains `/tmp/jiti`. Execd pins that directory without following a
+symlink and bind-mounts it read-write inside the otherwise private `/tmp`.
+Missing or invalid cache directories fail Pool runtime startup. The option is
+off by default and does not expose the Pod's other temporary files. Because the
+cache is writable from the workload, use it only with a one-shot Pool Pod whose
+image owns the prewarmed cache; do not use a shared host or PVC cache here.
+
 `allow_seccomp_user_notification` permits a process-observation workload to
 install a stricter nested seccomp filter; the outer execd filter remains in
 force. `allow_private_proc_read` is intentionally disabled by default because
