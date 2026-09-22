@@ -123,6 +123,34 @@ func TestPreferredPoolUIDMode(t *testing.T) {
 	}
 }
 
+func TestRequirePoolVarRunAlias(t *testing.T) {
+	root := t.TempDir()
+	runPath := filepath.Join(root, "run")
+	varRunPath := filepath.Join(root, "var-run")
+	require.NoError(t, os.Mkdir(runPath, 0o755))
+	require.NoError(t, os.Symlink(runPath, varRunPath))
+	require.NoError(t, requirePoolVarRunAlias(runPath, varRunPath))
+
+	require.NoError(t, os.Remove(varRunPath))
+	require.NoError(t, os.Mkdir(varRunPath, 0o755))
+	require.ErrorContains(t, requirePoolVarRunAlias(runPath, varRunPath), "must be a symlink")
+
+	require.NoError(t, os.Remove(varRunPath))
+	otherPath := filepath.Join(root, "other")
+	require.NoError(t, os.Mkdir(otherPath, 0o755))
+	require.NoError(t, os.Symlink(otherPath, varRunPath))
+	require.ErrorContains(t, requirePoolVarRunAlias(runPath, varRunPath), "instead of /run")
+}
+
+func TestPoolRuntimeMaskPathsUsePrivateRun(t *testing.T) {
+	storageMasks := []string{"/mnt/storage"}
+	masks := poolRuntimeMaskPaths(storageMasks)
+
+	require.Equal(t, []string{"/mnt/storage", "/opt/opensandbox", "/run/execd"}, masks)
+	require.Equal(t, []string{"/mnt/storage"}, storageMasks)
+	require.NotContains(t, masks, "/var/run/secrets/kubernetes.io/serviceaccount")
+}
+
 func TestPoolRuntimeExitSignalsFatalOnceAndCleansPins(t *testing.T) {
 	manager := NewPoolRuntimeManager(nil, isolation.ProbeResult{})
 	root, err := os.CreateTemp(t.TempDir(), "root-pin")

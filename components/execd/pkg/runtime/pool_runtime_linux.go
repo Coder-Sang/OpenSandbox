@@ -269,6 +269,9 @@ func (m *PoolRuntimeManager) Start(spec *PoolIsolationSpec) error {
 	if !m.uidMode.Valid() {
 		return errors.New("pool bwrap runtime has no usable uid mode")
 	}
+	if err := requirePoolVarRunAlias("/run", "/var/run"); err != nil {
+		return err
+	}
 
 	binds, expectations, masks, err := openPoolMounts(spec)
 	if err != nil {
@@ -303,7 +306,7 @@ func (m *PoolRuntimeManager) Start(spec *PoolIsolationSpec) error {
 		UidMode:               m.uidMode,
 		RootWritable:          true,
 		SkipWorkspace:         true,
-		MaskPaths:             append(masks, "/opt/opensandbox", "/run/execd", "/var/run/secrets/kubernetes.io/serviceaccount"),
+		MaskPaths:             poolRuntimeMaskPaths(masks),
 		DropCapabilities:      true,
 		LifecycleControlStdin: true,
 		EnvPassthrough:        isolation.EnvSpec{Mode: isolation.EnvModeDeny},
@@ -394,6 +397,40 @@ func (m *PoolRuntimeManager) Start(spec *PoolIsolationSpec) error {
 	go m.monitorPoolRuntime(state)
 	log.Info("pool bwrap runtime ready pid=%d mounts=%d uid_mode=%s", identity.PID, len(spec.Mounts), m.uidMode)
 	return nil
+}
+
+// requirePoolVarRunAlias ensures that bwrap's fresh /run tmpfs also hides
+// /var/run/secrets. A separate /var/run could expose a ServiceAccount mount,
+// so an unsupported layout fails closed rather than relying on a nested mask.
+func requirePoolVarRunAlias(runPath, varRunPath string) error {
+	info, err := os.Lstat(varRunPath)
+	if err != nil {
+		return fmt.Errorf("inspect pool /var/run: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		return errors.New("pool /var/run must be a symlink to /run")
+	}
+	resolvedRun, err := filepath.EvalSymlinks(runPath)
+	if err != nil {
+		return fmt.Errorf("resolve pool /run: %w", err)
+	}
+	resolvedVarRun, err := filepath.EvalSymlinks(varRunPath)
+	if err != nil {
+		return fmt.Errorf("resolve pool /var/run: %w", err)
+	}
+	if resolvedVarRun != resolvedRun {
+		return fmt.Errorf("pool /var/run resolves to %q instead of /run", resolvedVarRun)
+	}
+	return nil
+}
+
+func poolRuntimeMaskPaths(storageMasks []string) []string {
+	masks := make([]string, 0, len(storageMasks)+2)
+	masks = append(masks, storageMasks...)
+	// /var/run is required to point at /run, which bwrap replaces with a
+	// private tmpfs. A nested mask for the ServiceAccount path would fail when
+	// its parents are absent inside that tmpfs.
+	return append(masks, "/opt/opensandbox", "/run/execd")
 }
 
 func openPoolMounts(spec *PoolIsolationSpec) ([]isolation.BindMount, []poolMountExpectation, []string, error) {
