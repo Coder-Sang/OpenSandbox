@@ -41,6 +41,11 @@ const poolRuntimeStartupTimeout = 10 * time.Second
 
 const poolAnchorEnv = "OPENSANDBOX_POOL_ANCHOR=1"
 
+// Eight workers kept full-start p95 within 5% of sixteen workers in the
+// 1000-mount dev EFS benchmark, while using fewer concurrent lookups.
+// The benchmark test overrides this before starting its one-shot runtime.
+var poolPinWorkerCount = 8
+
 // PoolMountRoot is a trusted source declared by the Pool template.
 type PoolMountRoot struct {
 	MountRoot      string   `json:"mountRoot"`
@@ -80,6 +85,18 @@ type poolMountInfo struct {
 type poolMountTimings struct {
 	pinSources    time.Duration
 	nestedTargets time.Duration
+	openTotal     time.Duration
+	statTotal     time.Duration
+	openP50       time.Duration
+	openP95       time.Duration
+	openP99       time.Duration
+	statP50       time.Duration
+	statP95       time.Duration
+	statP99       time.Duration
+	openCount     int
+	statCount     int
+	workers       int
+	pinnedFDs     int
 }
 
 type poolRuntimeState struct {
@@ -277,9 +294,11 @@ func (m *PoolRuntimeManager) Start(spec *PoolIsolationSpec, sandboxID string) (r
 		if spec != nil {
 			mountCount = len(spec.Mounts)
 		}
-		log.Info("pool runtime init sandbox_id=%s mount_count=%d outcome=%s stage=%s error_type=%s validation_ms=%d pin_sources_ms=%d nested_targets_ms=%d mount_prepare_ms=%d bwrap_prepare_ms=%d launch_ms=%d identity_ms=%d verify_ms=%d finalization_ms=%d total_ms=%d",
+		log.Info("pool runtime init sandbox_id=%s mount_count=%d outcome=%s stage=%s error_type=%s validation_ms=%d pin_sources_ms=%d pin_workers=%d pinned_fd_count=%d openat2_count=%d openat2_total_us=%d openat2_p50_us=%d openat2_p95_us=%d openat2_p99_us=%d fstat_count=%d fstat_total_us=%d fstat_p50_us=%d fstat_p95_us=%d fstat_p99_us=%d nested_targets_ms=%d mount_prepare_ms=%d bwrap_prepare_ms=%d launch_ms=%d identity_ms=%d verify_ms=%d finalization_ms=%d total_ms=%d",
 			sandboxID, mountCount, outcome, stage, errorType,
-			stages["validation"].Milliseconds(), mountTimings.pinSources.Milliseconds(), mountTimings.nestedTargets.Milliseconds(),
+			stages["validation"].Milliseconds(), mountTimings.pinSources.Milliseconds(), mountTimings.workers, mountTimings.pinnedFDs,
+			mountTimings.openCount, mountTimings.openTotal.Microseconds(), mountTimings.openP50.Microseconds(), mountTimings.openP95.Microseconds(), mountTimings.openP99.Microseconds(),
+			mountTimings.statCount, mountTimings.statTotal.Microseconds(), mountTimings.statP50.Microseconds(), mountTimings.statP95.Microseconds(), mountTimings.statP99.Microseconds(), mountTimings.nestedTargets.Milliseconds(),
 			stages["mount_prepare"].Milliseconds(), stages["bwrap_prepare"].Milliseconds(), stages["launch"].Milliseconds(),
 			stages["identity"].Milliseconds(), stages["verify"].Milliseconds(), stages["finalization"].Milliseconds(), time.Since(started).Milliseconds())
 	}()
@@ -488,6 +507,13 @@ func openPoolMounts(spec *PoolIsolationSpec) ([]isolation.BindMount, []poolMount
 	return openPoolMountsWithTimings(spec, nil)
 }
 
+type pinnedPoolSource struct {
+	fd           int
+	stat         unix.Stat_t
+	openDuration time.Duration
+	statDuration time.Duration
+}
+
 func openPoolMountsWithTimings(spec *PoolIsolationSpec, timings *poolMountTimings) ([]isolation.BindMount, []poolMountExpectation, []string, error) {
 	mounts := sortedPoolMounts(spec.Mounts)
 	binds := make([]isolation.BindMount, 0, len(mounts))
@@ -509,68 +535,158 @@ func openPoolMountsWithTimings(spec *PoolIsolationSpec, timings *poolMountTiming
 			timings.pinSources = time.Since(pinStarted)
 		}
 	}()
-	// Open and pin every source before creating any nested destination. This
-	// prevents a directory created for one selector from changing which source
-	// a later selector resolves to.
+	// Pin each authorized root once before workers share its descriptor.
 	for _, selector := range mounts {
-		rootFD, exists := rootFDs[selector.Root]
-		if !exists {
-			root := spec.Roots[selector.Root]
-			mountRootFD, err := unix.Openat2(unix.AT_FDCWD, root.MountRoot, &unix.OpenHow{
-				Flags:   unix.O_PATH | unix.O_DIRECTORY | unix.O_CLOEXEC,
-				Resolve: unix.RESOLVE_NO_MAGICLINKS | unix.RESOLVE_NO_SYMLINKS,
-			})
-			if err != nil {
-				closePoolBinds(binds)
-				return nil, nil, nil, fmt.Errorf("open isolation mountRoot %q: %w", selector.Root, err)
-			}
-			sourceRelative, err := filepath.Rel(root.MountRoot, root.Source)
-			if err != nil {
-				_ = unix.Close(mountRootFD)
-				closePoolBinds(binds)
-				return nil, nil, nil, fmt.Errorf("resolve isolation root %q: %w", selector.Root, err)
-			}
-			rootFD, err = unix.Openat2(mountRootFD, sourceRelative, &unix.OpenHow{
-				Flags:   unix.O_PATH | unix.O_DIRECTORY | unix.O_CLOEXEC,
-				Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_MAGICLINKS | unix.RESOLVE_NO_SYMLINKS,
-			})
-			_ = unix.Close(mountRootFD)
-			if err != nil {
-				closePoolBinds(binds)
-				return nil, nil, nil, fmt.Errorf("open isolation root %q: %w", selector.Root, err)
-			}
-			rootFDs[selector.Root] = rootFD
+		if _, exists := rootFDs[selector.Root]; exists {
+			continue
 		}
-		fd, err := unix.Openat2(rootFD, selector.SubPath, &unix.OpenHow{
+		root := spec.Roots[selector.Root]
+		mountRootFD, err := unix.Openat2(unix.AT_FDCWD, root.MountRoot, &unix.OpenHow{
+			Flags:   unix.O_PATH | unix.O_DIRECTORY | unix.O_CLOEXEC,
+			Resolve: unix.RESOLVE_NO_MAGICLINKS | unix.RESOLVE_NO_SYMLINKS,
+		})
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("open isolation mountRoot %q: %w", selector.Root, err)
+		}
+		sourceRelative, err := filepath.Rel(root.MountRoot, root.Source)
+		if err != nil {
+			_ = unix.Close(mountRootFD)
+			return nil, nil, nil, fmt.Errorf("resolve isolation root %q: %w", selector.Root, err)
+		}
+		rootFD, err := unix.Openat2(mountRootFD, sourceRelative, &unix.OpenHow{
 			Flags:   unix.O_PATH | unix.O_DIRECTORY | unix.O_CLOEXEC,
 			Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_MAGICLINKS | unix.RESOLVE_NO_SYMLINKS,
 		})
+		_ = unix.Close(mountRootFD)
 		if err != nil {
-			closePoolBinds(binds)
-			return nil, nil, nil, fmt.Errorf("open isolation mount %q/%q: %w", selector.Root, selector.SubPath, err)
+			return nil, nil, nil, fmt.Errorf("open isolation root %q: %w", selector.Root, err)
 		}
-		var stat unix.Stat_t
-		if err := unix.Fstat(fd, &stat); err != nil {
-			_ = unix.Close(fd)
-			closePoolBinds(binds)
-			return nil, nil, nil, fmt.Errorf("stat isolation mount %q/%q: %w", selector.Root, selector.SubPath, err)
+		rootFDs[selector.Root] = rootFD
+	}
+	workers := max(1, min(poolPinWorkerCount, len(mounts)))
+	if timings != nil {
+		timings.workers = workers
+	}
+	results := make([]pinnedPoolSource, len(mounts))
+	for i := range results {
+		results[i].fd = -1
+	}
+	type pinError struct {
+		index int
+		err   error
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	jobs := make(chan int)
+	errorsByIndex := make(chan pinError, workers)
+	var workersDone sync.WaitGroup
+	workersDone.Add(workers)
+	for range workers {
+		go func() {
+			defer workersDone.Done()
+			for index := range jobs {
+				selector := mounts[index]
+				opened := time.Now()
+				fd, err := unix.Openat2(rootFDs[selector.Root], selector.SubPath, &unix.OpenHow{
+					Flags:   unix.O_PATH | unix.O_DIRECTORY | unix.O_CLOEXEC,
+					Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_MAGICLINKS | unix.RESOLVE_NO_SYMLINKS,
+				})
+				results[index].openDuration = time.Since(opened)
+				if err != nil {
+					errorsByIndex <- pinError{index, fmt.Errorf("open isolation mount %q/%q: %w", selector.Root, selector.SubPath, err)}
+					cancel()
+					return
+				}
+				statted := time.Now()
+				var stat unix.Stat_t
+				err = unix.Fstat(fd, &stat)
+				results[index].statDuration = time.Since(statted)
+				if err != nil {
+					_ = unix.Close(fd)
+					errorsByIndex <- pinError{index, fmt.Errorf("stat isolation mount %q/%q: %w", selector.Root, selector.SubPath, err)}
+					cancel()
+					return
+				}
+				results[index].fd = fd
+				results[index].stat = stat
+			}
+		}()
+	}
+	for index := range mounts {
+		select {
+		case jobs <- index:
+		case <-ctx.Done():
+			break
 		}
+		if ctx.Err() != nil {
+			break
+		}
+	}
+	close(jobs)
+	workersDone.Wait()
+	close(errorsByIndex)
+	firstIndex := len(mounts)
+	var firstErr error
+	for failure := range errorsByIndex {
+		if failure.index < firstIndex {
+			firstIndex = failure.index
+			firstErr = failure.err
+		}
+	}
+	if timings != nil {
+		openDurations := make([]time.Duration, 0, len(results))
+		statDurations := make([]time.Duration, 0, len(results))
+		for _, result := range results {
+			if result.openDuration > 0 {
+				timings.openCount++
+				timings.openTotal += result.openDuration
+				openDurations = append(openDurations, result.openDuration)
+			}
+			if result.statDuration > 0 {
+				timings.statCount++
+				timings.statTotal += result.statDuration
+				statDurations = append(statDurations, result.statDuration)
+			}
+			if result.fd >= 0 {
+				timings.pinnedFDs++
+			}
+		}
+		sort.Slice(openDurations, func(i, j int) bool { return openDurations[i] < openDurations[j] })
+		sort.Slice(statDurations, func(i, j int) bool { return statDurations[i] < statDurations[j] })
+		timings.openP50 = poolDurationPercentile(openDurations, 50)
+		timings.openP95 = poolDurationPercentile(openDurations, 95)
+		timings.openP99 = poolDurationPercentile(openDurations, 99)
+		timings.statP50 = poolDurationPercentile(statDurations, 50)
+		timings.statP95 = poolDurationPercentile(statDurations, 95)
+		timings.statP99 = poolDurationPercentile(statDurations, 99)
+	}
+	if firstErr != nil {
+		for _, result := range results {
+			if result.fd >= 0 {
+				_ = unix.Close(result.fd)
+			}
+		}
+		return nil, nil, nil, firstErr
+	}
+	// No nested destination may be created until every source is pinned.
+	for index, selector := range mounts {
+		result := results[index]
 		binds = append(binds, isolation.BindMount{
-			SourceFile: os.NewFile(uintptr(fd), selector.Root+":"+selector.SubPath),
+			SourceFile: os.NewFile(uintptr(result.fd), selector.Root+":"+selector.SubPath),
 			Dest:       selector.Target,
 			ReadOnly:   selector.Mode == "ro",
 		})
 		expectations = append(expectations, poolMountExpectation{
 			target: selector.Target,
 			mode:   selector.Mode,
-			dev:    uint64(stat.Dev),
-			ino:    stat.Ino,
+			dev:    uint64(result.stat.Dev),
+			ino:    result.stat.Ino,
 		})
 	}
-	pinFinished = true
 	if timings != nil {
 		timings.pinSources = time.Since(pinStarted)
 	}
+	pinFinished = true
 	nestedStarted := time.Now()
 	if err := prepareNestedPoolMountpoints(mounts, binds); err != nil {
 		if timings != nil {
@@ -588,6 +704,14 @@ func openPoolMountsWithTimings(spec *PoolIsolationSpec, timings *poolMountTiming
 	}
 	sort.Strings(masks)
 	return binds, expectations, masks, nil
+}
+
+func poolDurationPercentile(sorted []time.Duration, percent int) time.Duration {
+	if len(sorted) == 0 {
+		return 0
+	}
+	index := (percent*len(sorted) + 99) / 100
+	return sorted[index-1]
 }
 
 func prepareNestedPoolMountpoints(mounts []PoolMountSelector, binds []isolation.BindMount) error {

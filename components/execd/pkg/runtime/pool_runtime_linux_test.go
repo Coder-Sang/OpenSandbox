@@ -128,6 +128,13 @@ func TestNearestPoolMountAncestorMatchesPreviousScan(t *testing.T) {
 	}
 }
 
+func TestPoolDurationPercentileNearestRank(t *testing.T) {
+	values := []time.Duration{time.Millisecond, 2 * time.Millisecond, 3 * time.Millisecond, 4 * time.Millisecond}
+	require.Equal(t, 2*time.Millisecond, poolDurationPercentile(values, 50))
+	require.Equal(t, 4*time.Millisecond, poolDurationPercentile(values, 95))
+	require.Zero(t, poolDurationPercentile(nil, 95))
+}
+
 func TestValidatePoolIsolationRejectsControlTarget(t *testing.T) {
 	spec := validPoolIsolationSpec()
 	root := spec.Roots["projects"]
@@ -271,6 +278,9 @@ func TestOpenPoolMountsPinsDirectoryAcrossRename(t *testing.T) {
 }
 
 func TestOpenPoolMountsRejectsSymlinkRenameRace(t *testing.T) {
+	originalWorkers := poolPinWorkerCount
+	poolPinWorkerCount = 4
+	t.Cleanup(func() { poolPinWorkerCount = originalWorkers })
 	mountRoot := t.TempDir()
 	projects := filepath.Join(mountRoot, "projects")
 	selected := filepath.Join(projects, "project-A")
@@ -278,6 +288,8 @@ func TestOpenPoolMountsRejectsSymlinkRenameRace(t *testing.T) {
 	sibling := filepath.Join(projects, "project-B")
 	require.NoError(t, os.MkdirAll(selected, 0o755))
 	require.NoError(t, os.MkdirAll(sibling, 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(projects, "project-C"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(projects, "project-D"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(selected, "identity.txt"), []byte("A"), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(sibling, "identity.txt"), []byte("B"), 0o644))
 
@@ -286,6 +298,11 @@ func TestOpenPoolMountsRejectsSymlinkRenameRace(t *testing.T) {
 	root.MountRoot = mountRoot
 	root.Source = projects
 	spec.Roots["projects"] = root
+	spec.Mounts = append(spec.Mounts,
+		PoolMountSelector{Root: "projects", SubPath: "project-B", Target: "/workspace/b", Mode: "rw"},
+		PoolMountSelector{Root: "projects", SubPath: "project-C", Target: "/workspace/c", Mode: "rw"},
+		PoolMountSelector{Root: "projects", SubPath: "project-D", Target: "/workspace/d", Mode: "rw"},
+	)
 
 	var stop atomic.Bool
 	done := make(chan struct{})
@@ -338,6 +355,62 @@ func TestOpenPoolMountsClosesPinnedRootAndSourceAfterFailure(t *testing.T) {
 	after, err := os.ReadDir("/proc/self/fd")
 	require.NoError(t, err)
 	require.Len(t, after, len(before), "failed mount preparation leaked file descriptors")
+}
+
+func TestOpenPoolMountsConcurrentMatchesSerialAndCleansFailure(t *testing.T) {
+	mountRoot := t.TempDir()
+	projects := filepath.Join(mountRoot, "projects")
+	require.NoError(t, os.MkdirAll(projects, 0o755))
+	spec := validPoolIsolationSpec()
+	root := spec.Roots["projects"]
+	root.MountRoot = mountRoot
+	root.Source = projects
+	spec.Roots["projects"] = root
+	spec.Mounts = make([]PoolMountSelector, 128)
+	for index := range spec.Mounts {
+		name := fmt.Sprintf("project-%03d", index)
+		require.NoError(t, os.Mkdir(filepath.Join(projects, name), 0o755))
+		mode := "rw"
+		if index%2 == 1 {
+			mode = "ro"
+		}
+		spec.Mounts[index] = PoolMountSelector{
+			Root: "projects", SubPath: name,
+			Target: "/workspace/" + name, Mode: mode,
+		}
+	}
+	originalWorkers := poolPinWorkerCount
+	t.Cleanup(func() { poolPinWorkerCount = originalWorkers })
+	poolPinWorkerCount = 1
+	baselineBinds, baselineExpected, _, err := openPoolMounts(spec)
+	require.NoError(t, err)
+	defer closePoolBinds(baselineBinds)
+	for _, workerCount := range []int{4, 8, 16} {
+		poolPinWorkerCount = workerCount
+		timings := poolMountTimings{}
+		binds, expected, _, openErr := openPoolMountsWithTimings(spec, &timings)
+		require.NoError(t, openErr)
+		require.Equal(t, baselineExpected, expected)
+		require.Equal(t, workerCount, timings.workers)
+		require.Equal(t, len(spec.Mounts), timings.openCount)
+		require.Equal(t, len(spec.Mounts), timings.statCount)
+		for index, bind := range binds {
+			require.Equal(t, baselineBinds[index].Dest, bind.Dest)
+			require.Equal(t, baselineBinds[index].ReadOnly, bind.ReadOnly)
+		}
+		closePoolBinds(binds)
+	}
+	spec.Mounts[120].SubPath = "missing"
+	before, err := os.ReadDir("/proc/self/fd")
+	require.NoError(t, err)
+	for _, workerCount := range []int{4, 8, 16} {
+		poolPinWorkerCount = workerCount
+		_, _, _, openErr := openPoolMounts(spec)
+		require.ErrorContains(t, openErr, "open isolation mount")
+		after, readErr := os.ReadDir("/proc/self/fd")
+		require.NoError(t, readErr)
+		require.Len(t, after, len(before), "failed concurrent pin leaked file descriptors")
+	}
 }
 
 func BenchmarkPrepareNestedPoolMountpointsUnrelated(b *testing.B) {
@@ -407,6 +480,35 @@ func TestOpenPoolMountsAllowsWritableChildThroughReadOnlyParent(t *testing.T) {
 	t.Cleanup(func() { closePoolBinds(binds) })
 	require.True(t, binds[0].ReadOnly)
 	require.False(t, binds[1].ReadOnly)
+}
+
+func TestOpenPoolMountsConcurrentNestedTargets(t *testing.T) {
+	originalWorkers := poolPinWorkerCount
+	poolPinWorkerCount = 4
+	t.Cleanup(func() { poolPinWorkerCount = originalWorkers })
+	for _, test := range []struct {
+		name         string
+		parentMode   string
+		createTarget bool
+		wantError    string
+	}{
+		{name: "writable parent creates target", parentMode: "rw"},
+		{name: "read only parent rejects missing target", parentMode: "ro", wantError: "does not exist beneath read-only parent"},
+		{name: "read only parent allows existing target", parentMode: "ro", createTarget: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			spec, _ := nestedPoolIsolationSpec(t, test.parentMode, test.createTarget)
+			binds, _, _, err := openPoolMounts(spec)
+			if test.wantError != "" {
+				require.ErrorContains(t, err, test.wantError)
+				return
+			}
+			require.NoError(t, err)
+			t.Cleanup(func() { closePoolBinds(binds) })
+			require.Equal(t, "/workspace", binds[0].Dest)
+			require.Equal(t, "/workspace/cache/content", binds[1].Dest)
+		})
+	}
 }
 
 func TestOpenPoolMountsRejectsNestedSymlinkTarget(t *testing.T) {

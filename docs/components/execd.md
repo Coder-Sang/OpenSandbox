@@ -65,7 +65,23 @@ curl -v http://localhost:44772/ping
   - Filesystem operations (`/files`, `/directories`)
   - Isolated sessions (`/v1/isolated/session`, bubblewrap namespaces)
   - PTY over WebSocket (`/pty`)
-  - Local metrics endpoints (`/metrics`, `/metrics/watch`)
+- Local metrics endpoints (`/metrics`, `/metrics/watch`)
+
+### Pool mount initialization timing
+
+For a Pool runtime using `bwrap-v1`, execd emits one `pool runtime init` log on
+success or failure. `pin_sources_ms` is the wall time to open and retain the
+authorized source directories before any nested mount target is prepared.
+`pin_workers` is the bounded number of concurrent source-open workers;
+`pinned_fd_count` is the number of source descriptors successfully retained.
+`openat2_count`, `openat2_total_us`, and its p50/p95/p99 fields describe the
+per-source path lookup latency. The corresponding `fstat` fields describe
+metadata lookup on those same descriptors. The sum of per-operation times may
+exceed `pin_sources_ms` when operations overlap.
+
+`identity_ms` includes bwrap's creation of the bind mounts and the workload
+identity handshake. `verify_ms` covers the subsequent per-mount checks.
+The log contains counts and timing summaries, without source or target paths.
 
 Shell-backed sessions use Bash when it is available and fall back to `sh` on
 minimal images that do not include Bash. This applies to PTY sessions, the
