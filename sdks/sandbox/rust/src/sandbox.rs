@@ -29,8 +29,15 @@ impl Sandbox {
     pub fn commands(&self) -> Commands {
         Commands::new(self.transport.clone())
     }
+    #[doc(hidden)]
+    pub fn code_execution(&self) -> crate::code_execution::Codes {
+        crate::code_execution::Codes::new(self.transport.clone())
+    }
     pub fn files(&self) -> Files {
         Files::new(self.transport.clone())
+    }
+    pub fn isolated(&self) -> crate::isolated::IsolatedSessions {
+        crate::isolated::IsolatedSessions::new(self.transport.clone())
     }
     pub fn metrics(&self) -> Metrics {
         Metrics::new(self.transport.clone())
@@ -66,6 +73,21 @@ impl Sandbox {
     pub async fn endpoint(&self, port: u16) -> Result<Endpoint> {
         self.manager.endpoint(&self.id, port).await
     }
+    pub async fn endpoint_with_options(
+        &self,
+        port: u16,
+        options: crate::EndpointOptions,
+    ) -> Result<Endpoint> {
+        self.manager
+            .endpoint_with_options(&self.id, port, options)
+            .await
+    }
+    pub async fn diagnostic_logs(&self, scope: &str) -> Result<crate::DiagnosticContent> {
+        self.manager.diagnostic_logs(&self.id, scope).await
+    }
+    pub async fn diagnostic_events(&self, scope: &str) -> Result<crate::DiagnosticContent> {
+        self.manager.diagnostic_events(&self.id, scope).await
+    }
     pub async fn patch_metadata(&self, patch: SandboxMetadataPatch) -> Result<SandboxInfo> {
         self.manager.patch_metadata(&self.id, patch).await
     }
@@ -76,6 +98,39 @@ impl Sandbox {
         self.transport
             .empty(Method::GET, self.transport.url("/ping")?, None::<&()>)
             .await
+    }
+
+    /// Wait for execd readiness within a bounded budget. This does not destroy
+    /// the sandbox on failure. Call `kill` explicitly or configure a TTL.
+    pub async fn wait_ready(
+        &self,
+        ready_timeout: std::time::Duration,
+        polling_interval: std::time::Duration,
+    ) -> Result<()> {
+        if ready_timeout.is_zero() || polling_interval.is_zero() {
+            return Err(Error::InvalidConfig(
+                "readiness durations must be positive".into(),
+            ));
+        }
+        timeout(ready_timeout, async {
+            loop {
+                match self.ping().await {
+                    Ok(()) => return Ok(()),
+                    Err(
+                        error @ Error::Api {
+                            status: 401 | 403, ..
+                        },
+                    ) => return Err(error),
+                    Err(Error::Api { .. } | Error::Transport(_)) => sleep(polling_interval).await,
+                    Err(error) => return Err(error),
+                }
+            }
+        })
+        .await
+        .map_err(|_| Error::ReadyTimeout {
+            sandbox_id: self.id.clone(),
+            timeout: ready_timeout,
+        })?
     }
 }
 fn retryable(error: &Error) -> bool {
@@ -91,6 +146,17 @@ fn retryable(error: &Error) -> bool {
     }
 }
 impl SandboxManager {
+    pub(crate) async fn attach_unready(&self, id: &str, template_origin: bool) -> Result<Sandbox> {
+        self.path(&["sandboxes", id])?;
+        let endpoint = self.endpoint(id, 44772).await?;
+        Ok(Sandbox {
+            manager: self.clone(),
+            transport: self.transport.data_plane(&endpoint)?,
+            id: id.into(),
+            template_origin: template_origin || endpoint.origin.as_deref() == Some("template"),
+        })
+    }
+
     pub(crate) async fn attach(&self, id: &str, template_origin: bool) -> Result<Sandbox> {
         // Validate before starting the budget. timeout encloses state polling, endpoint
         // publication and ping, so no individual request can overrun the total budget.

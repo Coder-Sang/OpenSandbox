@@ -9,7 +9,7 @@ The OpenSandbox SDKs ship an experimental **client-side sandbox pool** that keep
 buffer of ready sandboxes warm on the server so that `acquire()` returns quickly instead
 of paying the full sandbox creation latency on the hot path.
 
-Available in Python (async and sync), JavaScript/TypeScript, Kotlin/Java, and Go.
+Available in Python (async and sync), JavaScript/TypeScript, Kotlin/Java, Go, and Rust.
 C# does not currently ship a client pool.
 
 ::: warning Experimental
@@ -96,7 +96,7 @@ Once acquisition succeeds, the caller remains responsible for disposal.
 
 ## Empty-buffer behavior: `AcquirePolicy`
 
-All four pool SDKs expose these policies. Acquire consumes a candidate; it does not
+All five pool SDKs expose these policies. Acquire consumes a candidate; it does not
 wait for future warmup work to fill an empty buffer.
 
 | Policy | Idle candidates attempted | When candidates are exhausted |
@@ -118,9 +118,10 @@ borrowed sandboxes can exceed `max_idle`.
 
 ## Configuration
 
-The SDKs share the pool concepts, but their scheduling surfaces differ. This table
-is the canonical reference; refer to the per-language builder or constructor for exact
-camelCase / snake_case naming.
+The SDKs share pool concepts, but scheduling surfaces differ. Refer to each
+language's builder or constructor for exact field names. The table below covers
+Python, JavaScript, Kotlin, and Go. Rust's public
+`PoolConfig` fields and defaults are documented in the [Rust section](#rust).
 
 | Parameter | Python / JavaScript / Kotlin default | Go default | Meaning |
 | --- | --- | --- | --- |
@@ -348,6 +349,86 @@ try {
     pool.shutdown(true);
 }
 ```
+
+### Rust
+
+Both Rust crates are unpublished. Install the sandbox crate from a path or pinned
+Git revision as described in the [Rust SDK guide](/sdks/rust#installation).
+`PoolConfig::new` defaults to an in-memory store:
+
+```rust
+use opensandbox::{ConnectionConfig, CreateSandboxOptions, RunCommandOptions};
+use opensandbox::pool::{AcquirePolicy, PoolConfig, SandboxPool};
+use std::time::Duration;
+
+async fn pooled_work(config: ConnectionConfig) -> Result<(), Box<dyn std::error::Error>> {
+    let pool = SandboxPool::new(PoolConfig::new(
+        "rust-workers", 3, config, CreateSandboxOptions::image("python:3.12"),
+    ))?;
+    pool.start().await?;
+    let work = async {
+        let sandbox = pool.acquire(Some(Duration::from_secs(600)), AcquirePolicy::DirectCreate).await?;
+        let execution = sandbox.commands().run("echo ready", RunCommandOptions::default()).await;
+        let cleanup = sandbox.kill().await;
+        let execution = execution?;
+        cleanup?;
+        if execution.error.is_some() || execution.exit_code.is_some_and(|code| code != 0) {
+            return Err(opensandbox::pool::PoolError::Task("command failed".into()));
+        }
+        Ok::<(), opensandbox::pool::PoolError>(())
+    }.await;
+    // Stop this local instance and remove idle sandboxes, even if work failed.
+    let cleanup = pool.kill().await;
+    work?;
+    cleanup?;
+    Ok(())
+}
+```
+
+Policies are `FailFast`, `DirectCreate`, `RetryNextIdle`, and
+`RetryNextIdleThenCreate`. `acquire` takes an optional native `Duration` for the
+borrowed sandbox TTL. `None` preserves an idle candidate's remaining TTL, or uses
+the pool's idle TTL for direct creation. It does not request manual cleanup.
+Acquisitions are consumed
+once, never returned to idle. Dropping the returned handle does not kill the sandbox.
+A cancelled acquisition attempts remote cleanup while Tokio remains alive.
+
+Rust defaults are `warmup_create_qps = 10`, `warmup_concurrency = 128`,
+`max_acquire_retries = 3`, `primary_lock_ttl = 60s`, `idle_timeout = 24h`, and
+`drain_timeout = 30s`. Acquire readiness and warmup readiness each default to 30s;
+acquire polling is 200ms, warmup polling is 500ms. Set snake_case fields directly
+before constructing the pool. `idle_timeout` must be whole seconds and the minimum
+remaining TTL must be less than it. The minimum defaults to the smaller of 60s and
+half the idle TTL. Custom creators and health/preparation callbacks use the public
+`PoolFuture` callback types. A custom creator must honor staged `skip_health_check`.
+
+`start()` does not await a full buffer. `close(true)` stops this local instance and
+waits for in-flight operations up to `drain_timeout`, retaining shared idle entries.
+`kill()` closes locally and removes idle sandboxes,
+not acquired sandboxes. `resize`, `snapshot`, and `snapshot_idle_entries` expose
+management and diagnostics. `SandboxPoolManager::destroy` retires a namespace
+across instances. Check `PoolDestroyResult.state` and `persistent_state_cleared`:
+a drain timeout can return a still-`Destroying` result. Retry destroy to finish
+cleanup after a timeout or failure. The namespace fence prevents new acquisitions
+and warmup publication, but does not kill already acquired sandboxes.
+Stop pools before shutting down Tokio so asynchronous cleanup can finish.
+
+For Redis, enable the optional `redis` Cargo feature and replace the store before
+constructing the pool:
+
+```rust
+use opensandbox::pool::RedisPoolStateStore;
+use std::sync::Arc;
+
+// pool_config is a PoolConfig created as above.
+pool_config.state_store = Arc::new(RedisPoolStateStore::new("redis://127.0.0.1:6379/")?);
+```
+
+Redis coordination uses Rust-specific namespaced keys and atomic Lua operations.
+Do not share a logical pool with another language's Redis store. The default Redis
+operation timeout is 5s; `with_timeout` accepts a native `Duration`. Keep credentials
+out of logs. Optional [Rust tracing](/sdks/observability#rust-tracing) requires the
+`tracing` Cargo feature and an application provider, and remains off by default.
 
 ### Go
 

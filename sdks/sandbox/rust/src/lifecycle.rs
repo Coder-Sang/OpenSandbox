@@ -13,8 +13,20 @@ use chrono::Utc;
 use reqwest::Method;
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::{json, Value};
-use std::{collections::BTreeMap, time::Duration};
+use std::{
+    collections::BTreeMap,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 use url::Url;
+
+/// Endpoint routing options. Expiry is serialized as whole Unix epoch seconds.
+#[derive(Clone, Debug, Default)]
+pub struct EndpointOptions {
+    /// Override the connection's proxy setting for this endpoint lookup.
+    pub use_server_proxy: Option<bool>,
+    /// Request a signed route. Must be at or after the epoch with no subsecond part.
+    pub expires_at: Option<SystemTime>,
+}
 
 #[derive(Clone)]
 pub struct SandboxManager {
@@ -81,6 +93,9 @@ fn create_body(options: &CreateSandboxOptions) -> Result<api::CreateSandboxReque
             body["networkPolicy"]["defaultAction"] = json!("deny");
         }
     }
+    if let Some(proxy) = &options.credential_proxy {
+        body["credentialProxy"] = json!(proxy);
+    }
     if let SandboxSource::Template(id) = &options.source {
         if id.is_empty() || options.timeout.is_none() {
             return Err(invalid(
@@ -95,6 +110,7 @@ fn create_body(options: &CreateSandboxOptions) -> Result<api::CreateSandboxReque
             || options.lifecycle.is_some()
             || !options.volumes.is_empty()
             || options.secure_access
+            || options.credential_proxy.is_some()
         {
             return Err(invalid(
                 "template mode only accepts timeout, metadata, network policy and extensions",
@@ -209,12 +225,19 @@ impl SandboxManager {
         convert(wire)
     }
     pub async fn create(&self, options: CreateSandboxOptions) -> Result<Sandbox> {
+        let image = match &options.source {
+            SandboxSource::Image(image) => Some(image.uri.as_str()),
+            SandboxSource::Snapshot(id) => Some(id.as_str()),
+            _ => None,
+        };
+        let mut metric = crate::observability::CreationMetric::new(&self.config, image);
         let body = create_body(&options)?;
         let response: api::CreateSandboxResponse = self
             .transport
             .json(Method::POST, self.path(&["sandboxes"])?, Some(&body))
             .await?;
         let id = response.id.clone();
+        metric.created(&id);
         let result = async {
             let info: SandboxInfo = convert(response)?;
             // Never delete a successfully created remote sandbox when attaching fails.
@@ -225,6 +248,9 @@ impl SandboxManager {
             .await
         }
         .await;
+        if result.is_ok() {
+            metric.succeeded();
+        }
         result.map_err(|error| match error {
             Error::ReadyTimeout { .. } => error,
             source => Error::SandboxSetup {
@@ -232,6 +258,39 @@ impl SandboxManager {
                 source: Box::new(source),
             },
         })
+    }
+    /// Create and resolve endpoints without waiting for readiness.
+    /// The caller must wait explicitly before use and kill the sandbox when finished.
+    /// Setup errors retain the created ID and never delete the remote resource.
+    pub async fn create_unready(&self, options: CreateSandboxOptions) -> Result<Sandbox> {
+        let image = match &options.source {
+            SandboxSource::Image(image) => Some(image.uri.as_str()),
+            SandboxSource::Snapshot(id) => Some(id.as_str()),
+            _ => None,
+        };
+        let mut metric = crate::observability::CreationMetric::new(&self.config, image);
+        let body = create_body(&options)?;
+        let response: api::CreateSandboxResponse = self
+            .transport
+            .json(Method::POST, self.path(&["sandboxes"])?, Some(&body))
+            .await?;
+        let id = response.id;
+        metric.created(&id);
+        let result = self
+            .attach_unready(&id, matches!(options.source, SandboxSource::Template(_)))
+            .await
+            .map_err(|source| Error::SandboxSetup {
+                sandbox_id: id,
+                source: Box::new(source),
+            });
+        if result.is_ok() {
+            metric.succeeded();
+        }
+        result
+    }
+    /// Resolve endpoints without waiting for readiness. Does not create a sandbox.
+    pub async fn connect_unready(&self, id: &str) -> Result<Sandbox> {
+        self.attach_unready(id, false).await
     }
     pub async fn connect(&self, id: &str) -> Result<Sandbox> {
         self.attach(id, false).await
@@ -293,18 +352,45 @@ impl SandboxManager {
             .await
     }
     pub async fn endpoint(&self, id: &str, port: u16) -> Result<Endpoint> {
+        self.endpoint_with_options(id, port, EndpointOptions::default())
+            .await
+    }
+    pub async fn endpoint_with_options(
+        &self,
+        id: &str,
+        port: u16,
+        options: EndpointOptions,
+    ) -> Result<Endpoint> {
+        let proxy = options
+            .use_server_proxy
+            .unwrap_or(self.config.use_server_proxy);
+        let expiry = options
+            .expires_at
+            .map(|expiry| {
+                if proxy {
+                    return Err(invalid(
+                        "signed endpoint expiry cannot be combined with server proxy",
+                    ));
+                }
+                let duration = expiry
+                    .duration_since(UNIX_EPOCH)
+                    .map_err(|_| invalid("endpoint expiry must not precede the Unix epoch"))?;
+                if duration.subsec_nanos() != 0 {
+                    return Err(invalid("endpoint expiry must be whole Unix epoch seconds"));
+                }
+                Ok(duration.as_secs())
+            })
+            .transpose()?;
         if port == 0 {
             return Err(invalid("endpoint port must be nonzero"));
         }
         let mut url = self.path(&["sandboxes", id, "endpoints", &port.to_string()])?;
-        url.query_pairs_mut().append_pair(
-            "use_server_proxy",
-            if self.config.use_server_proxy {
-                "true"
-            } else {
-                "false"
-            },
-        );
+        url.query_pairs_mut()
+            .append_pair("use_server_proxy", if proxy { "true" } else { "false" });
+        if let Some(expiry) = expiry {
+            url.query_pairs_mut()
+                .append_pair("expires", &expiry.to_string());
+        }
         self.transport.endpoint(url).await
     }
     pub async fn patch_metadata(
@@ -445,6 +531,16 @@ fn query(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn credential_proxy_mapping_and_template_rejection() {
+        let mut options = CreateSandboxOptions::image("ubuntu:24.04");
+        options.credential_proxy = Some(serde_json::from_value(json!({"enabled":true})).unwrap());
+        let value = serde_json::to_value(create_body(&options).unwrap()).unwrap();
+        assert_eq!(value["credentialProxy"]["enabled"], true);
+        options.source = SandboxSource::Template("template-test".into());
+        options.resource_limits.clear();
+        assert!(create_body(&options).is_err());
+    }
     #[test]
     fn create_sources_null_ttl_and_hook_units() {
         let mut options = CreateSandboxOptions::image("ubuntu:24.04");

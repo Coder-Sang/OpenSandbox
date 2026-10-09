@@ -209,7 +209,7 @@ fn command_body(command: &str, options: RunCommandOptions) -> Result<RunCommandR
         ..Default::default()
     })
 }
-async fn consume(mut stream: ExecutionStream, background: bool) -> Result<Execution> {
+pub(crate) async fn consume(mut stream: ExecutionStream, background: bool) -> Result<Execution> {
     let mut execution = Execution::default();
     while let Some(event) = stream.next().await {
         execution.apply(event?);

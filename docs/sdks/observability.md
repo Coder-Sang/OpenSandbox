@@ -10,8 +10,8 @@ locate slow phases. They have separate controls and export paths:
 
 | Signal | Use it to | SDK support | Default | Export path |
 | --- | --- | --- | --- | --- |
-| [Pool warmup traces](#pool-warmup-tracing) | Inspect creation, readiness, preparation, renewal, and idle publication | Python, JavaScript/TypeScript, Kotlin/Java | Off; enable tracing in the connection config | Application-owned OpenTelemetry provider and exporter |
-| [Creation metrics](#creation-metrics) | Measure sandbox create latency and success | All five SDKs | On; disable through config or `OPENSANDBOX_DISABLE_METRICS=1` | SDK posts to the lifecycle server, which exports metrics when `[otel]` is enabled |
+| [Pool warmup traces](#pool-warmup-tracing) | Inspect creation, readiness, preparation, renewal, and idle publication | Python, JavaScript/TypeScript, Kotlin/Java, Rust (limited schema) | Off; enable tracing in the connection config, plus Rust `tracing` feature | Application-owned OpenTelemetry provider and exporter |
+| [Creation metrics](#creation-metrics) | Measure sandbox create latency and success | All six sandbox SDKs | On; disable through config or `OPENSANDBOX_DISABLE_METRICS=1` | SDK posts to the lifecycle server, which exports metrics when `[otel]` is enabled |
 
 OpenTelemetry (OTel) provides the tracing and metrics infrastructure; enabling
 tracing does not enable or disable creation metrics. For remote sandbox logs and
@@ -38,6 +38,7 @@ exported. Tracing never affects pool behavior.
 | Python async/sync | Phase spans, sandbox identity, terminal classification, readiness counters |
 | JavaScript/TypeScript | Phase spans, pool identity, success/failure and error type |
 | Kotlin/Java | Phase spans, sandbox identity, terminal classification, readiness counters, SLF4J MDC |
+| Rust | Optional Cargo feature, root/phase spans, status and bounded allowlisted attributes; distinct from the Python/JVM schema |
 | Go / C# | No built-in pool warmup tracing |
 
 This guide describes the default branch. Check your installed SDK's
@@ -154,7 +155,43 @@ Pass this connection config to the pool. The SDK flag defaults to `false`;
 OpenTelemetry exporter and sampling configuration remain application-owned.
 Shut down the pool before flushing and closing the application tracer provider.
 
+### Rust tracing
+
+Rust tracing requires both the optional `tracing` Cargo feature and connection opt-in:
+
+```toml
+opensandbox = { path = "../OpenSandbox/sdks/sandbox/rust", features = ["tracing"] }
+```
+
+```rust
+use opensandbox::ConnectionConfig;
+
+let config = ConnectionConfig::builder().enable_tracing(true).build()?;
+```
+
+Configure an application-owned OpenTelemetry SDK provider/exporter through
+`opentelemetry::global::set_tracer_provider` before starting the pool. The crate
+only depends on the OpenTelemetry API (currently 0.29), so select compatible SDK
+and exporter versions. Without a provider, spans are no-ops. Shut down pools before
+flushing and shutting down the provider.
+
+Rust uses `pool.warmup` as the root, with phase spans
+`pool.warmup.create`, `pool.warmup.readiness`, `pool.warmup.prepare`,
+`pool.warmup.post_prepare_readiness`, `pool.warmup.renew`, and
+`pool.warmup.commit`. Optional stages are absent when not configured.
+It exports success/error status and `outcome`. Its bounded string attribute
+allowlist is `pool.name`, `pool.owner_id`, `sandbox.id`, `outcome`, and
+`failure.kind`; numeric counters are `pool.warmup.attempt` and
+`pool.warmup.failure_count`. Presence depends on the instrumented path. It does
+not export user code or secrets, and does not implement the richer Python/JVM
+terminal-classification and readiness-counter schema listed below. Do not apply
+Python/JVM queries unchanged to Rust. Creation metrics remain independent and
+enabled by default.
+
 ### What is traced
+
+The span names and attribute schema in this section describe Python, JavaScript,
+and Kotlin/Java. See [Rust tracing](#rust-tracing) for the Rust-specific scope.
 
 Each warmup task produces **one trace** with a root span and six possible phase
 types (siblings under the root, so each phase duration stands alone for
@@ -322,6 +359,11 @@ The server accepts the event with `204` and, when `[otel]` is enabled, records a
 | Go | After `CreateSandbox` completes or fails |
 | C# | After `Sandbox.CreateAsync` completes or fails |
 | Kotlin | After standalone `Sandbox.builder()...build()` or a pool direct-create fallback completes or fails |
+| Rust | After standalone create or direct-create fallback completes or fails; reporting is bounded and best-effort on a Tokio background task |
+
+Rust staged pool warmup disables creation-latency telemetry for its partial create
+phase. Use optional warmup traces for the complete create/readiness/preparation/
+renewal/idle-publication path instead.
 
 ::: info Kotlin staged pool warmup
 Kotlin staged warmup deliberately does **not** emit the legacy
@@ -347,6 +389,10 @@ export OPENSANDBOX_DISABLE_METRICS=1
 ```
 
 2. Connection config field:
+
+Rust uses `ConnectionConfig::builder().disable_metrics(true).build()?`.
+`OPENSANDBOX_DISABLE_METRICS=1` takes precedence even when the connection flag is
+false. Neither the `redis` nor the `tracing` Cargo feature is required for metrics.
 
 ::: code-group
 

@@ -15,6 +15,10 @@ pub struct ConnectionConfig {
     pub ready_timeout: Duration,
     pub polling_interval: Duration,
     pub use_server_proxy: bool,
+    /// Disable best-effort creation metrics. The environment opt-out also takes precedence.
+    pub disable_metrics: bool,
+    /// Enable optional warmup tracing through the application's global provider.
+    pub enable_tracing: bool,
     pub(crate) headers: HeaderMap,
 }
 
@@ -26,6 +30,8 @@ impl fmt::Debug for ConnectionConfig {
             .field("ready_timeout", &self.ready_timeout)
             .field("polling_interval", &self.polling_interval)
             .field("use_server_proxy", &self.use_server_proxy)
+            .field("disable_metrics", &self.disable_metrics)
+            .field("enable_tracing", &self.enable_tracing)
             .finish_non_exhaustive()
     }
 }
@@ -48,6 +54,8 @@ pub struct ConnectionConfigBuilder {
     ready_timeout: Option<Duration>,
     polling_interval: Option<Duration>,
     use_server_proxy: bool,
+    disable_metrics: bool,
+    enable_tracing: bool,
 }
 
 impl ConnectionConfigBuilder {
@@ -90,6 +98,16 @@ impl ConnectionConfigBuilder {
 
     pub fn use_server_proxy(mut self, enabled: bool) -> Self {
         self.use_server_proxy = enabled;
+        self
+    }
+
+    pub fn disable_metrics(mut self, disabled: bool) -> Self {
+        self.disable_metrics = disabled;
+        self
+    }
+
+    pub fn enable_tracing(mut self, enabled: bool) -> Self {
+        self.enable_tracing = enabled;
         self
     }
 
@@ -157,6 +175,8 @@ impl ConnectionConfigBuilder {
             ready_timeout: self.ready_timeout.unwrap_or(Duration::from_secs(30)),
             polling_interval: self.polling_interval.unwrap_or(Duration::from_millis(200)),
             use_server_proxy: self.use_server_proxy,
+            disable_metrics: self.disable_metrics || metrics_disabled_by_env(),
+            enable_tracing: self.enable_tracing,
             headers,
         };
         config.validate()?;
@@ -182,6 +202,10 @@ impl ConnectionConfig {
     }
 }
 
+pub(crate) fn metrics_disabled_by_env() -> bool {
+    std::env::var("OPENSANDBOX_DISABLE_METRICS").is_ok_and(|value| value.trim() == "1")
+}
+
 fn validate_base_url(url: &Url) -> Result<()> {
     if !matches!(url.scheme(), "http" | "https")
         || url.host_str().is_none()
@@ -198,6 +222,37 @@ fn validate_base_url(url: &Url) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn telemetry_defaults_and_environment_override() {
+        if std::env::var("OPENSANDBOX_METRICS_ENV_TEST").is_ok() {
+            let config = ConnectionConfig::builder()
+                .disable_metrics(false)
+                .build()
+                .unwrap();
+            assert!(config.disable_metrics);
+            assert!(!config.enable_tracing);
+            return;
+        }
+        assert!(!ConnectionConfig::builder().build().unwrap().enable_tracing);
+        assert!(
+            ConnectionConfig::builder()
+                .disable_metrics(true)
+                .build()
+                .unwrap()
+                .disable_metrics
+        );
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "config::tests::telemetry_defaults_and_environment_override",
+            ])
+            .env("OPENSANDBOX_DISABLE_METRICS", " 1 ")
+            .env("OPENSANDBOX_METRICS_ENV_TEST", "1")
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
 
     #[test]
     fn preserves_prefix_and_normalizes_v1() {

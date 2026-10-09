@@ -2,7 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{models::execd::SandboxMetrics, transport::Transport, Result};
+use futures_core::Stream;
 use reqwest::Method;
+use std::pin::Pin;
+
+/// Dropping the stream closes the response body, not the remote sandbox.
+pub type MetricsStream = Pin<Box<dyn Stream<Item = Result<SandboxMetrics>> + Send>>;
 
 #[derive(Clone)]
 pub struct Metrics {
@@ -11,6 +16,18 @@ pub struct Metrics {
 impl Metrics {
     pub(crate) fn new(transport: Transport) -> Self {
         Self { transport }
+    }
+    /// Subscribe to one-second SSE metric updates until this stream is dropped.
+    pub async fn watch(&self) -> Result<MetricsStream> {
+        let response = self
+            .transport
+            .streaming_request(Method::GET, self.transport.url("/metrics/watch")?)
+            .header(reqwest::header::ACCEPT, "text/event-stream")
+            .send()
+            .await?;
+        Ok(crate::stream::json_events(
+            Transport::checked(response).await?,
+        ))
     }
     pub async fn get(&self) -> Result<SandboxMetrics> {
         self.transport

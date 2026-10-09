@@ -9,7 +9,7 @@ pub enum Error {
     #[error("invalid SDK configuration: {0}")]
     InvalidConfig(String),
     #[error("HTTP transport failed")]
-    Transport(#[from] reqwest::Error),
+    Transport(reqwest::Error),
     #[error("JSON decoding failed: {0}")]
     Json(#[from] serde_json::Error),
     #[error("unexpected protocol response: {0}")]
@@ -35,3 +35,9 @@ pub enum Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+impl From<reqwest::Error> for Error {
+    fn from(error: reqwest::Error) -> Self {
+        Self::Transport(error.without_url())
+    }
+}

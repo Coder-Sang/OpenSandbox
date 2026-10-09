@@ -75,6 +75,17 @@ class GeneratorTests(unittest.TestCase):
         self.assertIn('"contentType":"application/json"', result)
         self.assertIn('location: "query"', result)
 
+    def test_diagnostics_contract_is_generated(self):
+        result = gen.outputs(gen.ROOT / "specs")
+        self.assertIn("pub mod diagnostic;", result["mod.rs"])
+        diagnostic = result["diagnostic.rs"]
+        self.assertIn("pub struct DiagnosticContentResponse", diagnostic)
+        self.assertIn('path: "/sandboxes/{sandboxId}/diagnostics/logs"', diagnostic)
+        self.assertIn('path: "/sandboxes/{sandboxId}/diagnostics/events"', diagnostic)
+        self.assertIn('name: "scope", location: "query", required: true', diagnostic)
+        self.assertIn("pub content_url: Option<String>", diagnostic)
+        self.assertIn("pub expires_at: Option<String>", diagnostic)
+
     def test_check_does_not_write(self):
         with tempfile.TemporaryDirectory() as directory:
             target = Path(directory) / "does-not-exist"

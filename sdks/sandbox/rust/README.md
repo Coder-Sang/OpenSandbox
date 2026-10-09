@@ -1,6 +1,7 @@
 # OpenSandbox Rust SDK
 
-Async Rust client for the OpenSandbox lifecycle, execd, and network policy APIs.
+Async Rust client for OpenSandbox lifecycle, execd, network policy, Credential
+Vault, isolated sessions, diagnostics, and client-side pools.
 Requires Rust **1.85+** and a Tokio runtime. This SDK is available from source and
 has **not been published to crates.io**.
 
@@ -34,6 +35,24 @@ workload fails. Dropping a client **does not delete the remote sandbox**.
 For configuration, streaming, capabilities and lifecycle semantics, see the
 [versioned Rust SDK guide](../../../docs/sdks/rust.md).
 
+## Features and cleanup
+
+The standalone `opensandbox-code-interpreter` crate is also unpublished. See
+[Rust Code Interpreter](../../../docs/sdks/code-interpreter-rust.md) for path/Git
+installation and interpreter runtime requirements.
+
+Enable the optional `redis` Cargo feature for `RedisPoolStateStore`, or `tracing`
+for OpenTelemetry warmup spans. Tracing additionally requires connection
+`.enable_tracing(true)` and an application-owned provider/exporter, and defaults
+to off. Best-effort creation metrics default to on. Disable them with
+`.disable_metrics(true)` or `OPENSANDBOX_DISABLE_METRICS=1`.
+
+Pool acquisitions are consumed once with no return-to-pool release API. Kill
+acquired sandboxes explicitly and stop pools before Tokio exits. See the
+[Client Pool guide](../../../docs/guides/client-pool.md#rust). Diagnostics return
+inline/expiring-URL descriptors and never fetch external URLs automatically.
+Public timeout configuration uses `std::time::Duration`.
+
 ## Development
 
 ```bash
@@ -47,7 +66,7 @@ cargo doc --locked --no-deps
 cargo package --locked
 ```
 
-`src/api/` is generated from the repository's three OpenAPI specifications.
+`src/api/` is generated from the repository's lifecycle, execd, egress, and diagnostic OpenAPI specifications.
 Regenerate it with `python3 scripts/generate_api.py`, not by editing generated
 files. Public configuration and service facades are handwritten.
 

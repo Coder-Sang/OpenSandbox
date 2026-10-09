@@ -1,6 +1,6 @@
 ---
 title: Rust SDK
-description: Async Rust client for OpenSandbox lifecycle, command execution, files, metrics, and network policy.
+description: Async Rust sandbox SDK with isolated sessions, Credential Vault, diagnostics, pools, and optional Redis and tracing.
 ---
 
 # OpenSandbox Rust SDK
@@ -100,8 +100,9 @@ file operation fails.
 
 ## Capability coverage
 
-The Rust SDK covers the sandbox API, not the Code Interpreter SDK. Server runtime
-and execd support still determine whether a particular operation is available.
+The sandbox crate covers lifecycle and sandbox services. Code execution is provided
+by the separate [Rust Code Interpreter SDK](/sdks/code-interpreter-rust). Server
+runtime, egress sidecar, and execd support determine operation availability.
 
 | Capability | Rust SDK |
 | --- | --- |
@@ -111,16 +112,16 @@ and execd support still determine whether a particular operation is available.
 | File operations | Yes |
 | Resource metrics | Yes |
 | Network policy | Yes |
-| Code Interpreter SDK | No |
-| Client Pool, including Redis | No |
-| Isolated sessions | No |
-| Credential Vault | No |
-| SDK telemetry and pool tracing | No |
-| Remote diagnostic logs/events | No |
+| Code Interpreter SDK | Yes, separate `opensandbox-code-interpreter` crate |
+| Client Pool, including Redis | Yes, Redis requires the `redis` feature |
+| Isolated sessions | Yes, subject to execd capabilities |
+| Credential Vault | Yes, sandbox-local egress sidecar only |
+| SDK telemetry and pool tracing | Yes, tracing requires the `tracing` feature |
+| Remote diagnostic logs/events | Yes, delivery descriptors without automatic downloads |
 
-Command sessions are execd command sessions. They are not the isolated-session
-feature exposed by other language SDKs. For unsupported operations, use another
-SDK or the [HTTP API](/api/), as appropriate.
+Command sessions and isolated sessions are different execd services. Check
+`sandbox.isolated().capabilities().await?` before choosing an isolation
+profile. Resource metrics support point-in-time reads and `sandbox.metrics().watch().await?`.
 
 ## Lifecycle and cleanup
 
@@ -140,6 +141,75 @@ If creation succeeds remotely but subsequent setup or readiness checks fail,
 `Error::SandboxSetup` and `Error::ReadyTimeout` preserve the sandbox ID. Use that ID to explicitly clean
 up the remote sandbox through the manager or the [CLI](/cli/). A failed create
 call does not necessarily mean that no remote resource exists.
+
+## Isolated sessions
+
+`sandbox.isolated()` exposes capabilities, list/create/attach/get/delete,
+foreground and streamed execution, background runs, status, logs, and session-scoped
+files. Profiles depend on execd and host isolation support, not just SDK availability.
+Public timeouts use `std::time::Duration`; isolated idle timeouts must be whole seconds.
+
+Delete long-lived sessions explicitly with `session.delete().await?`. Dropping a
+session handle or execution stream does not delete the session or interrupt its
+remote run. The `run_once` helper returns `RunOnceResult` with separate `execution`
+and `cleanup` results and a `session_id` for retrying failed cleanup. It attempts
+cleanup on cancellation while Tokio is alive; runtime shutdown and process crashes
+can still prevent cleanup. Keep server-side idle GC as a fallback.
+
+## Credential Vault
+
+`sandbox.egress().await?` exposes vault `create`, `get`, `patch`, `delete`, credential
+metadata `list_credentials` / `get_credential`, and binding metadata
+`list_bindings` / `get_binding`. Request types live in `opensandbox::api::egress`.
+Secret values are write-only. Use revisions for guarded mutations and avoid logging
+request values. See the [Credential Vault guide](/guides/credential-vault).
+Template-backed sandboxes support lifecycle-managed network policy but do not
+expose a sandbox-local Credential Vault.
+
+## Diagnostics
+
+`manager.diagnostic_logs(sandbox_id, "container").await?` and
+`manager.diagnostic_events(sandbox_id, "runtime").await?` also work when execd is
+not ready. The sandbox provides `diagnostic_logs(scope)` and
+`diagnostic_events(scope)` conveniences. Runtime support determines valid scopes.
+
+Results are `DiagnosticContent` delivery descriptors. Match `DiagnosticPayload::Inline`
+for text or `DiagnosticPayload::Url` for an expiring HTTP(S) download URL. The SDK
+never fetches these URLs or forwards server credentials to them. Apply your own
+trusted-host policy before downloading, and check `truncated` and `warnings`.
+Diagnostic text is not a stable structured event schema. See [diagnostics](/api/#diagnostics).
+
+## Client Pool and optional features
+
+The [Client Pool guide](/guides/client-pool#rust) documents `PoolConfig`,
+`SandboxPool`, acquisition policies, and Redis coordination. Acquisitions consume
+a sandbox once. There is no return-to-pool `release()` API. Explicitly kill acquired
+sandboxes and stop the pool before shutting down Tokio.
+
+Optional Cargo features are disabled by default:
+
+```toml
+opensandbox = { path = "../OpenSandbox/sdks/sandbox/rust", features = ["redis", "tracing"] }
+```
+
+`redis` enables `RedisPoolStateStore`. Its namespace layout is Rust-specific, not
+interoperable with other language pool stores. `tracing` enables OpenTelemetry
+warmup instrumentation and additionally requires `.enable_tracing(true)` and an
+application-owned provider/exporter. Tracing is off by default.
+
+Creation-latency telemetry is best-effort and on by default, independently of Cargo
+features and tracing. Disable it with `.disable_metrics(true)` on the connection
+builder or `OPENSANDBOX_DISABLE_METRICS=1`. Reporting failures do not replace creation
+errors. See [observability](/sdks/observability#rust-tracing) for the Rust trace scope
+and [creation metrics](/sdks/observability#creation-metrics) for telemetry controls.
+
+## Code Interpreter
+
+The independent, unpublished `opensandbox-code-interpreter` crate wraps an existing
+`Sandbox` and provides persistent language contexts, execution streams, rich results,
+and interrupts. It requires an image with the interpreter runtime, not an arbitrary
+Python image. See [Rust Code Interpreter](/sdks/code-interpreter-rust) for source
+installation, readiness checks, and cleanup.
 
 ## Development
 

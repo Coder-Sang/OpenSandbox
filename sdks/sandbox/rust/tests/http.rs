@@ -118,6 +118,7 @@ impl Server {
     fn manager(&self) -> SandboxManager {
         SandboxManager::new(
             ConnectionConfig::builder()
+                .disable_metrics(true)
                 .domain(format!("{}/deploy", self.url))
                 .api_key("control-secret")
                 .build()
@@ -169,6 +170,7 @@ async fn ordinary_request_timeout_is_enforced() {
     let server = Server::start(vec![reply]).await;
     let manager = SandboxManager::new(
         ConnectionConfig::builder()
+            .disable_metrics(true)
             .domain(&server.url)
             .request_timeout(Duration::from_millis(30))
             .build()
@@ -239,6 +241,7 @@ async fn direct_and_proxy_headers_binary_multipart_and_range() {
         let mut control = Server::start(vec![running(), endpoint(&data.url)]).await;
         let manager = SandboxManager::new(
             ConnectionConfig::builder()
+                .disable_metrics(true)
                 .domain(format!("{}/deploy", control.url))
                 .api_key("control-secret")
                 .header("x-custom", "custom")

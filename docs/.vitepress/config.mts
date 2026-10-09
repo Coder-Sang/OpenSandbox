@@ -29,6 +29,10 @@ const sdkSidebar = [
     ],
   },
   {
+    text: "Code Interpreter SDKs",
+    items: [{ text: "Rust", link: "/sdks/code-interpreter-rust" }],
+  },
+  {
     text: "SDK Features",
     items: [
       { text: "Client Pool", link: "/guides/client-pool" },

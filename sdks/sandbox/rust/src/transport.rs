@@ -83,6 +83,8 @@ impl Transport {
         let path = format!("{}/", base_url.path().trim_end_matches('/'));
         base_url.set_path(&path);
         let mut headers = self.connection_headers.clone();
+        headers.remove("traceparent");
+        headers.remove("tracestate");
         if !self.use_server_proxy {
             headers.remove("open-sandbox-api-key");
         }
@@ -129,6 +131,45 @@ impl Transport {
         }
         let response = Self::checked(request.send().await?).await?;
         Ok(response.json().await?)
+    }
+
+    pub(crate) async fn sensitive_json<T: DeserializeOwned>(
+        &self,
+        method: Method,
+        url: Url,
+        body: Option<&impl Serialize>,
+    ) -> Result<T> {
+        let mut request = self.request(method, url);
+        if let Some(body) = body {
+            request = request.json(body);
+        }
+        let response = Self::checked_sensitive(
+            request
+                .send()
+                .await
+                .map_err(|error| Error::Transport(error.without_url()))?,
+        )
+        .await?;
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|error| Error::Transport(error.without_url()))?;
+        serde_json::from_slice(&bytes)
+            .map_err(|_| Error::Protocol("Invalid sensitive API response".into()))
+    }
+
+    /// Sensitive request payloads may be echoed by an untrusted server in any
+    /// response field. Preserve the HTTP status without decoding error metadata.
+    pub(crate) async fn checked_sensitive(response: Response) -> Result<Response> {
+        if response.status().is_success() {
+            return Ok(response);
+        }
+        Err(Error::Api {
+            status: response.status().as_u16(),
+            code: None,
+            message: "Sensitive API request failed".into(),
+            request_id: None,
+        })
     }
 
     pub(crate) async fn empty(
@@ -216,6 +257,27 @@ mod tests {
             .use_server_proxy(proxy)
             .build()
             .unwrap()
+    }
+
+    #[test]
+    fn signed_route_debug_and_control_trace_headers_are_redacted() {
+        let config = ConnectionConfig::builder()
+            .domain("https://control.example/prefix")
+            .header("traceparent", "00-control-trace-secret")
+            .header("tracestate", "control-state-secret")
+            .build()
+            .unwrap();
+        let transport = Transport::new(&config).unwrap();
+        let endpoint = Endpoint {
+            endpoint: "worker.example/signed-route-secret".into(),
+            headers: BTreeMap::new(),
+            origin: None,
+        };
+        assert!(!format!("{endpoint:?}").contains("signed-route-secret"));
+        let data = transport.data_plane(&endpoint).unwrap();
+        assert!(!data.headers.contains_key("traceparent"));
+        assert!(!data.headers.contains_key("tracestate"));
+        assert!(transport.headers.contains_key("traceparent"));
     }
 
     #[test]

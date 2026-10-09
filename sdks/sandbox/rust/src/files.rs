@@ -19,10 +19,35 @@ use std::collections::HashMap;
 #[derive(Clone)]
 pub struct Files {
     transport: Transport,
+    scope: Option<Url>,
 }
 impl Files {
     pub(crate) fn new(transport: Transport) -> Self {
-        Self { transport }
+        Self {
+            transport,
+            scope: None,
+        }
+    }
+    pub(crate) fn scoped(transport: Transport, session_id: &str) -> Result<Self> {
+        let scope = crate::commands::id_url(&transport, "/v1/isolated/session", session_id, None)?;
+        Ok(Self {
+            transport,
+            scope: Some(scope),
+        })
+    }
+    fn url(&self, endpoint: &str) -> Result<Url> {
+        let Some(scope) = &self.scope else {
+            return self.transport.url(endpoint);
+        };
+        let mut url = scope.clone();
+        let mut segments = url
+            .path_segments_mut()
+            .map_err(|_| Error::InvalidConfig("Invalid scoped endpoint".into()))?;
+        for segment in endpoint.trim_start_matches('/').split('/') {
+            segments.push(segment);
+        }
+        drop(segments);
+        Ok(url)
     }
     pub async fn upload(&self, path: &str, bytes: Vec<u8>) -> Result<()> {
         self.upload_with_metadata(
@@ -60,7 +85,7 @@ impl Files {
             );
         Transport::checked(
             self.transport
-                .request(Method::POST, self.transport.url("/files/upload")?)
+                .request(Method::POST, self.url("/files/upload")?)
                 .multipart(form)
                 .send()
                 .await?,
@@ -84,7 +109,7 @@ impl Files {
     ) -> Result<Vec<u8>> {
         nonblank(path, "path")?;
         validate_download(&options)?;
-        let mut url = self.transport.url("/files/download")?;
+        let mut url = self.url("/files/download")?;
         {
             let mut query = url.query_pairs_mut();
             query.append_pair("path", path);
@@ -113,7 +138,7 @@ impl Files {
         if paths.is_empty() {
             return Err(Error::InvalidConfig("At least one path is required".into()));
         }
-        let mut url = self.transport.url(endpoint)?;
+        let mut url = self.url(endpoint)?;
         for path in paths {
             nonblank(path, "path")?;
             url.query_pairs_mut().append_pair("path", path);
@@ -131,7 +156,7 @@ impl Files {
     }
     pub async fn search(&self, path: &str, pattern: &str) -> Result<Vec<FileInfo>> {
         nonblank(path, "path")?;
-        let mut url = self.transport.url("/files/search")?;
+        let mut url = self.url("/files/search")?;
         url.query_pairs_mut()
             .append_pair("path", path)
             .append_pair("pattern", pattern);
@@ -152,31 +177,19 @@ impl Files {
             nonblank(&entry.dest, "dest")?;
         }
         self.transport
-            .empty(
-                Method::POST,
-                self.transport.url("/files/mv")?,
-                Some(&entries),
-            )
+            .empty(Method::POST, self.url("/files/mv")?, Some(&entries))
             .await
     }
     pub async fn set_permissions(&self, entries: &HashMap<String, Permission>) -> Result<()> {
         validate_paths(entries.keys())?;
         self.transport
-            .empty(
-                Method::POST,
-                self.transport.url("/files/permissions")?,
-                Some(entries),
-            )
+            .empty(Method::POST, self.url("/files/permissions")?, Some(entries))
             .await
     }
     pub async fn create_directories(&self, entries: &HashMap<String, Permission>) -> Result<()> {
         validate_paths(entries.keys())?;
         self.transport
-            .empty(
-                Method::POST,
-                self.transport.url("/directories")?,
-                Some(entries),
-            )
+            .empty(Method::POST, self.url("/directories")?, Some(entries))
             .await
     }
     pub async fn remove_directories(&self, paths: &[String]) -> Result<()> {
@@ -190,7 +203,7 @@ impl Files {
     }
     pub async fn list_directory(&self, path: &str, depth: Option<u32>) -> Result<Vec<FileInfo>> {
         nonblank(path, "path")?;
-        let mut url = self.transport.url("/directories/list")?;
+        let mut url = self.url("/directories/list")?;
         url.query_pairs_mut().append_pair("path", path);
         if let Some(depth) = depth {
             url.query_pairs_mut()
@@ -208,7 +221,7 @@ impl Files {
                 "Replacement old text cannot be empty".into(),
             ));
         }
-        let mut url = self.transport.url("/files/replace")?;
+        let mut url = self.url("/files/replace")?;
         url.query_pairs_mut().append_pair("verbose", "true");
         self.transport.json(Method::POST, url, Some(entries)).await
     }

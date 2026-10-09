@@ -27,6 +27,122 @@ impl Egress {
             sandbox_id: Some(id),
         }
     }
+    /// Create the direct sidecar's credential vault. Secret values are write-only.
+    pub async fn create(
+        &self,
+        request: &crate::api::egress::CredentialVaultCreateRequest,
+    ) -> Result<crate::api::egress::CredentialVaultState> {
+        self.vault_json(Method::POST, self.vault_url("")?, Some(request))
+            .await
+    }
+    /// Read vault metadata, never credential values.
+    pub async fn get(&self) -> Result<crate::api::egress::CredentialVaultState> {
+        self.vault_json(Method::GET, self.vault_url("")?, None::<&()>)
+            .await
+    }
+    /// Atomically mutate the vault, optionally guarded by expectedRevision.
+    pub async fn patch(
+        &self,
+        request: &crate::api::egress::CredentialVaultMutationRequest,
+    ) -> Result<crate::api::egress::CredentialVaultState> {
+        self.vault_json(Method::PATCH, self.vault_url("")?, Some(request))
+            .await
+    }
+    /// Delete the vault. Template-backed sandboxes reject this locally.
+    pub async fn delete(&self) -> Result<()> {
+        let response = self
+            .vault_response(Method::DELETE, self.vault_url("")?, None::<&()>)
+            .await?;
+        response.bytes().await.map_err(vault_transport_error)?;
+        Ok(())
+    }
+    pub async fn list_credentials(&self) -> Result<Vec<crate::api::egress::CredentialMetadata>> {
+        let response: crate::api::egress::CredentialListResponse = self
+            .vault_json(Method::GET, self.vault_url("/credentials")?, None::<&()>)
+            .await?;
+        Ok(response.credentials)
+    }
+    pub async fn get_credential(
+        &self,
+        name: &str,
+    ) -> Result<crate::api::egress::CredentialMetadata> {
+        self.vault_json(
+            Method::GET,
+            self.vault_id_url("credentials", name)?,
+            None::<&()>,
+        )
+        .await
+    }
+    pub async fn list_bindings(
+        &self,
+    ) -> Result<Vec<crate::api::egress::CredentialBindingMetadata>> {
+        let response: crate::api::egress::CredentialBindingListResponse = self
+            .vault_json(Method::GET, self.vault_url("/bindings")?, None::<&()>)
+            .await?;
+        Ok(response.bindings)
+    }
+    pub async fn get_binding(
+        &self,
+        name: &str,
+    ) -> Result<crate::api::egress::CredentialBindingMetadata> {
+        self.vault_json(
+            Method::GET,
+            self.vault_id_url("bindings", name)?,
+            None::<&()>,
+        )
+        .await
+    }
+    fn vault_url(&self, suffix: &str) -> Result<Url> {
+        if self.sandbox_id.is_some() {
+            return Err(Error::InvalidConfig(
+                "Credential Vault is not supported for template-backed sandboxes".into(),
+            ));
+        }
+        self.transport.url(&format!("/credential-vault{suffix}"))
+    }
+    fn vault_id_url(&self, collection: &str, name: &str) -> Result<Url> {
+        self.vault_url("")?;
+        id_url(
+            &self.transport,
+            &format!("/credential-vault/{collection}"),
+            name,
+            None,
+        )
+    }
+    async fn vault_response(
+        &self,
+        method: Method,
+        url: Url,
+        body: Option<&impl serde::Serialize>,
+    ) -> Result<reqwest::Response> {
+        let mut request = self.transport.request(method, url);
+        if let Some(body) = body {
+            request = request.json(body);
+        }
+        let response = request.send().await.map_err(vault_transport_error)?;
+        if !response.status().is_success() {
+            // A server can echo inline secrets in any error field. Do not decode
+            // or expose its body, headers, or redirect location for vault calls.
+            return Err(Error::Api {
+                status: response.status().as_u16(),
+                code: None,
+                message: "Credential Vault request failed".into(),
+                request_id: None,
+            });
+        }
+        Ok(response)
+    }
+    async fn vault_json<T: serde::de::DeserializeOwned>(
+        &self,
+        method: Method,
+        url: Url,
+        body: Option<&impl serde::Serialize>,
+    ) -> Result<T> {
+        let response = self.vault_response(method, url, body).await?;
+        let bytes = response.bytes().await.map_err(vault_transport_error)?;
+        serde_json::from_slice(&bytes)
+            .map_err(|_| Error::Protocol("Invalid Credential Vault response".into()))
+    }
     fn url(&self) -> Result<Url> {
         match &self.sandbox_id {
             Some(id) => id_url(&self.transport, "/sandboxes", id, Some("networkpolicy")),
@@ -79,6 +195,9 @@ impl Egress {
             .json(Method::DELETE, self.url()?, Some(&targets))
             .await
     }
+}
+fn vault_transport_error(error: reqwest::Error) -> Error {
+    Error::Transport(error.without_url())
 }
 fn validate_rules(rules: &[NetworkRule]) -> Result<()> {
     for rule in rules {

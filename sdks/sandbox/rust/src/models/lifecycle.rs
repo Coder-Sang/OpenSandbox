@@ -20,7 +20,7 @@ pub struct Endpoint {
 impl std::fmt::Debug for Endpoint {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Endpoint")
-            .field("endpoint", &self.endpoint)
+            .field("endpoint", &"<redacted>")
             .field("headers", &"<redacted>")
             .field("origin", &self.origin)
             .finish()
@@ -80,6 +80,7 @@ pub struct CreateSandboxOptions {
     pub platform: Option<PlatformSpec>,
     pub secure_access: bool,
     pub network_policy: Option<NetworkPolicy>,
+    pub credential_proxy: Option<crate::api::lifecycle::CredentialProxyConfig>,
     pub lifecycle: Option<SandboxLifecycle>,
     pub volumes: Vec<Volume>,
 }
@@ -103,6 +104,7 @@ impl CreateSandboxOptions {
             platform: None,
             secure_access: false,
             network_policy: None,
+            credential_proxy: None,
             lifecycle: None,
             volumes: Vec::new(),
         }
