@@ -23,6 +23,38 @@ import (
 	"github.com/alibaba/opensandbox/execd/pkg/jupyter/execute"
 )
 
+func TestDispatchExecutionResultHooks_OutputBeforeTerminal(t *testing.T) {
+	for _, failed := range []bool{false, true} {
+		t.Run(map[bool]string{false: "success", true: "error"}[failed], func(t *testing.T) {
+			var events []string
+			req := &ExecuteCodeRequest{Hooks: ExecuteResultHook{
+				OnExecuteResult: func(data map[string]any, count int) {
+					require.Equal(t, 7, count)
+					require.Equal(t, "value", data["text/plain"])
+					events = append(events, "result")
+				},
+				OnExecuteStatus:   func(string) { events = append(events, "status") },
+				OnExecuteStdout:   func(text string) { events = append(events, "stdout:"+text) },
+				OnExecuteStderr:   func(text string) { events = append(events, "stderr:"+text) },
+				OnExecuteError:    func(*execute.ErrorOutput) { events = append(events, "error") },
+				OnExecuteComplete: func(time.Duration) { events = append(events, "complete") },
+			}}
+			result := &execute.ExecutionResult{
+				ExecutionCount: 7, ExecutionData: map[string]any{"text/plain": "value"},
+				Status: "idle", ExecutionTime: time.Millisecond,
+				Stream: []*execute.StreamOutput{{Name: execute.StreamStdout, Text: "before"}, {Name: execute.StreamStderr, Text: "warning"}},
+			}
+			terminal := "complete"
+			if failed {
+				result.Error = &execute.ErrorOutput{EName: "RuntimeError"}
+				terminal = "error"
+			}
+			dispatchExecutionResultHooks(req, result)
+			require.Equal(t, []string{"result", "status", "stdout:before", "stderr:warning", terminal}, events)
+		})
+	}
+}
+
 func TestDispatchExecutionResultHooks_ErrorSkipsComplete(t *testing.T) {
 	var (
 		errorCalls    int

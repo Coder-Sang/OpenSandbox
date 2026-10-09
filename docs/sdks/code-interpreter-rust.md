@@ -11,6 +11,23 @@ itself. Use the [sandbox SDK](/sdks/rust) for lifecycle management and an
 [interpreter-enabled image](/examples/code-interpreter) for code execution.
 An ordinary Python image is not sufficient.
 
+## Runtime requirements
+
+The sandbox must start Jupyter Server with a kernel for the requested language,
+not just install Python or Jupyter packages. Configure execd's `JUPYTER_HOST`
+with the server's HTTP(S) URL and `JUPYTER_TOKEN` with the matching nonempty token.
+For the default readiness probe, keep `JUPYTER_PORT` aligned with that server's
+port. If sandbox creation overrides the image entrypoint, explicitly start
+Jupyter there rather than relying on the image's `CMD`.
+
+The current source runtime selects kernelspecs by their declared language. For
+Python it prefers a matching spec other than `python3`, and falls back to the
+standard `python3` ipykernel spec when no preferred spec exists. This fallback is
+an unreleased runtime fix, not an SDK workaround. Older released execd images
+that skip `python3` need a matching kernelspec registered under another name,
+such as `python`, or an upgraded execd build. A successful readiness probe does
+not verify kernelspec availability or the full execution stream.
+
 ::: warning Both crates are unpublished
 Neither `opensandbox` nor `opensandbox-code-interpreter` is published on crates.io.
 Use source path or Git dependencies. Pin a reviewed revision and commit your
@@ -103,6 +120,33 @@ Language defaults to Python when neither is provided. Available languages and ri
 output formats depend on the sandbox image and execd runtime.
 Dropping a stream does not interrupt the remote kernel. Dropping a context handle
 or interpreter facade does not delete contexts or kill the sandbox.
+
+## Execution stream expectations
+
+The SDK uses the existing execd SSE contract: `stdout`, `stderr`, and `result`
+events carry output, `error` carries a kernel failure, and `execution_complete`
+marks successful completion. Output must arrive before the terminal event.
+A kernel failure does not require a subsequent successful completion event.
+`codes().run` stops aggregation on `execution_complete`. An `error` populates
+`Execution.error`, but aggregation continues until the response body ends, so
+failure streams must close cleanly. Transport failures while draining still
+return `Err`. A stream ending without either terminal event is a protocol
+failure rather than partial output accepted as success.
+
+The current source runtime correlates Jupyter messages to the active request
+and waits for both its `execute_reply` and IOPub `idle` before finalizing a
+successful execution. It forwards `display_data` as existing `result` events,
+including MIME bundles with no positive execution count. An `execution_count`
+event is therefore optional and is not a prerequisite for displaying a result
+or completing an execution. Execd retains its existing `text/plain` to `text`
+wire mapping and forwards other MIME keys unchanged. Rust preserves the bundle
+in `ExecutionResult::raw`.
+
+These stream fixes are also unreleased. Use an execd build containing them for
+rich-output and terminal-ordering guarantees. A legacy image can pass readiness
+and context creation while still losing HTML/JSON output or sending completion
+before results or errors. Validate persistent state, rich results, kernel errors,
+and interruption against the deployed runtime, not just context provisioning.
 
 ## Readiness and cleanup
 

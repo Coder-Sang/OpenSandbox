@@ -112,6 +112,8 @@ func TestExecuteCodeStream(t *testing.T) {
 			Content:      json.RawMessage(statusContent),
 		}
 		conn.WriteJSON(statusMsg)
+		reply, _ := json.Marshal(ExecuteReply{Status: "ok", ExecutionCount: 1})
+		require.NoError(t, conn.WriteJSON(Message{Header: Header{MessageType: string(MsgExecuteReply)}, ParentHeader: executeRequest.Header, Content: reply}))
 	})
 	defer server.Close()
 
@@ -189,6 +191,8 @@ func TestExecuteCodeStreamWaitsForLateExecuteResultUsingConfiguredPollInterval(t
 			Content:      json.RawMessage(resultContent),
 		}
 		require.NoError(t, conn.WriteJSON(executeResultMsg))
+		reply, _ := json.Marshal(ExecuteReply{Status: "ok", ExecutionCount: 1})
+		require.NoError(t, conn.WriteJSON(Message{Header: Header{MessageType: string(MsgExecuteReply)}, ParentHeader: executeRequest.Header, Content: reply}))
 	})
 	defer server.Close()
 
@@ -213,7 +217,7 @@ func TestExecuteCodeStreamWaitsForLateExecuteResultUsingConfiguredPollInterval(t
 	require.Less(t, elapsed, 100*time.Millisecond, "expected stream to close promptly after late execute_result")
 }
 
-func TestExecuteCodeStreamFallsBackWhenPollIntervalIsNonPositive(t *testing.T) {
+func TestExecuteCodeStreamCompletionDoesNotDependOnPollInterval(t *testing.T) {
 	previousPollInterval := execdflag.JupyterIdlePollInterval
 	execdflag.JupyterIdlePollInterval = 0
 	t.Cleanup(func() {
@@ -258,6 +262,8 @@ func TestExecuteCodeStreamFallsBackWhenPollIntervalIsNonPositive(t *testing.T) {
 			Content:      json.RawMessage(resultContent),
 		}
 		require.NoError(t, conn.WriteJSON(executeResultMsg))
+		reply, _ := json.Marshal(ExecuteReply{Status: "ok", ExecutionCount: 1})
+		require.NoError(t, conn.WriteJSON(Message{Header: Header{MessageType: string(MsgExecuteReply)}, ParentHeader: executeRequest.Header, Content: reply}))
 	})
 	defer server.Close()
 
@@ -279,6 +285,5 @@ func TestExecuteCodeStreamFallsBackWhenPollIntervalIsNonPositive(t *testing.T) {
 	elapsed := time.Since(start)
 
 	require.True(t, gotLateResult, "expected late execute_result to be delivered before stream close")
-	require.GreaterOrEqual(t, elapsed, 90*time.Millisecond, "expected non-positive poll interval to fall back to runtime default (100ms)")
-	require.Less(t, elapsed, 300*time.Millisecond, "expected fallback poll interval to still close stream promptly")
+	require.Less(t, elapsed, 300*time.Millisecond, "expected reply-bound stream completion without polling delay")
 }
