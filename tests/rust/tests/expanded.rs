@@ -52,26 +52,46 @@ fn options() -> Result<CreateSandboxOptions> {
     let mut options = CreateSandboxOptions::image(env::var("OPENSANDBOX_SANDBOX_DEFAULT_IMAGE")?);
     options.timeout = Some(Duration::from_secs(600));
     if env::var("OPENSANDBOX_RUST_DEDICATED_JUPYTER").as_deref() == Ok("true") {
-        options
-            .env
-            .insert("JUPYTER_HOST".into(), "http://127.0.0.1:44771".into());
-        options
-            .env
-            .insert("JUPYTER_TOKEN".into(), "rust-e2e-jupyter-safe-token".into());
-        options.entrypoint = Some(vec![
-            "jupyter".into(),
-            "server".into(),
-            "--ip=0.0.0.0".into(),
-            "--port=44771".into(),
-            "--allow-root".into(),
-            "--no-browser".into(),
-            "--IdentityProvider.token=rust-e2e-jupyter-safe-token".into(),
-        ]);
+        configure_dedicated_jupyter(&mut options);
     }
     options
         .metadata
         .insert("rust-e2e-run".into(), env::var("OPENSANDBOX_RUST_RUN_ID")?);
     Ok(options)
+}
+fn configure_dedicated_jupyter(options: &mut CreateSandboxOptions) {
+    options
+        .env
+        .insert("JUPYTER_HOST".into(), "http://127.0.0.1:44771".into());
+    options
+        .env
+        .insert("JUPYTER_TOKEN".into(), "rust-e2e-jupyter-safe-token".into());
+    options.entrypoint = Some(vec![
+        "jupyter".into(),
+        "server".into(),
+        "--ip=0.0.0.0".into(),
+        "--port=44771".into(),
+        "--allow-root".into(),
+        "--no-browser".into(),
+        "--IdentityProvider.token=rust-e2e-jupyter-safe-token".into(),
+    ]);
+}
+#[test]
+fn dedicated_jupyter_fixture_has_matching_host_token_and_entrypoint() {
+    // Execd ignores the stock python3 kernelspec when selecting language python.
+    assert!(include_str!("../fixtures/Dockerfile").contains(
+        "python -m ipykernel install --prefix=/usr/local --name python --display-name Python"
+    ));
+    let mut options = CreateSandboxOptions::image("fixture");
+    configure_dedicated_jupyter(&mut options);
+    assert_eq!(options.env["JUPYTER_HOST"], "http://127.0.0.1:44771");
+    assert_eq!(options.env["JUPYTER_TOKEN"], "rust-e2e-jupyter-safe-token");
+    let entrypoint = options.entrypoint.unwrap();
+    assert_eq!(&entrypoint[..2], &["jupyter", "server"]);
+    assert!(entrypoint.iter().any(|arg| arg == "--port=44771"));
+    assert!(entrypoint
+        .iter()
+        .any(|arg| arg == "--IdentityProvider.token=rust-e2e-jupyter-safe-token"));
 }
 #[tokio::test]
 #[ignore = "real execd isolation runtime required"]
@@ -86,7 +106,9 @@ async fn docker_isolated_foreground_background_scoped_files() -> Result {
         let caps = sessions.capabilities().await?;
         require(
             caps.setpriv_available.unwrap_or(false),
-            "setpriv unavailable: isolated runtime prerequisites unmet",
+            &format!(
+                "setpriv unavailable: isolated runtime prerequisites unmet; capabilities={caps:?}"
+            ),
         )?;
         let session = sessions
             .create(CreateIsolatedSessionOptions {
@@ -325,15 +347,16 @@ async fn docker_interpreter_context_rich_errors_interrupt() -> Result {
         let run_options = RunCodeOptions { context: Some(context), language: None };
         let result = async {
             eprintln!("interpreter: initializing persistent state");
-            codes.run("answer = 41", run_options.clone()).await?;
+            let initialized = codes.run("answer = 41", run_options.clone()).await?;
+            require(initialized.error.is_none(), &format!("context initialization failed: {initialized:?}"))?;
             let execution = codes.run("answer + 1", run_options.clone()).await?;
-            require(execution.result.iter().any(|r| r.text.as_deref() == Some("42")), "context state lost")?;
+            require(execution.result.iter().any(|r| r.text.as_deref() == Some("42")), &format!("context state lost: {execution:?}"))?;
             require(codes.get_context(&id).await?.id.as_deref() == Some(&id), "context get mismatch")?;
             require(codes.list_contexts(Some("python")).await?.iter().any(|c| c.id.as_deref() == Some(&id)), "context absent")?;
             eprintln!("interpreter: rich outputs");
             let rich = codes.run("from IPython.display import display, HTML, JSON\ndisplay(HTML('<b>rust</b>'))\ndisplay(JSON({'answer': 42}))", run_options.clone()).await?;
-            require(rich.result.iter().any(|r| r.raw.contains_key("text/html")), "HTML result lost")?;
-            require(rich.result.iter().any(|r| r.raw.contains_key("application/json")), "JSON result lost")?;
+            require(rich.result.iter().any(|r| r.raw.contains_key("text/html")), &format!("HTML result lost: {rich:?}"))?;
+            require(rich.result.iter().any(|r| r.raw.contains_key("application/json")), &format!("JSON result lost: {rich:?}"))?;
             let failure = codes.run("print('before-error')\nraise ValueError('rust-e2e-error')", run_options.clone()).await?;
             require(failure.error.is_some() && failure.logs.stdout.iter().any(|s| s.text.contains("before-error")), "kernel error/stdout lost")?;
             eprintln!("interpreter: interrupt");

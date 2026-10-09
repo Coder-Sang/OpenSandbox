@@ -11,7 +11,9 @@ fn manager() -> Result<SandboxManager> {
     Ok(SandboxManager::new(
         ConnectionConfig::builder()
             .domain(env::var("OPENSANDBOX_TEST_DOMAIN")?)
-            .api_key("kubernetes-e2e")
+            .api_key(
+                env::var("OPENSANDBOX_TEST_API_KEY").unwrap_or_else(|_| "kubernetes-e2e".into()),
+            )
             .ready_timeout(Duration::from_secs(300))
             .build()?,
     )?)
@@ -49,6 +51,98 @@ async fn state(manager: &SandboxManager, id: &str, expected: &str) -> Result {
     .await??;
     Ok(())
 }
+fn signed_route_expiry(now: SystemTime) -> Result<SystemTime> {
+    Ok(UNIX_EPOCH + Duration::from_secs(now.duration_since(UNIX_EPOCH)?.as_secs() + 120))
+}
+#[test]
+fn signed_route_expiry_uses_whole_unix_seconds() -> Result {
+    let now = UNIX_EPOCH + Duration::new(1_000, 123_456_789);
+    let expiry = signed_route_expiry(now)?.duration_since(UNIX_EPOCH)?;
+    assert_eq!(expiry, Duration::from_secs(1_120));
+    Ok(())
+}
+async fn secure_signed_route(sandbox: &Sandbox) -> Result {
+    let endpoint = sandbox
+        .endpoint_with_options(
+            44772,
+            EndpointOptions {
+                use_server_proxy: Some(false),
+                expires_at: Some(signed_route_expiry(SystemTime::now())?),
+            },
+        )
+        .await?;
+    let base = if endpoint.endpoint.starts_with("http") {
+        endpoint.endpoint.clone()
+    } else {
+        format!("http://{}", endpoint.endpoint)
+    };
+    let mut url = reqwest::Url::parse(&base)?;
+    url.set_path(&format!("{}/ping", url.path().trim_end_matches('/')));
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
+    let mut request = client.get(url.clone());
+    for (name, value) in &endpoint.headers {
+        request = request.header(name, value);
+    }
+    if !request
+        .send()
+        .await
+        .map_err(reqwest::Error::without_url)?
+        .status()
+        .is_success()
+    {
+        return Err("signed secure route was rejected".into());
+    }
+    // URI signed routes put the signature immediately before the request path.
+    let mut parts: Vec<_> = url.path().split('/').map(str::to_owned).collect();
+    if parts.len() < 5 {
+        return Err("signed route test requires URI gateway routing".into());
+    }
+    let signature_index = parts.len() - 2;
+    parts[signature_index] = "invalid-rust-e2e-signature".into();
+    url.set_path(&parts.join("/"));
+    let mut request = client.get(url);
+    for (name, value) in &endpoint.headers {
+        request = request.header(name, value);
+    }
+    let denied = request
+        .send()
+        .await
+        .map_err(reqwest::Error::without_url)?
+        .status();
+    if denied != reqwest::StatusCode::FORBIDDEN
+        && denied != reqwest::StatusCode::UNAUTHORIZED
+        && denied != reqwest::StatusCode::BAD_REQUEST
+    {
+        return Err(format!("tampered signed route not denied: {denied}").into());
+    }
+    let execution = sandbox
+        .commands()
+        .run("printf 'secure-route'", Default::default())
+        .await?;
+    if execution.exit_code != Some(0) {
+        return Err("secure route command failed".into());
+    }
+    Ok(())
+}
+#[tokio::test]
+#[ignore = "dedicated signed ingress runtime required, no snapshot support needed"]
+async fn k8s_secure_signed_route() -> Result {
+    let manager = manager()?;
+    let mut options = CreateSandboxOptions::image(env::var("OPENSANDBOX_SANDBOX_DEFAULT_IMAGE")?);
+    options.secure_access = true;
+    options
+        .metadata
+        .insert("rust-e2e-run".into(), env::var("OPENSANDBOX_RUST_RUN_ID")?);
+    let sandbox = create(&manager, options).await?;
+    let outcome = secure_signed_route(&sandbox).await;
+    match (outcome, sandbox.kill().await) {
+        (outcome, Ok(())) => outcome,
+        (outcome, Err(cleanup)) => Err(format!("scenario={outcome:?}; cleanup={cleanup}").into()),
+    }
+}
 #[tokio::test]
 #[ignore = "dedicated containerd snapshot and signed ingress runtime required"]
 async fn k8s_secure_signed_pause_snapshot_restore() -> Result {
@@ -66,54 +160,7 @@ async fn k8s_secure_signed_pause_snapshot_restore() -> Result {
             .files()
             .write_text("/root/rust-persist.txt", "snapshot-persistence")
             .await?;
-        let epoch = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-        let endpoint = sandbox
-            .endpoint_with_options(
-                44772,
-                EndpointOptions {
-                    use_server_proxy: Some(false),
-                    expires_at: Some(UNIX_EPOCH + Duration::from_secs(epoch + 120)),
-                },
-            )
-            .await?;
-        let base = if endpoint.endpoint.starts_with("http") {
-            endpoint.endpoint.clone()
-        } else {
-            format!("http://{}", endpoint.endpoint)
-        };
-        let mut url = reqwest::Url::parse(&base)?;
-        let path = format!("{}/ping", url.path().trim_end_matches('/'));
-        url.set_path(&path);
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(20))
-            .redirect(reqwest::redirect::Policy::none())
-            .build()?;
-        let mut request = client.get(url.clone());
-        for (name, value) in &endpoint.headers {
-            request = request.header(name, value);
-        }
-        if !request.send().await?.status().is_success() {
-            return Err("signed secure route was rejected".into());
-        }
-        // URI signed routes put the signature immediately before the request path.
-        let mut parts: Vec<_> = url.path().split('/').map(str::to_owned).collect();
-        if parts.len() < 5 {
-            return Err("signed route test requires URI gateway routing".into());
-        }
-        let signature_index = parts.len() - 2;
-        parts[signature_index] = "invalid-rust-e2e-signature".into();
-        url.set_path(&parts.join("/"));
-        let denied = client.get(url).send().await?.status();
-        if denied != reqwest::StatusCode::FORBIDDEN
-            && denied != reqwest::StatusCode::UNAUTHORIZED
-            && denied != reqwest::StatusCode::BAD_REQUEST
-        {
-            return Err(format!("tampered signed route not denied: {denied}").into());
-        }
-        sandbox
-            .commands()
-            .run("printf 'secure-route'", Default::default())
-            .await?;
+        secure_signed_route(&sandbox).await?;
         sandbox.pause().await?;
         state(&manager, sandbox.id(), "Paused").await?;
         let resumed = sandbox.resume().await?;
