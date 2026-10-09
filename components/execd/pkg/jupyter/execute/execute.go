@@ -335,12 +335,8 @@ func (c *Client) handleExecuteResult(msg *Message, state *streamExecutionState, 
 		return
 	}
 
-	// resultChan send happens outside resultMutex: sending can block indefinitely on a full,
-	// undrained channel, and holding resultMutex across that block would starve any other
-	// goroutine that needs it -- including finalizeExecution's poll loop. trySend (see
-	// streamExecutionState) separately makes this send race-free against finalizeExecution
-	// closing resultChan, since ExecutionCount/Error can also be set by handleExecuteReply with
-	// no send of its own.
+	// Output sends select on cancellation and run outside resultMutex, so a stalled
+	// consumer cannot prevent execution teardown.
 	notify := &ExecutionResult{
 		ExecutionCount: execResult.ExecutionCount,
 		ExecutionData:  execResult.Data,

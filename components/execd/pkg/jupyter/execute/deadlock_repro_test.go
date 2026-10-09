@@ -15,71 +15,49 @@
 package execute
 
 import (
+	"context"
 	"encoding/json"
+	"runtime"
 	"testing"
 	"time"
 )
 
-// TestResultMutexNotHeldAcrossBlockingChannelSend reproduces a former deadlock: the result
-// handlers used to send into resultChan while holding state.resultMutex, so once the bounded
-// channel filled, the blocked send starved finalizeExecution's poll loop -- the only thing that
-// ever closes resultChan -- and since receiveMessages dispatches every kernel message
-// synchronously through the same path, the kernel's completion signal could never be read and
-// the execution hung until an external timeout.
-//
-// This test asserts the invariant directly: a goroutine needing only resultMutex (exactly what
-// finalizeExecution's poll loop does) must not be starved while a handler blocks mid-send on a
-// full channel.
+// A blocked output send must neither hold resultMutex nor survive cancellation.
 func TestResultMutexNotHeldAcrossBlockingChannelSend(t *testing.T) {
-	c := &Client{handlers: make(map[MessageType]func(*Message))}
+	c := &Client{}
 	state := newStreamExecutionState(time.Now())
-
-	// Capacity 1 makes the repro deterministic with a single extra send, instead of needing to
-	// race 10+ messages against a websocket.
-	resultChan := make(chan *ExecutionResult, 1)
-
-	content, err := json.Marshal(StreamOutput{Name: StreamStdout, Text: "line"})
-	if err != nil {
-		t.Fatalf("failed to marshal stream output: %v", err)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	state.ctx = ctx
+	results := make(chan *ExecutionResult, 1)
+	content, _ := json.Marshal(StreamOutput{Name: StreamStdout, Text: "line"})
+	msg := &Message{Content: content}
+	c.handleStreamOutput(msg, state, results)
+	returned := make(chan struct{})
+	go func() { c.handleStreamOutput(msg, state, results); close(returned) }()
+	// Only the second sender can hold chanMutex now. Observing its read lock
+	// proves it reached trySend on the full channel before checking resultMutex.
+	deadline := time.Now().Add(time.Second)
+	for state.chanMutex.TryLock() {
+		state.chanMutex.Unlock()
+		if time.Now().After(deadline) {
+			t.Fatal("second sender did not reach the full-channel send")
+		}
+		runtime.Gosched()
 	}
-	msg := &Message{Content: json.RawMessage(content)}
-
-	// Fill the only buffer slot -- this call returns immediately.
-	c.handleStreamOutput(msg, state, resultChan)
-
-	// Second call has nowhere to send: resultChan is full and nothing is draining it (simulating
-	// a consumer that has fallen behind, e.g. runJupyterCode's HTTP relay stalling under load).
-	// Under the bug this call never returns, so it must run in its own goroutine.
-	go func() {
-		c.handleStreamOutput(msg, state, resultChan)
-	}()
-
-	// Give the goroutine above time to reach (and block on) the channel send.
-	time.Sleep(50 * time.Millisecond)
-
-	// A logically unrelated operation that only needs resultMutex -- exactly what
-	// finalizeExecution's poll loop does when deciding whether to close resultChan.
-	lockAcquired := make(chan struct{})
-	go func() {
-		state.resultMutex.Lock()
-		state.resultMutex.Unlock() //nolint:staticcheck // immediately released; only testing acquisition
-		close(lockAcquired)
-	}()
-
+	acquired := make(chan struct{})
+	go func() { state.resultMutex.Lock(); state.resultMutex.Unlock(); close(acquired) }()
 	select {
-	case <-lockAcquired:
-		// Fixed behavior: the mutex was released before/without the blocking send, so an
-		// unrelated goroutine (standing in for finalizeExecution's completion check) was not
-		// starved by a stalled consumer.
-	case <-time.After(500 * time.Millisecond):
-		t.Fatal("resultMutex was still held while handleStreamOutput was blocked sending on a " +
-			"full, undrained channel -- a stalled consumer wedges the whole kernel connection's " +
-			"reader goroutine (receiveMessages), permanently hanging the execution. See " +
-			"handleStreamOutput / handleExecuteResult / handleExecutionError / finalizeExecution " +
-			"in execute.go: each must release state.resultMutex before sending on resultChan.")
+	case <-acquired:
+	case <-time.After(time.Second):
+		t.Fatal("output send held resultMutex")
 	}
-
-	// Draining the channel unblocks the earlier goroutine either way; clean up so the test
-	// doesn't leak a goroutine on failure.
-	<-resultChan
+	cancel()
+	select {
+	case <-returned:
+	case <-time.After(time.Second):
+		t.Fatal("output send survived cancellation")
+	}
+	state.closeResultChan(results)
+	state.closeResultChan(results)
 }
