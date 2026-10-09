@@ -154,6 +154,9 @@ async fn sandbox_create_command_files_metrics_egress_kill() {
         let enabled = env::var("OPENSANDBOX_TEST_NETWORK_POLICY").as_deref() == Ok("true");
         let mut options = CreateSandboxOptions::image(image);
         options.timeout = Some(Duration::from_secs(300));
+        if let Ok(run_id) = env::var("OPENSANDBOX_RUST_RUN_ID") {
+            options.metadata.insert("rust-e2e-run".into(), run_id);
+        }
         options.secure_access = env::var("OPENSANDBOX_TEST_SECURE_ACCESS").as_deref() == Ok("true");
         if enabled {
             options.network_policy = Some(NetworkPolicy {

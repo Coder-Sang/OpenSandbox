@@ -386,17 +386,113 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
-      - name: Run clippy
-        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - name: Run clippy for each feature combination
+        run: |
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo clippy --locked --all-targets --features redis -- -D warnings
+          cargo clippy --locked --all-targets --features tracing -- -D warnings
+          cargo clippy --locked --all-targets --all-features -- -D warnings
 
-      - name: Run tests and doctests
-        run: cargo test --locked --all-features
+      - name: Run tests and doctests for each feature combination
+        run: |
+          cargo test --locked
+          cargo test --locked --features redis
+          cargo test --locked --features tracing
+          cargo test --locked --all-features
 
       - name: Build documentation
         run: cargo doc --locked --no-deps --all-features
 
       - name: Check package
         run: cargo package --locked
+
+  rust-code-interpreter-quality:
+    name: Rust Code Interpreter Quality And Tests (${{ matrix.toolchain }})
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: ["1.85.1", stable]
+    defaults:
+      run:
+        working-directory: sdks/code-interpreter/rust
+    env:
+      RUSTDOCFLAGS: -D warnings
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Rust
+        run: |
+          rustup toolchain install "${{ matrix.toolchain }}" --profile minimal --component rustfmt --component clippy
+          rustup default "${{ matrix.toolchain }}"
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run clippy
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+      - name: Run tests and doctests with local core SDK
+        run: cargo test --locked --all-features
+
+      - name: Build examples with local core SDK
+        run: cargo build --locked --examples --all-features
+
+      - name: Build documentation
+        run: cargo doc --locked --no-deps --all-features
+
+      - name: Validate E2E fixtures without allocating resources
+        working-directory: tests/rust
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked
+
+      - name: Check package file list
+        # The core SDK is not published yet. Registry dependency resolution and
+        # package verification are covered separately once it is available.
+        # Local path builds above validate the actual interpreter implementation.
+        run: cargo package --locked --list
+
+  rust-sdk-redis:
+    name: Rust SDK Redis 7 Integration (${{ matrix.toolchain }})
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: ["1.85.1", stable]
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    defaults:
+      run:
+        working-directory: sdks/sandbox/rust
+    env:
+      OPENSANDBOX_REDIS_TEST: "1"
+      OPENSANDBOX_REDIS_URL: redis://127.0.0.1:6379/0
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Rust
+        run: |
+          rustup toolchain install "${{ matrix.toolchain }}" --profile minimal
+          rustup default "${{ matrix.toolchain }}"
+
+      - name: Run real Redis pool state tests
+        run: cargo test --locked --features redis --test redis_pool
 
   required:
     name: SDK CI
@@ -410,6 +506,8 @@ jobs:
       - csharp-sdk-quality
       - go-sdk-quality
       - rust-sdk-quality
+      - rust-code-interpreter-quality
+      - rust-sdk-redis
     runs-on: ubuntu-latest
     steps:
       - name: Verify required jobs
@@ -423,13 +521,15 @@ jobs:
           CSHARP_RESULT: ${{ needs.csharp-sdk-quality.result }}
           GO_RESULT: ${{ needs.go-sdk-quality.result }}
           RUST_RESULT: ${{ needs.rust-sdk-quality.result }}
+          RUST_INTERPRETER_RESULT: ${{ needs.rust-code-interpreter-quality.result }}
+          RUST_REDIS_RESULT: ${{ needs.rust-sdk-redis.result }}
         run: |
           if [[ "$CHANGES_RESULT" != "success" ]]; then
             echo "Change detection failed: $CHANGES_RESULT"
             exit 1
           fi
           if [[ "$RELEVANT" == "true" ]]; then
-            [[ "$CLI_QUALITY_RESULT" == "success" && "$PYTHON_QUALITY_RESULT" == "success" && "$JAVASCRIPT_RESULT" == "success" && "$KOTLIN_RESULT" == "success" && "$CSHARP_RESULT" == "success" && "$GO_RESULT" == "success" && "$RUST_RESULT" == "success" ]]
+            [[ "$CLI_QUALITY_RESULT" == "success" && "$PYTHON_QUALITY_RESULT" == "success" && "$JAVASCRIPT_RESULT" == "success" && "$KOTLIN_RESULT" == "success" && "$CSHARP_RESULT" == "success" && "$GO_RESULT" == "success" && "$RUST_RESULT" == "success" && "$RUST_INTERPRETER_RESULT" == "success" && "$RUST_REDIS_RESULT" == "success" ]]
           else
-            [[ "$RELEVANT" == "false" && "$CLI_QUALITY_RESULT" == "skipped" && "$PYTHON_QUALITY_RESULT" == "skipped" && "$JAVASCRIPT_RESULT" == "skipped" && "$KOTLIN_RESULT" == "skipped" && "$CSHARP_RESULT" == "skipped" && "$GO_RESULT" == "skipped" && "$RUST_RESULT" == "skipped" ]]
+            [[ "$RELEVANT" == "false" && "$CLI_QUALITY_RESULT" == "skipped" && "$PYTHON_QUALITY_RESULT" == "skipped" && "$JAVASCRIPT_RESULT" == "skipped" && "$KOTLIN_RESULT" == "skipped" && "$CSHARP_RESULT" == "skipped" && "$GO_RESULT" == "skipped" && "$RUST_RESULT" == "skipped" && "$RUST_INTERPRETER_RESULT" == "skipped" && "$RUST_REDIS_RESULT" == "skipped" ]]
           fi

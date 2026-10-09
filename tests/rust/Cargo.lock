@@ -587,10 +587,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "opensandbox-code-interpreter"
+version = "1.1.0"
+dependencies = [
+ "opensandbox",
+ "tokio",
+]
+
+[[package]]
 name = "opensandbox-rust-e2e"
 version = "0.0.0"
 dependencies = [
  "opensandbox",
+ "opensandbox-code-interpreter",
+ "reqwest",
+ "serde_json",
  "tokio",
 ]
 

@@ -14,7 +14,7 @@ If the task is driven by spec changes, also read `../specs/AGENTS.md`.
 ## Key Areas
 
 - `sandbox/python`, `sandbox/javascript`, `sandbox/kotlin`, `sandbox/csharp`, `sandbox/go`, `sandbox/rust`
-- `code-interpreter/python`, `code-interpreter/javascript`, `code-interpreter/csharp`
+- `code-interpreter/python`, `code-interpreter/javascript`, `code-interpreter/csharp`, `code-interpreter/rust`
 - `sandbox/kotlin/code-interpreter`
 - `mcp/sandbox/python`
 - Workspace config in `package.json`, `pnpm-workspace.yaml`, and shared build files
@@ -131,8 +131,17 @@ cargo +1.85.1 package --locked
 CI uses Python 3.11 and PyYAML 6.0.2 for generation, and tests both MSRV and
 stable Rust. The generator owns only `sandbox/rust/src/api/**`, not Cargo
 manifests, lockfiles, handwritten services, or other language SDK outputs.
-Keep the crate's `Cargo.lock` checked in and use `--locked` for checks.
-The crate is not yet published on crates.io. Do not add registry installation
+Keep both Rust crates' `Cargo.lock` files checked in and use `--locked` for checks.
+Validate the default, `redis`, `tracing`, and combined sandbox feature sets.
+For the independent interpreter, run the same fmt/clippy/test/doc checks from
+`code-interpreter/rust`, plus `cargo build --locked --examples` and
+`cargo package --locked --list`. The interpreter's full registry package check
+is blocked until its core `opensandbox` dependency is published. Local path
+builds and a package file-list check do not constitute registry package verification.
+Redis integration tests require an explicitly dedicated Redis service:
+`OPENSANDBOX_REDIS_TEST=1 OPENSANDBOX_REDIS_URL=redis://127.0.0.1:6379/0 cargo test --locked --features redis --test redis_pool`.
+Real sandbox workflows are documented in `../tests/rust/README.md`.
+Neither crate is published on crates.io. Do not add registry installation
 instructions or release automation until publication is configured.
 
 ## Guardrails

@@ -711,7 +711,8 @@ jobs:
           name: rust-e2e-logs
           path: |
             ${{ runner.temp }}/opensandbox-rust-e2e.*/server.log
-            ${{ runner.temp }}/opensandbox-rust-e2e.*/test-output.txt
+            ${{ runner.temp }}/opensandbox-rust-e2e.*/basic-*.txt
+            ${{ runner.temp }}/opensandbox-rust-e2e.*/expanded-*.txt
           retention-days: 5
 
   required:
