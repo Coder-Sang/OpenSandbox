@@ -13,6 +13,8 @@ const METRICS_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_FIELD_BYTES: usize = 1024;
 static METRICS_SLOTS: OnceLock<Arc<Semaphore>> = OnceLock::new();
 static METRICS_CLIENT: OnceLock<Option<reqwest::Client>> = OnceLock::new();
+#[cfg(all(test, feature = "tracing"))]
+pub(crate) static TRACER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -583,6 +585,7 @@ mod tests {
     #[cfg(feature = "tracing")]
     #[test]
     fn opt_in_phase_spans_export_under_one_root_and_inject_w3c() {
+        let _guard = TRACER_TEST_LOCK.lock().unwrap();
         use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
         let exporter = InMemorySpanExporter::default();
         let provider = SdkTracerProvider::builder()

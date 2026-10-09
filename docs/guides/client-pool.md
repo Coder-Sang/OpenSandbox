@@ -420,6 +420,15 @@ a drain timeout can return a still-`Destroying` result. Retry destroy to finish
 cleanup after a timeout or failure. The namespace fence prevents new acquisitions
 and warmup publication, but does not kill already acquired sandboxes.
 Stop pools before shutting down Tokio so asynchronous cleanup can finish.
+Cleanup remains best-effort: finishing a cleanup attempt does not guarantee that
+remote deletion succeeded. With the `tracing` Cargo feature,
+`.enable_tracing(true)` on the connection, and an application-owned OpenTelemetry
+tracer provider/exporter, failed resource cleanup emits a
+`resource.cleanup.failure` span with a static error status, a bounded/sanitized
+`sandbox.id`, and static `operation` and `failure.kind` fields. This also diagnoses
+a resource dropped without a Tokio runtime. There is no implicit stderr output or
+default exporter. Diagnostics do not include raw errors, URLs, response bodies, or
+credentials, and do not add retries or change returned acquisition errors.
 
 For Redis, enable the optional `redis` Cargo feature and replace the store before
 constructing the pool:
@@ -437,6 +446,46 @@ Do not share a logical pool with another language's Redis store. The default Red
 operation timeout is 5s; `with_timeout` accepts a native `Duration`. Keep credentials
 out of logs. Optional [Rust tracing](/sdks/observability#rust-tracing) requires the
 `tracing` Cargo feature and an application provider, and remains off by default.
+
+#### Rust Redis TLS
+
+Use `rediss://` for TLS with certificate-chain and hostname verification. The
+current Rust Redis feature uses rustls and platform-native CA roots. With the
+locked redis-rs dependencies, a private CA can be supplied through `SSL_CERT_FILE`
+(a PEM bundle) or `SSL_CERT_DIR` before starting the application. These environment
+settings replace native-root discovery for Redis and are process-wide, not
+per-store. They do not modify the OS trust store. Include every CA the process
+needs in the bundle. The URL-only store constructors do not expose per-client CA
+or mutual-TLS client certificate configuration. CA-file URL query parameters are
+not a supported way to configure trust. Do not disable verification with
+`#insecure`.
+
+The opt-in TLS integration test requires a **dedicated**, TLS-only Redis instance
+with password authentication. Use ephemeral certificates with a `DNS:localhost`
+SAN and no IP SAN, disable Redis persistence, and bind the container's published
+port only to loopback. Never point the test at a user's Redis service or change
+system trust stores. Supply a second, unrelated CA to verify trust rejection:
+
+```bash
+# From sdks/sandbox/rust. PORT belongs to the dedicated fixture.
+export OPENSANDBOX_REDIS_TLS_TEST=1
+export OPENSANDBOX_REDIS_TLS_URL="rediss://:${TEST_PASSWORD}@localhost:${PORT}/0"
+export OPENSANDBOX_REDIS_TLS_WRONG_HOST_URL="rediss://:${TEST_PASSWORD}@127.0.0.1:${PORT}/0"
+export OPENSANDBOX_REDIS_TLS_CA=/path/to/ephemeral-ca.pem
+export OPENSANDBOX_REDIS_TLS_UNTRUSTED_CA=/path/to/unrelated-ca.pem
+cargo test --locked --features redis --test redis_tls -- --nocapture
+```
+
+Each case runs in a child process with its own `SSL_CERT_FILE`, without changing
+the parent environment. Trusted TLS exercises authenticated public store
+configuration, leases, idle insertion/snapshot/acquisition, and namespace cleanup.
+Negative cases check both the reference driver's rejection cause and the public
+store's error for an untrusted CA, a hostname absent from the SAN, and a wrong
+password. TLS connection failures surface as
+`PoolError::Store("Redis connection failed")`, without exposing credentials or
+certificate details. Delete only the
+uniquely labeled fixture after testing. Its generation key intentionally persists
+until the fixture is removed.
 
 ### Go
 

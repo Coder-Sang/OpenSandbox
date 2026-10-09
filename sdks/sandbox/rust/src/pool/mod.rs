@@ -314,7 +314,9 @@ impl Resource {
     }
     async fn cleanup(mut self) {
         if let Some(id) = self.id.as_ref() {
-            let _ = self.manager.kill(id).await;
+            if self.manager.kill(id).await.is_err() {
+                cleanup_failure(&self.manager, id, "cleanup", "kill_failed");
+            }
             self.id = None;
         }
     }
@@ -327,12 +329,224 @@ impl Drop for Resource {
             if let Ok(runtime) = tokio::runtime::Handle::try_current() {
                 runtime.spawn(async move {
                     let _operation = operation;
-                    let _ = manager.kill(&id).await;
+                    if manager.kill(&id).await.is_err() {
+                        cleanup_failure(&manager, &id, "drop", "kill_failed");
+                    }
                 });
+            } else {
+                cleanup_failure(&manager, &id, "drop", "runtime_unavailable");
             }
         }
     }
 }
+// Best-effort diagnostics never include the kill error, which may contain credentials.
+fn cleanup_failure(
+    manager: &SandboxManager,
+    id: &str,
+    operation: &'static str,
+    reason: &'static str,
+) {
+    #[cfg(feature = "tracing")]
+    if manager.config.enable_tracing {
+        use opentelemetry::trace::{Span, Status, Tracer};
+        let mut span = opentelemetry::global::tracer("opensandbox.pool")
+            .start_with_context("resource.cleanup.failure", &opentelemetry::Context::new());
+        if !id.is_empty()
+            && id.len() <= 1024
+            && id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        {
+            span.set_attribute(opentelemetry::KeyValue::new("sandbox.id", id.to_owned()));
+        }
+        span.set_attribute(opentelemetry::KeyValue::new("operation", operation));
+        span.set_attribute(opentelemetry::KeyValue::new("failure.kind", reason));
+        span.set_status(Status::error("best-effort resource cleanup failed"));
+        span.end();
+    }
+    #[cfg(not(feature = "tracing"))]
+    let _ = (manager, id, operation, reason);
+}
+
+#[cfg(all(test, feature = "tracing"))]
+mod cleanup_diagnostics_tests {
+    use super::*;
+    use opentelemetry::trace::Status;
+    use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn manager(
+        status: Option<u16>,
+        enabled: bool,
+    ) -> (SandboxManager, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let config = ConnectionConfig::builder()
+            .domain(format!(
+                "http://{}/private-path",
+                listener.local_addr().unwrap()
+            ))
+            .api_key("private-auth-token")
+            .enable_tracing(enabled)
+            .disable_metrics(true)
+            .build()
+            .unwrap();
+        let mut config = config;
+        config.request_timeout = if status.is_none() {
+            Duration::from_millis(50)
+        } else {
+            Duration::from_secs(3)
+        };
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            loop {
+                let mut bytes = [0; 1024];
+                let count = socket.read(&mut bytes).await.unwrap();
+                assert!(count > 0);
+                request.extend_from_slice(&bytes[..count]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let request = String::from_utf8_lossy(&request);
+            assert!(request.starts_with("DELETE /private-path/v1/sandboxes/"));
+            assert!(request.contains("private-auth-token"));
+            if let Some(status) = status {
+                let body = if status == 204 {
+                    ""
+                } else {
+                    "private-error-body"
+                };
+                let response = format!(
+                    "HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            } else {
+                tokio::time::sleep(Duration::from_millis(150)).await;
+            }
+        });
+        (SandboxManager::new(config).unwrap(), server)
+    }
+
+    #[test]
+    fn cleanup_failure_spans_are_opt_in_safe_and_best_effort() {
+        let _guard = crate::observability::TRACER_TEST_LOCK.lock().unwrap();
+        let exporter = InMemorySpanExporter::default();
+        let provider = SdkTracerProvider::builder()
+            .with_simple_exporter(exporter.clone())
+            .build();
+        let previous = opentelemetry::global::set_tracer_provider(provider.clone());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            for (id, status, dropped, enabled) in [
+                ("async-failed", Some(500), false, true),
+                ("drop-failed", Some(500), true, true),
+                ("timeout-failed", None, false, true),
+                ("async-success", Some(204), false, true),
+                ("drop-success", Some(204), true, true),
+                ("opt-out", Some(500), false, false),
+            ] {
+                let (manager, server) = manager(status, enabled).await;
+                let pool = SandboxPool::new(PoolConfig::new(
+                    "diagnostics",
+                    0,
+                    manager.config.clone(),
+                    CreateSandboxOptions::image("ubuntu"),
+                ))
+                .unwrap();
+                let mut resource = Resource::id(manager, id.into());
+                resource.operation = Some(Operation::new(pool.inner.clone(), false));
+                if dropped {
+                    drop(resource);
+                } else {
+                    resource.cleanup().await;
+                }
+                tokio::time::timeout(Duration::from_secs(3), async {
+                    while pool.inner.operations.load(Ordering::SeqCst) != 0 {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .unwrap();
+                server.await.unwrap();
+            }
+        });
+        let config = ConnectionConfig::builder()
+            .enable_tracing(true)
+            .build()
+            .unwrap();
+        let manager = SandboxManager::new(config).unwrap();
+        drop(Resource::id(manager.clone(), "no-runtime".into()));
+        cleanup_failure(
+            &manager,
+            "https://private-id/?secret",
+            "cleanup",
+            "kill_failed",
+        );
+        cleanup_failure(&manager, &"x".repeat(1025), "cleanup", "kill_failed");
+        provider.force_flush().unwrap();
+        opentelemetry::global::set_tracer_provider(previous);
+        let spans = exporter.get_finished_spans().unwrap();
+        assert_eq!(spans.len(), 6);
+        for span in &spans {
+            assert_eq!(span.name, "resource.cleanup.failure");
+            assert_eq!(
+                span.status,
+                Status::error("best-effort resource cleanup failed")
+            );
+            assert!(span.attributes.iter().all(|attribute| matches!(
+                attribute.key.as_str(),
+                "sandbox.id" | "operation" | "failure.kind"
+            )));
+        }
+        for (id, operation, reason) in [
+            ("async-failed", "cleanup", "kill_failed"),
+            ("drop-failed", "drop", "kill_failed"),
+            ("timeout-failed", "cleanup", "kill_failed"),
+            ("no-runtime", "drop", "runtime_unavailable"),
+        ] {
+            let span = spans
+                .iter()
+                .find(|span| {
+                    span.attributes
+                        .contains(&opentelemetry::KeyValue::new("sandbox.id", id))
+                })
+                .unwrap();
+            assert!(span
+                .attributes
+                .contains(&opentelemetry::KeyValue::new("operation", operation)));
+            assert!(span
+                .attributes
+                .contains(&opentelemetry::KeyValue::new("failure.kind", reason)));
+        }
+        assert_eq!(
+            spans
+                .iter()
+                .filter(|span| !span
+                    .attributes
+                    .iter()
+                    .any(|attribute| attribute.key.as_str() == "sandbox.id"))
+                .count(),
+            2
+        );
+        let output = format!("{spans:?}");
+        for sensitive in [
+            "private-auth-token",
+            "private-error-body",
+            "private-path",
+            "http://",
+            "https://",
+            "secret",
+        ] {
+            assert!(!output.contains(sensitive));
+        }
+    }
+}
+
 struct Operation {
     inner: Arc<Inner>,
     warm: bool,
