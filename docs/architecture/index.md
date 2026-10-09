@@ -54,6 +54,7 @@ The sandbox SDKs wrap lifecycle operations and in-sandbox operations behind lang
 - Java/Kotlin: `sdks/sandbox/kotlin`
 - C#/.NET: `sdks/sandbox/csharp`
 - Go: `sdks/sandbox/go`
+- Rust: `sdks/sandbox/rust` (async, source installation)
 
 Common capabilities include:
 

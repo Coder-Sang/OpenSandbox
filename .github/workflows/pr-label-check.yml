@@ -33,6 +33,7 @@ jobs:
               "**/yarn.lock",
               "**/Cargo.lock",
               "manifests/charts/opensandbox/Chart.lock",
+              "sdks/sandbox/rust/src/api/**",
               "sdks/sandbox/kotlin/sandbox-api/src/main/kotlin/com/alibaba/opensandbox/sandbox/api/openapitools.json",
 
               // Unit / integration / e2e test sources and fixtures. Kept out
@@ -145,6 +146,7 @@ jobs:
               // Kotlin code-interpreter lives under sdks/sandbox/kotlin/code-interpreter.
               if (dirs.has("sdks")) {
                 const langMap = {
+                  rust: "sdk/rust",
                   go: "sdk/go",
                   kotlin: "sdk/java",
                   python: "sdk/python",

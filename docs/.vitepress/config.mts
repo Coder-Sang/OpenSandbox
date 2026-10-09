@@ -24,6 +24,7 @@ const sdkSidebar = [
       { text: "JavaScript", link: "/sdks/javascript" },
       { text: "Kotlin / Java", link: "/sdks/kotlin" },
       { text: "Go", link: "/sdks/go" },
+      { text: "Rust", link: "/sdks/rust" },
       { text: "C#", link: "/sdks/csharp" },
     ],
   },

@@ -110,6 +110,20 @@ go get github.com/alibaba/OpenSandbox/sdks/sandbox/go
 
 </details>
 
+<details>
+<summary><b>Rust (source installation)</b></summary>
+
+The async `opensandbox` crate is not yet published on crates.io. Requires Rust 1.85+.
+
+```toml
+[dependencies]
+opensandbox = { path = "../OpenSandbox/sdks/sandbox/rust" }
+```
+
+See the [Rust SDK guide](docs/sdks/rust.md) for Git installation and usage.
+
+</details>
+
 ## CLI
 
 OpenSandbox also provides `osb`, a terminal CLI for the common sandbox workflow: create sandboxes, run commands, move files, inspect diagnostics, and manage runtime egress policy.

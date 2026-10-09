@@ -5,7 +5,7 @@ description: Choose an OpenSandbox SDK and compare lifecycle, Client Pool, traci
 
 # SDKs
 
-OpenSandbox provides five sandbox SDKs for lifecycle management, command execution,
+OpenSandbox provides six sandbox SDKs for lifecycle management, command execution,
 file operations, and resource metrics. This site follows the repository's default
 branch; a feature merged here may require a newer package than the one you have
 installed. Check the [release index](https://github.com/opensandbox-group/OpenSandbox/releases) when upgrading.
@@ -19,26 +19,32 @@ installed. Check the [release index](https://github.com/opensandbox-group/OpenSa
 | [Kotlin/Java](/sdks/kotlin) | `com.alibaba.opensandbox:sandbox` | Gradle/Maven |
 | [Go](/sdks/go) | `github.com/alibaba/OpenSandbox/sdks/sandbox/go` | `go get github.com/alibaba/OpenSandbox/sdks/sandbox/go` |
 | [C#/.NET](/sdks/csharp) | `Alibaba.OpenSandbox` | `dotnet add package Alibaba.OpenSandbox` |
+| [Rust](/sdks/rust) | `opensandbox` (unpublished) | Cargo path or Git dependency |
 
 ## Capability coverage
 
 “Yes” means a public SDK entry point exists. Availability also depends on the
 server runtime and the execd version installed in the sandbox.
 
-| Capability | Python async/sync | JavaScript/TypeScript | Kotlin/Java | Go | C#/.NET |
-| --- | --- | --- | --- | --- | --- |
-| Create, connect, renew, pause/resume, kill | Yes | Yes | Yes | Yes | Yes |
-| Snapshots and template management | Yes | Yes | Yes | Yes | Yes |
-| Resource requests, volumes, lifecycle hooks | Yes | Yes | Yes | Yes | Yes |
-| Commands, files, resource metrics | Yes | Yes | Yes | Yes | Yes |
-| Egress policy and Credential Vault | Yes | Yes | Yes | Yes | Yes |
-| Isolated sessions | Yes | Yes | Yes | Yes | Yes |
-| [Client Pool](/guides/client-pool), including Redis | Yes | Yes | Yes | Yes | No |
-| [Pool warmup tracing](/sdks/observability#pool-warmup-tracing) | Yes | Yes, fewer attributes | Yes | No | No |
-| [Remote diagnostic logs/events](/api/#diagnostics) | Yes | No | Yes | No | No |
-| [Create-latency telemetry](/sdks/observability#creation-metrics) | Yes | Yes | Yes | Yes | Yes |
+| Capability | Python async/sync | JavaScript/TypeScript | Kotlin/Java | Go | C#/.NET | Rust |
+| --- | --- | --- | --- | --- | --- | --- |
+| Create, connect, renew, pause/resume, kill | Yes | Yes | Yes | Yes | Yes | Yes |
+| Snapshots and template management | Yes | Yes | Yes | Yes | Yes | Yes |
+| Resource requests, volumes, lifecycle hooks | Yes | Yes | Yes | Yes | Yes | Yes |
+| Commands, files, resource metrics | Yes | Yes | Yes | Yes | Yes | Yes |
+| Egress policy | Yes | Yes | Yes | Yes | Yes | Yes |
+| Credential Vault | Yes | Yes | Yes | Yes | Yes | No |
+| Isolated sessions | Yes | Yes | Yes | Yes | Yes | No |
+| [Client Pool](/guides/client-pool), including Redis | Yes | Yes | Yes | Yes | No | No |
+| [Pool warmup tracing](/sdks/observability#pool-warmup-tracing) | Yes | Yes, fewer attributes | Yes | No | No | No |
+| [Remote diagnostic logs/events](/api/#diagnostics) | Yes | No | Yes | No | No | No |
+| [Create-latency telemetry](/sdks/observability#creation-metrics) | Yes | Yes | Yes | Yes | Yes | No |
 
 ### Differences that affect application code
+
+- **Rust:** the async Tokio/reqwest crate is installed from source, not crates.io.
+  It supports command sessions and background commands, but not isolated sessions
+  or a Code Interpreter SDK. Dropping a handle does not kill its remote sandbox.
 
 - **Pools:** Go exposes different warmup controls; the fields accepted by the default
   pool creator also differ across languages. See the [pool configuration matrix](/guides/client-pool#configuration).
@@ -73,7 +79,7 @@ Python and Kotlin/Java expose remote logs/events on both `Sandbox` and
 `getDiagnosticLogs` / `getDiagnosticEvents`. Pass a sandbox ID to manager methods
 and an explicit scope such as `container` for logs or `runtime` for events.
 
-JavaScript, Go, and C# can use the [CLI](/cli/#collect-diagnostics) or
+JavaScript, Go, C#, and Rust can use the [CLI](/cli/#collect-diagnostics) or
 [HTTP API](/api/#diagnostics). C# `SdkDiagnosticsOptions` controls local SDK
 logging. See the API reference for supported scopes and inline/URL delivery.
 

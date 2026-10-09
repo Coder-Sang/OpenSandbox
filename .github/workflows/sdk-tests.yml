@@ -342,6 +342,62 @@ jobs:
           path: |
             sdks/sandbox/go/reports/**
 
+  rust-sdk-quality:
+    name: Rust SDK Quality And Tests (${{ matrix.toolchain }})
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: ["1.85.1", stable]
+    defaults:
+      run:
+        working-directory: sdks/sandbox/rust
+    env:
+      RUSTDOCFLAGS: -D warnings
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Rust
+        run: |
+          rustup toolchain install "${{ matrix.toolchain }}" --profile minimal --component rustfmt --component clippy
+          rustup default "${{ matrix.toolchain }}"
+
+      - name: Set up generator Python
+        if: matrix.toolchain == '1.85.1'
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install generator dependency
+        if: matrix.toolchain == '1.85.1'
+        run: python -m pip install PyYAML==6.0.2
+
+      - name: Check generated API reproducibility
+        if: matrix.toolchain == '1.85.1'
+        run: |
+          python -m unittest discover -s scripts -p 'test_*.py'
+          python scripts/generate_api.py
+          git diff --exit-code -- src/api
+          python scripts/generate_api.py --check
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run clippy
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+      - name: Run tests and doctests
+        run: cargo test --locked --all-features
+
+      - name: Build documentation
+        run: cargo doc --locked --no-deps --all-features
+
+      - name: Check package
+        run: cargo package --locked
+
   required:
     name: SDK CI
     if: ${{ always() && github.event_name == 'pull_request' }}
@@ -353,6 +409,7 @@ jobs:
       - kotlin-sdk-quality
       - csharp-sdk-quality
       - go-sdk-quality
+      - rust-sdk-quality
     runs-on: ubuntu-latest
     steps:
       - name: Verify required jobs
@@ -365,13 +422,14 @@ jobs:
           KOTLIN_RESULT: ${{ needs.kotlin-sdk-quality.result }}
           CSHARP_RESULT: ${{ needs.csharp-sdk-quality.result }}
           GO_RESULT: ${{ needs.go-sdk-quality.result }}
+          RUST_RESULT: ${{ needs.rust-sdk-quality.result }}
         run: |
           if [[ "$CHANGES_RESULT" != "success" ]]; then
             echo "Change detection failed: $CHANGES_RESULT"
             exit 1
           fi
           if [[ "$RELEVANT" == "true" ]]; then
-            [[ "$CLI_QUALITY_RESULT" == "success" && "$PYTHON_QUALITY_RESULT" == "success" && "$JAVASCRIPT_RESULT" == "success" && "$KOTLIN_RESULT" == "success" && "$CSHARP_RESULT" == "success" && "$GO_RESULT" == "success" ]]
+            [[ "$CLI_QUALITY_RESULT" == "success" && "$PYTHON_QUALITY_RESULT" == "success" && "$JAVASCRIPT_RESULT" == "success" && "$KOTLIN_RESULT" == "success" && "$CSHARP_RESULT" == "success" && "$GO_RESULT" == "success" && "$RUST_RESULT" == "success" ]]
           else
-            [[ "$RELEVANT" == "false" && "$CLI_QUALITY_RESULT" == "skipped" && "$PYTHON_QUALITY_RESULT" == "skipped" && "$JAVASCRIPT_RESULT" == "skipped" && "$KOTLIN_RESULT" == "skipped" && "$CSHARP_RESULT" == "skipped" && "$GO_RESULT" == "skipped" ]]
+            [[ "$RELEVANT" == "false" && "$CLI_QUALITY_RESULT" == "skipped" && "$PYTHON_QUALITY_RESULT" == "skipped" && "$JAVASCRIPT_RESULT" == "skipped" && "$KOTLIN_RESULT" == "skipped" && "$CSHARP_RESULT" == "skipped" && "$GO_RESULT" == "skipped" && "$RUST_RESULT" == "skipped" ]]
           fi

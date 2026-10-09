@@ -13,7 +13,7 @@ If the task is driven by spec changes, also read `../specs/AGENTS.md`.
 
 ## Key Areas
 
-- `sandbox/python`, `sandbox/javascript`, `sandbox/kotlin`, `sandbox/csharp`, `sandbox/go`
+- `sandbox/python`, `sandbox/javascript`, `sandbox/kotlin`, `sandbox/csharp`, `sandbox/go`, `sandbox/rust`
 - `code-interpreter/python`, `code-interpreter/javascript`, `code-interpreter/csharp`
 - `sandbox/kotlin/code-interpreter`
 - `mcp/sandbox/python`
@@ -27,6 +27,7 @@ Generator-owned paths include:
 
 - `sandbox/python/src/opensandbox/api/**`
 - `sandbox/javascript/src/api/*.ts`
+- `sandbox/rust/src/api/**` (owned by `sandbox/rust/scripts/generate_api.py`)
 - `sandbox/kotlin/sandbox-api/build/generated/**`
 - language-specific OpenAPI outputs produced by local generator scripts or Gradle tasks
 
@@ -109,6 +110,30 @@ Go sandbox SDK:
 cd sdks/sandbox/go
 go test ./...
 ```
+
+Rust sandbox SDK (independent Rust 2021 crate, MSRV 1.85):
+
+```bash
+cd sdks/sandbox/rust
+# Match CI's generator environment and formatter for reproducible output.
+python3 -m pip install PyYAML==6.0.2
+rustup toolchain install 1.85.1 --profile minimal --component rustfmt --component clippy
+python3 -m unittest discover -s scripts -p 'test_*.py'
+RUSTUP_TOOLCHAIN=1.85.1 python3 scripts/generate_api.py
+RUSTUP_TOOLCHAIN=1.85.1 python3 scripts/generate_api.py --check
+cargo +1.85.1 fmt --all -- --check
+cargo +1.85.1 clippy --locked --all-targets --all-features -- -D warnings
+cargo +1.85.1 test --locked --all-features
+RUSTDOCFLAGS='-D warnings' cargo +1.85.1 doc --locked --no-deps --all-features
+cargo +1.85.1 package --locked
+```
+
+CI uses Python 3.11 and PyYAML 6.0.2 for generation, and tests both MSRV and
+stable Rust. The generator owns only `sandbox/rust/src/api/**`, not Cargo
+manifests, lockfiles, handwritten services, or other language SDK outputs.
+Keep the crate's `Cargo.lock` checked in and use `--locked` for checks.
+The crate is not yet published on crates.io. Do not add registry installation
+instructions or release automation until publication is configured.
 
 ## Guardrails
 
