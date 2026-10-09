@@ -404,8 +404,16 @@ half the idle TTL. Custom creators and health/preparation callbacks use the publ
 
 `start()` does not await a full buffer. `close(true)` stops this local instance and
 waits for in-flight operations up to `drain_timeout`, retaining shared idle entries.
-`kill()` closes locally and removes idle sandboxes,
-not acquired sandboxes. `resize`, `snapshot`, and `snapshot_idle_entries` expose
+`close(false)` stops locally without waiting for pending cleanup. `kill()` stops
+locally, waits for in-flight acquisition, warmup, and reconcile cleanup using
+`drain_timeout`, then removes shared idle sandboxes. It never kills acquired
+sandboxes. A zero drain timeout waits without a deadline. If the drain budget
+expires, `kill()` returns `PoolError::Timeout`; workers continue cleanup while
+Tokio is alive. Keep the runtime alive and retry `kill()` even if the pool already
+reports `Stopped`. A successful drain waits for late-created warmup sandboxes to
+finish their cleanup attempts before returning. `close(true)` alone retains idle
+resources and its timeout is best-effort, so use `kill()` for explicit idle cleanup.
+`resize`, `snapshot`, and `snapshot_idle_entries` expose
 management and diagnostics. `SandboxPoolManager::destroy` retires a namespace
 across instances. Check `PoolDestroyResult.state` and `persistent_state_cleared`:
 a drain timeout can return a still-`Destroying` result. Retry destroy to finish

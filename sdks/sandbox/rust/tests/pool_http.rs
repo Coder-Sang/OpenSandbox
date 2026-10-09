@@ -369,6 +369,7 @@ async fn close_and_release_idle_never_kill_borrowed_sandbox() {
     assert_eq!(borrowed.id(), "idle");
     pool.close(true).await.unwrap();
     assert_eq!(pool.release_all_idle().await.unwrap(), 1);
+    pool.kill().await.unwrap();
     let mut deletes = Vec::new();
     while let Ok(request) = server.requests.try_recv() {
         if request.starts_with("DELETE") {

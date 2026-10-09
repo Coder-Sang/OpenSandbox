@@ -284,6 +284,7 @@ pub struct SandboxPool {
 }
 /// Owned resource guard. Every early return, abort, or failed delivery schedules cleanup.
 struct Resource {
+    operation: Option<Operation>,
     manager: SandboxManager,
     id: Option<String>,
     sandbox: Option<Sandbox>,
@@ -291,6 +292,7 @@ struct Resource {
 impl Resource {
     fn id(manager: SandboxManager, id: String) -> Self {
         Self {
+            operation: None,
             manager,
             id: Some(id),
             sandbox: None,
@@ -298,6 +300,7 @@ impl Resource {
     }
     fn sandbox(manager: SandboxManager, sandbox: Sandbox) -> Self {
         Self {
+            operation: None,
             manager,
             id: Some(sandbox.id().into()),
             sandbox: Some(sandbox),
@@ -320,8 +323,10 @@ impl Drop for Resource {
     fn drop(&mut self) {
         if let Some(id) = self.id.take() {
             let manager = self.manager.clone();
+            let operation = self.operation.take();
             if let Ok(runtime) = tokio::runtime::Handle::try_current() {
                 runtime.spawn(async move {
+                    let _operation = operation;
                     let _ = manager.kill(&id).await;
                 });
             }
@@ -343,10 +348,10 @@ impl Operation {
 }
 impl Drop for Operation {
     fn drop(&mut self) {
-        self.inner.operations.fetch_sub(1, Ordering::SeqCst);
         if self.warm {
             self.inner.warming.fetch_sub(1, Ordering::SeqCst);
         }
+        self.inner.operations.fetch_sub(1, Ordering::SeqCst);
         self.inner.notify.notify_waiters();
     }
 }
@@ -425,9 +430,11 @@ impl SandboxPool {
                 if inner.stopped.load(Ordering::SeqCst) {
                     break;
                 }
+                let operation = Operation::new(inner.clone(), false);
                 if let Err(e) = inner.reconcile().await {
                     inner.failure(&e).await;
                 }
+                drop(operation);
                 drop(inner);
                 sleep(Duration::from_secs(1)).await;
             }
@@ -476,8 +483,13 @@ impl SandboxPool {
         let inner = self.inner.clone();
         let operation = Operation::new(inner.clone(), false);
         tokio::spawn(async move {
-            let _operation = operation;
-            let result = inner.acquire_owned(sandbox_timeout, policy).await;
+            let mut operation = Some(operation);
+            let mut result = inner.acquire_owned(sandbox_timeout, policy).await;
+            if let Ok(resource) = &mut result {
+                // Keep draining accountable while ownership is queued for delivery.
+                // Cancellation moves this same permit into the resource's cleanup task.
+                resource.operation = operation.take();
+            }
             if let Err(Ok(resource)) = tx.send(result) {
                 resource.cleanup().await;
             }
@@ -536,9 +548,18 @@ impl SandboxPool {
             .await
             .map_err(|e| PoolError::Task(e.to_string()))?
     }
+    /// Stop locally, await in-flight cleanup, then kill shared idle resources.
+    /// Borrowed sandboxes remain caller-owned. A drain timeout returns `PoolError::Timeout`:
+    /// workers continue cleanup and calling `kill` again retries the drain.
     pub async fn kill(&self) -> PoolResult<()> {
-        self.close(false).await?;
-        self.release_all_idle().await?;
-        Ok(())
+        let inner = self.inner.clone();
+        tokio::spawn(async move {
+            inner.close(false).await?;
+            inner.wait_operations().await?;
+            inner.release_idle().await?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| PoolError::Task(e.to_string()))?
     }
 }

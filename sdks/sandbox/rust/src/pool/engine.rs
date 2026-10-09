@@ -263,7 +263,7 @@ impl Inner {
             self.local.lock().await.lease = None;
             return Ok(());
         };
-        self.local.lock().await.lease = Some(lease.clone());
+        self.accept_lease(&lease).await?;
         if !c
             .state_store
             .renew_primary_lock(&c.pool_name, &lease, c.primary_lock_ttl)
@@ -325,6 +325,19 @@ impl Inner {
                 }
             });
         }
+        Ok(())
+    }
+    pub(super) async fn accept_lease(&self, lease: &PrimaryLease) -> PoolResult<()> {
+        let mut local = self.local.lock().await;
+        if local.phase != PoolLifecycleState::Running || self.stopped.load(Ordering::SeqCst) {
+            drop(local);
+            let c = &self.config;
+            c.state_store
+                .release_primary_lock(&c.pool_name, lease)
+                .await?;
+            return Err(PoolError::NotRunning);
+        }
+        local.lease = Some(lease.clone());
         Ok(())
     }
     async fn valid_warmup(&self, lease: &PrimaryLease) -> PoolResult<()> {
@@ -495,22 +508,28 @@ impl Inner {
                 .await?;
         }
         if graceful {
-            let wait = async {
-                loop {
-                    let notified = self.notify.notified();
-                    if self.operations.load(Ordering::SeqCst) == 0 {
-                        break;
-                    }
-                    notified.await;
-                }
-            };
-            if self.config.drain_timeout.is_zero() {
-                wait.await;
-            } else {
-                let _ = tokio::time::timeout(self.config.drain_timeout, wait).await;
-            }
+            let _ = self.wait_operations().await;
         }
         self.local.lock().await.phase = PoolLifecycleState::Stopped;
+        Ok(())
+    }
+    pub(super) async fn wait_operations(&self) -> PoolResult<()> {
+        let wait = async {
+            loop {
+                let notified = self.notify.notified();
+                if self.operations.load(Ordering::SeqCst) == 0 {
+                    break;
+                }
+                notified.await;
+            }
+        };
+        if self.config.drain_timeout.is_zero() {
+            wait.await;
+        } else {
+            tokio::time::timeout(self.config.drain_timeout, wait)
+                .await
+                .map_err(|_| PoolError::Timeout)?;
+        }
         Ok(())
     }
 }

@@ -71,6 +71,66 @@ async fn fixture() -> (
 }
 
 #[tokio::test]
+async fn kill_waits_for_pending_create_cleanup_and_retries_after_timeout() {
+    for bounded in [false, true] {
+        let (connection, mut requests, server) = fixture().await;
+        let store = Arc::new(InMemoryPoolStateStore::new());
+        let entered = Arc::new(Notify::new());
+        let resume = Arc::new(Notify::new());
+        let manager = SandboxManager::new(connection.clone()).unwrap();
+        let mut c = PoolConfig::new("p", 1, connection, CreateSandboxOptions::image("ubuntu"));
+        c.state_store = store.clone();
+        c.drain_timeout = if bounded {
+            Duration::from_millis(20)
+        } else {
+            Duration::ZERO
+        };
+        let e = entered.clone();
+        let r = resume.clone();
+        c.sandbox_creator = Some(Arc::new(move |_| {
+            let manager = manager.clone();
+            let e = e.clone();
+            let r = r.clone();
+            Box::pin(async move {
+                e.notify_one();
+                r.notified().await;
+                Ok(manager.connect_unready("late").await?)
+            })
+        }));
+        let pool = SandboxPool::new(c).unwrap();
+        pool.start().await.unwrap();
+        entered.notified().await;
+        let closing = pool.clone();
+        let mut kill = tokio::spawn(async move { closing.kill().await });
+        if bounded {
+            assert!(matches!(kill.await.unwrap(), Err(PoolError::Timeout)));
+            assert_eq!(pool.snapshot().await.unwrap().warming_count, 1);
+            let closing = pool.clone();
+            kill = tokio::spawn(async move { closing.kill().await });
+        } else {
+            assert!(tokio::time::timeout(Duration::from_millis(20), &mut kill)
+                .await
+                .is_err());
+        }
+        resume.notify_one();
+        tokio::time::timeout(Duration::from_secs(3), kill)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let snapshot = pool.snapshot().await.unwrap();
+        assert_eq!(snapshot.in_flight_operations, 0);
+        assert_eq!(snapshot.warming_count, 0);
+        assert!(store.snapshot_idle_entries("p").await.unwrap().is_empty());
+        let deleted = std::iter::from_fn(|| requests.try_recv().ok())
+            .filter(|line| line.starts_with("DELETE /v1/sandboxes/late "))
+            .count();
+        assert_eq!(deleted, 1, "kill must await remote cleanup completion");
+        server.abort();
+    }
+}
+
+#[tokio::test]
 async fn late_creator_after_destroy_is_killed_not_published() {
     let (connection, mut requests, server) = fixture().await;
     let store = Arc::new(InMemoryPoolStateStore::new());
