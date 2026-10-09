@@ -1,0 +1,30 @@
+[package]
+name = "opensandbox"
+version = "1.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Async Rust SDK for OpenSandbox lifecycle and execution APIs"
+license = "Apache-2.0"
+repository = "https://github.com/opensandbox-group/OpenSandbox"
+homepage = "https://open-sandbox.ai"
+readme = "README.md"
+include = ["src/**", "examples/**", "Cargo.toml", "Cargo.lock", "README.md", "LICENSE"]
+
+[dependencies]
+async-stream = "0.3"
+bytes = "1"
+chrono = { version = "0.4", features = ["serde"] }
+futures-core = "0.3"
+futures-util = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "multipart", "stream"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["time", "rt", "macros", "sync"] }
+url = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util"] }
+
+[lints.rust]
+unsafe_code = "forbid"
