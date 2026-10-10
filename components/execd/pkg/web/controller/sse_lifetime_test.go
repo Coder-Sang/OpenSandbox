@@ -135,178 +135,317 @@ func decodeLifetimeEvents(t *testing.T, body []byte) []model.ServerStreamEvent {
 	return events
 }
 
-// TestRunCodeErrorWaitsForPingHTTP uses a real HTTP/1.1 writer and an optional
+type lifetimeExecutionCase struct {
+	name, route, path, body string
+	run                     func(*CodeInterpretingController)
+}
+
+func lifetimeExecutionCases() []lifetimeExecutionCase {
+	return []lifetimeExecutionCase{
+		{"RunCode", "/code", "/code", `{"code":"print(1)","context":{"id":"session-1","language":"python"}}`, (*CodeInterpretingController).RunCode},
+		{"RunCommand/foreground", "/command", "/command", `{"command":"true","background":false}`, (*CodeInterpretingController).RunCommand},
+		{"RunCommand/background", "/command", "/command", `{"command":"true","background":true}`, (*CodeInterpretingController).RunCommand},
+		{"RunInSession", "/session/:sessionId/run", "/session/session-1/run", `{"command":"true","timeout":0}`, (*CodeInterpretingController).RunInSession},
+	}
+}
+
+func installLifetimeRunner(t *testing.T, run func(*runtime.ExecuteCodeRequest) error) {
+	t.Helper()
+	previous := codeRunner
+	codeRunner = &fakeCodeRunner{
+		execute:          run,
+		runInBashSession: func(_ context.Context, req *runtime.ExecuteCodeRequest) error { return run(req) },
+	}
+	t.Cleanup(func() { codeRunner = previous })
+}
+
+func lifetimeTestContext(tc lifetimeExecutionCase) (*gin.Context, *httptest.ResponseRecorder) {
+	ctx, recorder := newTestContext(http.MethodPost, tc.path, []byte(tc.body))
+	if tc.name == "RunInSession" {
+		ctx.Params = gin.Params{{Key: "sessionId", Value: "session-1"}}
+	}
+	return ctx, recorder
+}
+
+// TestExecutionErrorWaitsForPingHTTP uses a real HTTP/1.1 writer and an optional
 // ReverseProxy to verify wire framing, not merely runtime/Jupyter event errors.
 // The socket gate forces ping to be in progress when Execute returns an error.
 // A cancellation handshake proves the handler reached cleanup before the gate
 // is released. No scheduling sleeps or injected connection failures are used.
-func TestRunCodeErrorWaitsForPingHTTP(t *testing.T) {
-	for _, proxy := range []bool{false, true} {
-		for _, large := range []bool{false, true} {
-			name := "direct/short"
-			if proxy {
-				name = "proxy/short"
+func TestExecutionErrorWaitsForPingHTTP(t *testing.T) {
+	testExecutionWaitsForPingHTTP(t, "returned-error", false)
+}
+
+func TestExecutionTerminalHookWaitsForPingHTTP(t *testing.T) {
+	for _, terminal := range []string{"error", "complete"} {
+		t.Run(terminal, func(t *testing.T) {
+			testExecutionWaitsForPingHTTP(t, terminal, false)
+		})
+	}
+}
+
+// The direct setter's parent observes cancellation of the SSE-owned ping
+// context itself, rather than cancellation performed by an execution handler.
+func TestExecutionTerminalHookCancelsOwnedPingHTTP(t *testing.T) {
+	for _, terminal := range []string{"error", "complete"} {
+		t.Run(terminal, func(t *testing.T) {
+			testExecutionWaitsForPingHTTP(t, terminal, true)
+		})
+	}
+}
+
+func testExecutionWaitsForPingHTTP(t *testing.T, terminal string, directSetter bool) {
+	t.Helper()
+	cases := lifetimeExecutionCases()
+	if directSetter {
+		cases = cases[:1]
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			proxyCases, sizeCases := []bool{false, true}, []bool{false, true}
+			if directSetter {
+				proxyCases, sizeCases = []bool{false}, []bool{false}
 			}
-			if large {
-				name = strings.TrimSuffix(name, "short") + "large"
-			}
-			t.Run(name, func(t *testing.T) {
-				message := "session is busy"
-				if large {
-					// Synthetic size crosses net/http's buffer boundaries. This
-					// is a framing regression, not a historical EOF reproducer.
-					message += ": " + strings.Repeat("x", 8192)
-				}
-				gate := &lifetimePingGate{started: make(chan struct{}), release: make(chan struct{})}
-				var releaseOnce sync.Once
-				release := func() {
-					releaseOnce.Do(func() {
-						gate.released.Store(true)
-						close(gate.release)
+			for _, proxy := range proxyCases {
+				for _, large := range sizeCases {
+					name := "direct/short"
+					if proxy {
+						name = "proxy/short"
+					}
+					if large {
+						name = strings.TrimSuffix(name, "short") + "large"
+					}
+					t.Run(name, func(t *testing.T) {
+						message := "session is busy"
+						if large {
+							// Synthetic size crosses net/http's buffer boundaries. This
+							// is a framing regression, not a historical EOF reproducer.
+							message += ": " + strings.Repeat("x", 8192)
+						}
+						gate := &lifetimePingGate{started: make(chan struct{}), release: make(chan struct{})}
+						var releaseOnce sync.Once
+						release := func() {
+							releaseOnce.Do(func() {
+								gate.released.Store(true)
+								close(gate.release)
+							})
+						}
+						defer release()
+						overlap := make(chan struct{})
+						canceled := make(chan struct{})
+						handlerDone := make(chan struct{})
+						hookAttempted := make(chan struct{})
+						hookReturned := make(chan struct{})
+						installLifetimeRunner(t, func(req *runtime.ExecuteCodeRequest) error {
+							req.Hooks.OnExecuteInit("session-1")
+							select {
+							case <-gate.started:
+								if terminal != "returned-error" {
+									close(hookAttempted)
+									if terminal == "error" {
+										req.Hooks.OnExecuteError(&execute.ErrorOutput{EName: "RuntimeError", EValue: message})
+									} else {
+										req.Hooks.OnExecuteComplete(time.Millisecond)
+									}
+									close(hookReturned)
+								}
+								return errors.New(message)
+							case <-time.After(5 * time.Second):
+								return errors.New("ping did not start")
+							}
+						})
+
+						engine := gin.New()
+						engine.POST(tc.route, func(ctx *gin.Context) {
+							parent := &lifetimeParentContext{Context: ctx.Request.Context(), canceled: canceled}
+							ctx.Request = ctx.Request.WithContext(parent)
+							ctx.Writer = &lifetimeWriter{ResponseWriter: ctx.Writer, gate: gate, overlap: overlap}
+							defer close(handlerDone)
+							controller := NewCodeInterpretingController(ctx)
+							if directSetter {
+								// No outer WithCancel: AfterFunc identifies the context
+								// created and stopped by setServerEventsHandler.
+								hooks, stopSSE := controller.setServerEventsHandler(parent)
+								defer stopSSE()
+								_ = codeRunner.Execute(&runtime.ExecuteCodeRequest{Hooks: hooks})
+								return
+							}
+							tc.run(controller)
+						})
+						server := httptest.NewUnstartedServer(engine)
+						server.Listener = &lifetimePingListener{Listener: server.Listener, gate: gate}
+						server.Start()
+						defer func() { release(); server.Close() }()
+						endpoint := server.URL
+						if proxy {
+							upstream, err := url.Parse(server.URL)
+							require.NoError(t, err)
+							gateway := httptest.NewServer(httputil.NewSingleHostReverseProxy(upstream))
+							defer func() { release(); gateway.Close() }()
+							endpoint = gateway.URL
+						}
+						transport := &http.Transport{DisableKeepAlives: true}
+						defer transport.CloseIdleConnections()
+						client := &http.Client{Transport: transport, Timeout: 5 * time.Second}
+						type result struct {
+							response *http.Response
+							body     []byte
+							err      error
+						}
+						resultCh := make(chan result, 1)
+						go func() {
+							response, err := client.Post(endpoint+tc.path, "application/json", strings.NewReader(tc.body))
+							if err != nil {
+								resultCh <- result{err: err}
+								return
+							}
+							defer response.Body.Close()
+							body, err := io.ReadAll(response.Body)
+							resultCh <- result{response: response, body: body, err: err}
+						}()
+
+						awaitSSELifetime(t, gate.started, "ping socket write")
+						if terminal == "returned-error" {
+							select {
+							case <-canceled:
+							case <-overlap:
+								t.Fatal("error response was written while ping was still using the response writer")
+							case <-time.After(5 * time.Second):
+								t.Fatal("handler did not cancel ping after Execute returned an error")
+							}
+						} else {
+							awaitSSELifetime(t, hookAttempted, "terminal hook attempt")
+							if directSetter {
+								select {
+								case <-canceled:
+								case <-hookReturned:
+									t.Fatal("terminal hook returned without stopping its owned ping context")
+								case <-overlap:
+									t.Fatal("terminal hook wrote before stopping its owned ping context")
+								case <-time.After(5 * time.Second):
+									t.Fatal("terminal hook did not cancel its owned ping context before gate release")
+								}
+							}
+							select {
+							case <-hookReturned:
+								t.Fatal("terminal hook returned before blocked ping stopped")
+							default:
+							}
+						}
+						select {
+						case <-overlap:
+							t.Fatal("error response overlapped the blocked ping")
+						case <-handlerDone:
+							t.Fatal("handler returned before blocked ping stopped")
+						default:
+						}
+						release()
+						if terminal != "returned-error" {
+							awaitSSELifetime(t, hookReturned, "terminal hook return")
+						}
+						awaitSSELifetime(t, handlerDone, "handler cleanup")
+						select {
+						case <-overlap:
+							t.Fatal("response write occurred before the blocked ping was released")
+						default:
+						}
+						var got result
+						select {
+						case got = <-resultCh:
+						case <-time.After(5 * time.Second):
+							t.Fatal("HTTP client did not finish")
+						}
+						require.NoError(t, got.err, "chunked HTTP body must terminate cleanly")
+						require.NotNil(t, got.response)
+						require.Equal(t, http.StatusOK, got.response.StatusCode)
+						require.Equal(t, []string{"chunked"}, got.response.TransferEncoding)
+						require.Contains(t, got.response.Header.Get("Content-Type"), "text/event-stream")
+						events := decodeLifetimeEvents(t, got.body)
+						require.Equal(t, model.StreamEventTypeInit, events[0].Type)
+						expectedTerminal := model.StreamEventTypeError
+						if terminal == "complete" {
+							expectedTerminal = model.StreamEventTypeComplete
+						}
+						require.Equal(t, expectedTerminal, events[len(events)-1].Type)
+						var terminalsSeen int
+						var errorsSeen int
+						for _, event := range events {
+							if event.Type == model.StreamEventTypeError || event.Type == model.StreamEventTypeComplete {
+								terminalsSeen++
+							}
+							if event.Type == model.StreamEventTypeError {
+								errorsSeen++
+								require.NotNil(t, event.Error)
+								require.Equal(t, "RuntimeError", event.Error.EName)
+								require.Contains(t, event.Error.EValue, message)
+							}
+						}
+						require.Equal(t, 1, terminalsSeen)
+						if terminal == "complete" {
+							require.Zero(t, errorsSeen)
+						} else {
+							require.Equal(t, 1, errorsSeen)
+						}
 					})
 				}
-				defer release()
-				overlap := make(chan struct{})
-				canceled := make(chan struct{})
-				handlerDone := make(chan struct{})
-				previousRunner := codeRunner
-				codeRunner = &fakeCodeRunner{execute: func(req *runtime.ExecuteCodeRequest) error {
-					req.Hooks.OnExecuteInit("session-1")
-					select {
-					case <-gate.started:
-						return errors.New(message)
-					case <-time.After(5 * time.Second):
-						return errors.New("ping did not start")
-					}
-				}}
-				defer func() { codeRunner = previousRunner }()
+			}
+		})
+	}
+}
 
-				engine := gin.New()
-				engine.POST("/code", func(ctx *gin.Context) {
-					parent := &lifetimeParentContext{Context: ctx.Request.Context(), canceled: canceled}
-					ctx.Request = ctx.Request.WithContext(parent)
-					ctx.Writer = &lifetimeWriter{ResponseWriter: ctx.Writer, gate: gate, overlap: overlap}
-					defer close(handlerDone)
-					NewCodeInterpretingController(ctx).RunCode()
+func TestExecutionReturnedErrorPreservesTerminalEvent(t *testing.T) {
+	for _, tc := range lifetimeExecutionCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, terminalType := range []model.ServerStreamEventType{model.StreamEventTypeError, model.StreamEventTypeComplete} {
+				t.Run(string(terminalType), func(t *testing.T) {
+					installLifetimeRunner(t, func(req *runtime.ExecuteCodeRequest) error {
+						req.Hooks.OnExecuteInit("session-1")
+						if terminalType == model.StreamEventTypeError {
+							req.Hooks.OnExecuteError(&execute.ErrorOutput{EName: "ContextCancelled", EValue: "Interrupt kernel"})
+						} else {
+							req.Hooks.OnExecuteComplete(time.Millisecond)
+						}
+						return errors.New("runtime returned error after terminal hook")
+					})
+					ctx, recorder := lifetimeTestContext(tc)
+					tc.run(NewCodeInterpretingController(ctx))
+					events := decodeLifetimeEvents(t, recorder.Body.Bytes())
+					var terminals int
+					for _, event := range events {
+						if event.Type == model.StreamEventTypeError || event.Type == model.StreamEventTypeComplete {
+							terminals++
+							require.Equal(t, terminalType, event.Type)
+							if event.Type == model.StreamEventTypeError {
+								require.NotNil(t, event.Error)
+								require.Equal(t, "ContextCancelled", event.Error.EName)
+								require.Equal(t, "Interrupt kernel", event.Error.EValue)
+							}
+						}
+					}
+					require.Equal(t, 1, terminals, "Execute's returned error must not duplicate its terminal hook")
+					require.Equal(t, terminalType, events[len(events)-1].Type)
+					require.Equal(t, http.StatusOK, recorder.Code)
+					require.Contains(t, recorder.Header().Get("Content-Type"), "text/event-stream")
 				})
-				server := httptest.NewUnstartedServer(engine)
-				server.Listener = &lifetimePingListener{Listener: server.Listener, gate: gate}
-				server.Start()
-				defer func() { release(); server.Close() }()
-				endpoint := server.URL
-				if proxy {
-					upstream, err := url.Parse(server.URL)
-					require.NoError(t, err)
-					gateway := httptest.NewServer(httputil.NewSingleHostReverseProxy(upstream))
-					defer func() { release(); gateway.Close() }()
-					endpoint = gateway.URL
-				}
-				transport := &http.Transport{DisableKeepAlives: true}
-				defer transport.CloseIdleConnections()
-				client := &http.Client{Transport: transport, Timeout: 5 * time.Second}
-				type result struct {
-					response *http.Response
-					body     []byte
-					err      error
-				}
-				resultCh := make(chan result, 1)
-				go func() {
-					response, err := client.Post(endpoint+"/code", "application/json", strings.NewReader(`{"code":"print(1)","context":{"id":"session-1","language":"python"}}`))
-					if err != nil {
-						resultCh <- result{err: err}
-						return
-					}
-					defer response.Body.Close()
-					body, err := io.ReadAll(response.Body)
-					resultCh <- result{response: response, body: body, err: err}
-				}()
+			}
+		})
+	}
+}
 
-				awaitSSELifetime(t, gate.started, "ping socket write")
-				select {
-				case <-canceled:
-				case <-overlap:
-					t.Fatal("error response was written while ping was still using the response writer")
-				case <-time.After(5 * time.Second):
-					t.Fatal("handler did not cancel ping after Execute returned an error")
-				}
-				select {
-				case <-overlap:
-					t.Fatal("error response overlapped the blocked ping")
-				case <-handlerDone:
-					t.Fatal("handler returned before blocked ping stopped")
-				default:
-				}
-				release()
-				awaitSSELifetime(t, handlerDone, "handler cleanup")
-				select {
-				case <-overlap:
-					t.Fatal("response write occurred before the blocked ping was released")
-				default:
-				}
-				var got result
-				select {
-				case got = <-resultCh:
-				case <-time.After(5 * time.Second):
-					t.Fatal("HTTP client did not finish")
-				}
-				require.NoError(t, got.err, "chunked HTTP body must terminate cleanly")
-				require.NotNil(t, got.response)
-				require.Equal(t, http.StatusOK, got.response.StatusCode)
-				require.Equal(t, []string{"chunked"}, got.response.TransferEncoding)
-				require.Contains(t, got.response.Header.Get("Content-Type"), "text/event-stream")
-				events := decodeLifetimeEvents(t, got.body)
-				require.Equal(t, model.StreamEventTypeInit, events[0].Type)
-				require.Equal(t, model.StreamEventTypeError, events[len(events)-1].Type)
-				var errorsSeen int
-				for _, event := range events {
-					if event.Type == model.StreamEventTypeError {
-						errorsSeen++
-						require.NotNil(t, event.Error)
-						require.Equal(t, "RuntimeError", event.Error.EName)
-						require.Contains(t, event.Error.EValue, message)
-					}
-				}
-				require.Equal(t, 1, errorsSeen)
+func TestExecutionReturnedErrorBeforeInitPreservesJSON(t *testing.T) {
+	for _, tc := range lifetimeExecutionCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			installLifetimeRunner(t, func(*runtime.ExecuteCodeRequest) error {
+				return errors.New("synchronous runtime failure")
 			})
-		}
+			ctx, recorder := lifetimeTestContext(tc)
+			tc.run(NewCodeInterpretingController(ctx))
+			require.Equal(t, http.StatusInternalServerError, recorder.Code)
+			require.Contains(t, recorder.Header().Get("Content-Type"), "application/json")
+			var response model.ErrorResponse
+			require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &response))
+			require.Equal(t, model.ErrorCodeRuntimeError, response.Code)
+			require.Contains(t, response.Message, "synchronous runtime failure")
+		})
 	}
-}
-
-func TestRunCodeReturnedErrorPreservesTerminalEvent(t *testing.T) {
-	previousRunner := codeRunner
-	defer func() { codeRunner = previousRunner }()
-	codeRunner = &fakeCodeRunner{execute: func(req *runtime.ExecuteCodeRequest) error {
-		req.Hooks.OnExecuteInit("session-1")
-		req.Hooks.OnExecuteError(&execute.ErrorOutput{EName: "ContextCancelled", EValue: "Interrupt kernel"})
-		return errors.New("context cancelled, interrupt kernel")
-	}}
-	ctx, recorder := newTestContext(http.MethodPost, "/code", []byte(`{"code":"print(1)","context":{"id":"session-1","language":"python"}}`))
-	NewCodeInterpretingController(ctx).RunCode()
-	events := decodeLifetimeEvents(t, recorder.Body.Bytes())
-	var terminalErrors int
-	for _, event := range events {
-		if event.Type == model.StreamEventTypeError {
-			terminalErrors++
-			require.NotNil(t, event.Error)
-			require.Equal(t, "ContextCancelled", event.Error.EName)
-		}
-	}
-	require.Equal(t, 1, terminalErrors, "Execute's returned error must not duplicate its terminal hook")
-	require.Equal(t, http.StatusOK, recorder.Code)
-}
-
-func TestRunCodeReturnedErrorBeforeInitPreservesJSON(t *testing.T) {
-	previousRunner := codeRunner
-	defer func() { codeRunner = previousRunner }()
-	codeRunner = &fakeCodeRunner{execute: func(*runtime.ExecuteCodeRequest) error {
-		return errors.New("synchronous runtime failure")
-	}}
-	ctx, recorder := newTestContext(http.MethodPost, "/code", []byte(`{"code":"print(1)","context":{"id":"session-1","language":"python"}}`))
-	NewCodeInterpretingController(ctx).RunCode()
-	require.Equal(t, http.StatusInternalServerError, recorder.Code)
-	require.Contains(t, recorder.Header().Get("Content-Type"), "application/json")
-	var response model.ErrorResponse
-	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &response))
-	require.Equal(t, model.ErrorCodeRuntimeError, response.Code)
-	require.Contains(t, response.Message, "synchronous runtime failure")
 }

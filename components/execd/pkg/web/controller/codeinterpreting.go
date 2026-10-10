@@ -173,28 +173,9 @@ func (c *CodeInterpretingController) RunCode() {
 	err = codeRunner.Execute(runCodeRequest)
 	if err != nil {
 		recordExecution("failure")
-		// Execute may fail after init has started the ping writer. Join it
-		// before touching the response, including its headers and status.
 		cancel()
 		stopSSE()
-		select {
-		case <-completeCh:
-			// The runtime already delivered its terminal error.
-			return
-		default:
-		}
-		if c.ctx.Writer.Written() {
-			// Once SSE is committed, a JSON error would corrupt the stream.
-			eventsHandler.OnExecuteError(&execute.ErrorOutput{
-				EName: "RuntimeError", EValue: fmt.Sprintf("error running codes %v", err),
-			})
-		} else {
-			c.RespondError(
-				http.StatusInternalServerError,
-				model.ErrorCodeRuntimeError,
-				fmt.Sprintf("error running codes %v", err),
-			)
-		}
+		c.respondExecutionError(completeCh, eventsHandler, fmt.Sprintf("error running codes %v", err))
 		return
 	}
 
@@ -426,17 +407,14 @@ func (c *CodeInterpretingController) RunInSession() {
 	}
 	runReq.Hooks = hooks
 
-	// SSE headers are committed lazily on the first event write
-	// (see writeSingleEvent), so a synchronous error from
-	// RunInBashSession can still be surfaced as a structured JSON error.
+	// Before the first event, returned errors remain structured JSON.
+	// After streaming starts, they must use the existing SSE error event.
 	err := codeRunner.RunInBashSession(ctx, runReq)
 	if err != nil {
 		recordExecution("failure")
-		c.RespondError(
-			http.StatusInternalServerError,
-			model.ErrorCodeRuntimeError,
-			fmt.Sprintf("error running in session. %v", err),
-		)
+		cancel()
+		stopSSE()
+		c.respondExecutionError(completeCh, hooks, fmt.Sprintf("error running in session. %v", err))
 		return
 	}
 

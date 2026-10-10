@@ -37,6 +37,24 @@ var sseHeaders = map[string]string{
 	"X-Accel-Buffering": "no",
 }
 
+// respondExecutionError handles an error returned by the runtime. Callers must
+// cancel and join the ping writer first, before inspecting the response or
+// writing JSON, since Gin and net/http response writers are not concurrency-safe.
+func (c *CodeInterpretingController) respondExecutionError(completeCh <-chan struct{}, hooks runtime.ExecuteResultHook, message string) {
+	select {
+	case <-completeCh:
+		// The runtime already delivered a terminal event.
+		return
+	default:
+	}
+	if c.ctx.Writer.Written() {
+		// Once SSE is committed, a JSON error would corrupt the stream.
+		hooks.OnExecuteError(&execute.ErrorOutput{EName: "RuntimeError", EValue: message})
+	} else {
+		c.RespondError(http.StatusInternalServerError, model.ErrorCodeRuntimeError, message)
+	}
+}
+
 // setupSSEResponse is idempotent: once headers are committed, subsequent calls
 // no-op. Callers that need the headers up front (e.g. long-running streaming
 // endpoints with no early-error path) can call it explicitly. Endpoints that
@@ -56,9 +74,10 @@ func (c *basicController) setupSSEResponse() {
 
 // setServerEventsHandler adapts runtime callbacks to SSE events.
 //
-// It returns the hooks and a cleanup function. The cleanup function blocks
-// until the background ping goroutine has fully stopped. Callers MUST invoke
-// the cleanup function before their handler returns so that no goroutine
+// It returns the hooks and a cleanup function. The cleanup function cancels
+// the heartbeat and blocks until its goroutine has fully stopped. Terminal
+// hooks invoke it before writing their final event. Callers MUST also invoke
+// it before their handler returns so that no goroutine
 // races against the response-writer close that Go's net/http performs once
 // the handler exits.
 //
@@ -68,6 +87,11 @@ func (c *basicController) setupSSEResponse() {
 //	defer func() { cancel(); stopSSE() }()
 func (c *CodeInterpretingController) setServerEventsHandler(ctx context.Context) (runtime.ExecuteResultHook, func()) {
 	var pingWg sync.WaitGroup
+	pingCtx, cancelPing := context.WithCancel(ctx)
+	stopSSE := func() {
+		cancelPing()
+		pingWg.Wait()
+	}
 
 	hooks := runtime.ExecuteResultHook{
 		OnExecuteInit: func(session string) {
@@ -82,7 +106,7 @@ func (c *CodeInterpretingController) setServerEventsHandler(ctx context.Context)
 			pingWg.Add(1)
 			safego.Go(func() {
 				defer pingWg.Done()
-				c.ping(ctx)
+				c.ping(pingCtx)
 			})
 		},
 		OnExecuteResult: func(result map[string]any, count int) {
@@ -119,6 +143,8 @@ func (c *CodeInterpretingController) setServerEventsHandler(ctx context.Context)
 			}
 		},
 		OnExecuteComplete: func(executionTime time.Duration) {
+			// A queued heartbeat must not follow the terminal event.
+			stopSSE()
 			event := model.ServerStreamEvent{
 				Type:          model.StreamEventTypeComplete,
 				ExecutionTime: executionTime.Milliseconds(),
@@ -131,6 +157,7 @@ func (c *CodeInterpretingController) setServerEventsHandler(ctx context.Context)
 			if err == nil {
 				return
 			}
+			stopSSE()
 
 			event := model.ServerStreamEvent{
 				Type:      model.StreamEventTypeError,
@@ -175,10 +202,6 @@ func (c *CodeInterpretingController) setServerEventsHandler(ctx context.Context)
 			payload := event.ToJSON()
 			c.writeSingleEvent("OnExecuteStderr", payload, true, event.Summary())
 		},
-	}
-
-	stopSSE := func() {
-		pingWg.Wait()
 	}
 
 	return hooks, stopSSE

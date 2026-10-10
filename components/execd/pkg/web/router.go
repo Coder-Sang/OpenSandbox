@@ -42,7 +42,15 @@ var preInitPaths = map[string]struct{}{
 func NewRouter(accessToken string) *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
-	r.Use(gin.Recovery())
+	r.Use(gin.CustomRecovery(func(c *gin.Context, recovered any) {
+		// ReverseProxy uses this sentinel after a response-copy failure. Let
+		// net/http abort the connection or stream instead of sending a clean
+		// EOF for an incomplete response whose status is already committed.
+		if recovered == http.ErrAbortHandler {
+			panic(recovered)
+		}
+		c.AbortWithStatus(http.StatusInternalServerError)
+	}))
 	// The runtime-init gate runs before auth: pre-init business APIs answer
 	// a uniform 503 regardless of credentials, and the access-token check
 	// only sees requests that passed the gate.
