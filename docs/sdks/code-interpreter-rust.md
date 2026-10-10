@@ -162,7 +162,38 @@ check with an empty stdout list and `complete: true`. The missing-field failure'
 precise cause was not established from that run. Stock-only context creation
 timed out in both modes. These observations are retained as failures, not retries
 that establish interpreter acceptance.
+
+Follow-up independent phase tests observed HTML/JSON failures and output after
+successful completion markers. A separate concurrent-busy raw request directly
+captured HTTP 200 `text/event-stream` with `init` followed by an untyped
+`RUNTIME_ERROR` / `error running codes session is busy` envelope in proxy mode.
+That evidence belongs to the concurrent probe and does not establish the exact
+body of the earlier sequential SDK failure. Corrected interruption and immediate
+reuse checks still failed, so complete interpreter acceptance remains blocked.
 :::
+
+## Acceptance diagnostics
+
+Rust live tests keep compatibility-kernel and stock `python3` scenarios
+independently selectable. Separate phase tests exercise state, HTML, JSON,
+errors, interruption and immediate reuse so a failure in one phase does not
+prevent observing the others. They retain strict output and terminal ordering
+assertions, with no execution retries or added waits to conceal runtime faults.
+
+Test-side raw HTTP checks retain bounded, redacted response status, content type
+and ordered event-frame structure before decoding. With
+`OPENSANDBOX_RUST_INTERPRETER_ONLY=true`, the E2E runner selects interpreter
+scenarios only in both endpoint modes. `OPENSANDBOX_RUST_INTERPRETER_FILTER`
+can select a specific phase by name. These traces belong to the
+raw checks' own requests, not to an earlier SDK aggregate request. SDK failures
+are classified separately. Diagnostics omit code, headers, endpoint URLs,
+environment values and output text. Only explicitly safe runtime error
+classifications may remain readable. Truncation is reported, not hidden.
+The production SDK parser and HTTP/SSE contract are unchanged.
+Only the JSON diagnostic records follow this redaction policy. The private run
+directory can also contain server configuration and raw server/container/test
+logs, which may contain credentials or execution content. Do not share the
+whole directory without a separate review and redaction.
 
 ## Readiness and cleanup
 

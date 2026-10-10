@@ -3,11 +3,17 @@
 use opensandbox::*;
 use opensandbox_code_interpreter::{CodeInterpreter, CodeInterpreterOptions, RunCodeOptions};
 use std::{env, error::Error as StdError, time::Duration};
+#[path = "support/diagnostics.rs"]
+mod diagnostics;
+#[path = "support/interpreter_scenarios.rs"]
+mod interpreter_scenarios;
+use interpreter_scenarios::{finish_context, interrupted_execution, recorded_run};
 type Result<T = ()> = std::result::Result<T, Box<dyn StdError + Send + Sync>>;
 fn manager() -> Result<SandboxManager> {
     Ok(SandboxManager::new(
         ConnectionConfig::builder()
             .domain(env::var("OPENSANDBOX_TEST_DOMAIN")?)
+            .protocol(env::var("OPENSANDBOX_TEST_PROTOCOL").unwrap_or_else(|_| "http".into()))
             .api_key(env::var("OPENSANDBOX_TEST_API_KEY").unwrap_or_default())
             .use_server_proxy(
                 env::var("OPENSANDBOX_TEST_USE_SERVER_PROXY").as_deref() == Ok("true"),
@@ -110,7 +116,7 @@ async fn docker_isolated_foreground_background_scoped_files() -> Result {
         require(
             caps.setpriv_available.unwrap_or(false),
             &format!(
-                "setpriv unavailable: isolated runtime prerequisites unmet; capabilities={caps:?}"
+                "isolated namespace/runtime prerequisites unmet (capability smoke test, not executable presence); capabilities={caps:?}"
             ),
         )?;
         let session = sessions
@@ -347,16 +353,21 @@ async fn docker_interpreter_context_rich_errors_interrupt() -> Result {
 async fn docker_interpreter_standard_python3_context_rich_errors_interrupt() -> Result {
     interpreter_context_rich_errors_interrupt(true).await
 }
-async fn interpreter_wire_events(
+async fn interpreter_raw_response(
     sandbox: &Sandbox,
     context_id: &str,
     code: &str,
-) -> Result<Vec<ExecutionEvent>> {
+    label: &str,
+) -> Result<(reqwest::StatusCode, Vec<u8>, bool)> {
     let endpoint = sandbox.endpoint(44772).await?;
-    let base = if endpoint.endpoint.starts_with("http") {
+    let base = if endpoint.endpoint.contains("://") {
         endpoint.endpoint
     } else {
-        format!("http://{}", endpoint.endpoint)
+        format!(
+            "{}://{}",
+            env::var("OPENSANDBOX_TEST_PROTOCOL").unwrap_or_else(|_| "http".into()),
+            endpoint.endpoint
+        )
     };
     let mut url = reqwest::Url::parse(&base)?;
     url.set_path(&format!("{}/code", url.path().trim_end_matches('/')));
@@ -372,15 +383,77 @@ async fn interpreter_wire_events(
             serde_json::json!({"code":code,"context":{"id":context_id,"language":"python"}})
                 .to_string(),
         );
-    for (name, value) in endpoint.headers {
-        request = request.header(name, value);
+    let proxy = env::var("OPENSANDBOX_TEST_USE_SERVER_PROXY").as_deref() == Ok("true");
+    let mut headers = reqwest::header::HeaderMap::new();
+    if proxy {
+        headers.insert(
+            "open-sandbox-api-key",
+            env::var("OPENSANDBOX_TEST_API_KEY")
+                .unwrap_or_default()
+                .parse()?,
+        );
     }
-    let response = request.send().await.map_err(reqwest::Error::without_url)?;
-    require(
-        response.status().is_success(),
-        "raw interpreter SSE request failed",
-    )?;
-    let body = response.text().await.map_err(reqwest::Error::without_url)?;
+    for (name, value) in endpoint.headers {
+        if proxy || !name.eq_ignore_ascii_case("open-sandbox-api-key") {
+            headers.insert(
+                reqwest::header::HeaderName::from_bytes(name.as_bytes())?,
+                value.parse()?,
+            );
+        }
+    }
+    request = request.headers(headers);
+    let mut response = request.send().await.map_err(reqwest::Error::without_url)?;
+    let status = response.status();
+    let mime = response
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    let mut bytes = Vec::new();
+    let mut truncated = false;
+    loop {
+        match response.chunk().await {
+            Ok(Some(chunk)) => {
+                let remaining = diagnostics::MAX_RESPONSE_BYTES - bytes.len();
+                bytes.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+                if chunk.len() > remaining {
+                    truncated = true;
+                    break;
+                }
+            }
+            Ok(None) => break,
+            Err(error) => {
+                let mut evidence =
+                    diagnostics::raw_trace(status.as_u16(), mime.as_deref(), &bytes, true);
+                evidence["body_read_failed"] = serde_json::json!(true);
+                diagnostics::save(label, &evidence)?;
+                return Err(error.without_url().into());
+            }
+        }
+    }
+    let mut evidence = diagnostics::raw_trace(status.as_u16(), mime.as_deref(), &bytes, truncated);
+    evidence["json_content_type"] = serde_json::json!(mime.as_deref().is_some_and(|value| value
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        == "application/json"));
+    diagnostics::save(label, &evidence)?;
+    require(!truncated, "raw interpreter response exceeds 1 MiB")?;
+    Ok((status, bytes, evidence["json_content_type"] == true))
+}
+async fn interpreter_wire_events(
+    sandbox: &Sandbox,
+    context_id: &str,
+    code: &str,
+    label: &str,
+) -> Result<Vec<ExecutionEvent>> {
+    let (status, bytes, _) = interpreter_raw_response(sandbox, context_id, code, label).await?;
+    require(status.is_success(), "raw interpreter SSE request failed")?;
+    parse_wire_events(&bytes)
+}
+fn parse_wire_events(bytes: &[u8]) -> Result<Vec<ExecutionEvent>> {
+    let body = std::str::from_utf8(bytes).map_err(|_| "raw interpreter response is not UTF-8")?;
     let events = body
         .lines()
         .filter_map(|line| {
@@ -388,7 +461,8 @@ async fn interpreter_wire_events(
                 .or_else(|| line.trim_start().starts_with('{').then_some(line))
         })
         .map(|data| serde_json::from_str(data.trim()))
-        .collect::<std::result::Result<Vec<ExecutionEvent>, _>>()?;
+        .collect::<std::result::Result<Vec<ExecutionEvent>, _>>()
+        .map_err(|_| "raw interpreter event decoding failed (see redacted trace)")?;
     let terminal = events
         .iter()
         .position(|event| matches!(event.event_type.as_str(), "error" | "execution_complete"))
@@ -416,50 +490,42 @@ async fn interpreter_context_rich_errors_interrupt(stock_python3: bool) -> Resul
         let run_options = RunCodeOptions { context: Some(context), language: None };
         let result = async {
             eprintln!("interpreter: initializing persistent state");
-            let initialized = codes.run("answer = 41", run_options.clone()).await?;
-            require(initialized.error.is_none() && initialized.complete, &format!("context initialization failed: {initialized:?}"))?;
-            let printed = codes.run("print('stdout-only', flush=True)", run_options.clone()).await?;
-            require(printed.error.is_none() && printed.complete && printed.logs.stdout.iter().any(|line| line.text.contains("stdout-only")), &format!("stdout-only execution lost: {printed:?}"))?;
-            let execution = codes.run("answer + 1", run_options.clone()).await?;
-            require(execution.result.iter().any(|r| r.text.as_deref() == Some("42")), &format!("context state lost: {execution:?}"))?;
+            let initialized = recorded_run(codes, "answer = 41", run_options.clone()).await?;
+            require(initialized.error.is_none() && initialized.complete, "context initialization failed")?;
+            let printed = recorded_run(codes, "print('stdout-only', flush=True)", run_options.clone()).await?;
+            require(printed.error.is_none() && printed.complete && printed.logs.stdout.iter().any(|line| line.text.contains("stdout-only")), "stdout-only execution lost")?;
+            let execution = recorded_run(codes, "answer + 1", run_options.clone()).await?;
+            require(execution.result.iter().any(|r| r.text.as_deref() == Some("42")), "context state lost")?;
             require(codes.get_context(&id).await?.id.as_deref() == Some(&id), "context get mismatch")?;
             require(codes.list_contexts(Some("python")).await?.iter().any(|c| c.id.as_deref() == Some(&id)), "context absent")?;
             eprintln!("interpreter: rich outputs");
-            let rich = codes.run("from IPython.display import display, HTML, JSON\ndisplay(HTML('<b>rust</b>'))\ndisplay(JSON({'answer': 42}))\nprint('after-display', flush=True)\nanswer + 1", run_options.clone()).await?;
-            require(rich.result.iter().any(|r| r.raw.contains_key("text/html")), &format!("HTML result lost: {rich:?}"))?;
-            require(rich.result.iter().any(|r| r.raw.contains_key("application/json")), &format!("JSON result lost: {rich:?}"))?;
-            require(rich.complete && rich.error.is_none() && rich.result.iter().any(|r| r.text.as_deref() == Some("42")) && rich.logs.stdout.iter().any(|line| line.text.contains("after-display")), &format!("trailing rich output/result lost: {rich:?}"))?;
-            let failure = codes.run("print('before-error')\nraise ValueError('rust-e2e-error')", run_options.clone()).await?;
+            let rich = recorded_run(codes, "from IPython.display import display, HTML, JSON\ndisplay(HTML('<b>rust</b>'))\ndisplay(JSON({'answer': 42}))\nprint('after-display', flush=True)\nanswer + 1", run_options.clone()).await?;
+            require(rich.result.iter().any(|r| r.raw.contains_key("text/html")), "HTML result lost")?;
+            require(rich.result.iter().any(|r| r.raw.contains_key("application/json")), "JSON result lost")?;
+            require(rich.complete && rich.error.is_none() && rich.result.iter().any(|r| r.text.as_deref() == Some("42")) && rich.logs.stdout.iter().any(|line| line.text.contains("after-display")), "trailing rich output/result lost")?;
+            let failure = recorded_run(codes, "print('before-error')\nraise ValueError('rust-e2e-error')", run_options.clone()).await?;
             require(failure.error.is_some() && failure.logs.stdout.iter().any(|s| s.text.contains("before-error")), "kernel error/stdout lost")?;
             eprintln!("interpreter: raw SSE terminal ordering");
-            let wire = interpreter_wire_events(&sandbox, &id, "from IPython.display import display, HTML, JSON\ndisplay(HTML('<b>wire</b>'))\ndisplay(JSON({'answer': 42}))\nprint('wire-before-complete', flush=True)\nanswer + 1").await?;
+            let wire = interpreter_wire_events(&sandbox, &id, "from IPython.display import display, HTML, JSON\ndisplay(HTML('<b>wire</b>'))\ndisplay(JSON({'answer': 42}))\nprint('wire-before-complete', flush=True)\nanswer + 1", "combined-wire-rich").await?;
             require(wire.last().is_some_and(|event| event.event_type == "execution_complete") && wire.iter().any(|event| event.results.as_ref().is_some_and(|data| data.contains_key("text/html"))) && wire.iter().any(|event| event.results.as_ref().is_some_and(|data| data.get("application/json").is_some_and(|value| value["answer"] == 42))) && wire.iter().any(|event| event.text.as_deref().is_some_and(|text| text.contains("wire-before-complete"))), "raw SSE lost output before completion")?;
-            let wire_error = interpreter_wire_events(&sandbox, &id, "print('wire-before-error', flush=True)\nraise ValueError('wire-error')").await?;
+            let wire_error = interpreter_wire_events(&sandbox, &id, "print('wire-before-error', flush=True)\nraise ValueError('wire-error')", "combined-wire-error").await?;
             require(wire_error.last().is_some_and(|event| event.event_type == "error") && wire_error.iter().any(|event| event.text.as_deref().is_some_and(|text| text.contains("wire-before-error"))), "raw SSE lost stdout before error")?;
             eprintln!("interpreter: interrupt");
-            let running = codes.run("import time\nprint('interrupt-start', flush=True)\ntime.sleep(60)", run_options.clone());
-            let interrupt = async { tokio::time::sleep(Duration::from_secs(2)).await; codes.interrupt(&id).await };
-            let (execution, interrupted) = tokio::time::timeout(Duration::from_secs(20), async { tokio::join!(running, interrupt) }).await?;
-            interrupted?;
-            require(execution.map_err(|error| format!("interrupted execution stream: {error}"))?.error.is_some(), "interrupt did not yield kernel error")?;
+            let execution = interrupted_execution(codes, &id, run_options.clone(), false).await?;
+            require(execution.error.is_some(), "interrupt did not yield kernel error")?;
             eprintln!("interpreter: reusing context after interrupt");
             let stress_options = run_options.clone();
-            let reused = codes.run("answer + 1", run_options).await.map_err(|error| format!("post-interrupt execution stream: {error}"))?;
-            require(reused.complete && reused.error.is_none() && reused.result.iter().any(|r| r.text.as_deref() == Some("42")), &format!("context state unusable after interrupt: {reused:?}"))?;
+            let reused = recorded_run(codes, "answer + 1", run_options).await.map_err(|error| format!("post-interrupt execution stream: {error}"))?;
+            require(reused.complete && reused.error.is_none() && reused.result.iter().any(|r| r.text.as_deref() == Some("42")), "context state unusable after interrupt")?;
             for round in 0..20 {
-                let repeated = codes.run("print('stress-before-error', flush=True)\nraise ValueError('stress-error')", stress_options.clone()).await.map_err(|error| format!("repeated error execution {round}: {error}"))?;
+                let repeated = recorded_run(codes, "print('stress-before-error', flush=True)\nraise ValueError('stress-error')", stress_options.clone()).await.map_err(|error| format!("repeated error execution {round}: {error}"))?;
                 require(repeated.error.is_some() && repeated.logs.stdout.iter().any(|line| line.text.contains("stress-before-error")), "repeated error execution lost stdout/error")?;
-                let next = codes.run("answer + 1", stress_options.clone()).await.map_err(|error| format!("repeated post-error execution {round}: {error}"))?;
+                let next = recorded_run(codes, "answer + 1", stress_options.clone()).await.map_err(|error| format!("repeated post-error execution {round}: {error}"))?;
                 require(next.complete && next.error.is_none() && next.result.iter().any(|result| result.text.as_deref() == Some("42")), "repeated post-error execution lost state/result")?;
             }
             Ok(())
         }.await;
-        if result.is_err() {
-            let diagnostic = sandbox.commands().run("ps aux; curl --silent --max-time 3 -H 'Authorization: token rust-e2e-jupyter-safe-token' http://127.0.0.1:44771/api/kernelspecs; tail -80 /tmp/jupyter.log /tmp/execd.log /tmp/opensandbox/execd.log /opt/opensandbox/execd.log 2>/dev/null || true", Default::default()).await;
-            eprintln!("dedicated interpreter diagnostics: {diagnostic:?}");
-        }
-        codes.delete_context(&id).await?;
-        result
+        finish_context(codes, &id, result).await
     }.await;
     finish(&sandbox, outcome).await
 }

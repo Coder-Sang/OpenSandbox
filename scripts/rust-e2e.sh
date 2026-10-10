@@ -8,16 +8,50 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
 
-if [[ -n "${OPENSANDBOX_TEST_DOMAIN:-}" ]]; then
-  : "${OPENSANDBOX_RUST_RUN_ID:?Set a unique run ID for existing-server E2E ownership}"
-  cargo test --manifest-path tests/rust/Cargo.toml --locked sandbox_create_command_files_metrics_egress_kill -- --ignored --nocapture --test-threads=1
-  cargo test --manifest-path tests/rust/Cargo.toml --locked --test expanded docker_ -- --ignored --nocapture --test-threads=1
-  exit
-fi
-
+# All evidence, including caller-configured runs, belongs to a fresh private
+# invocation directory. Never reuse or chmod a caller's directory.
+umask 077
 SCRATCH_ROOT="${JCODE_SCRATCH_DIR:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}}"
 mkdir -p "$SCRATCH_ROOT"
 RUN_DIR="$(mktemp -d "$SCRATCH_ROOT/opensandbox-rust-e2e.XXXXXX")"
+export OPENSANDBOX_RUST_ARTIFACT_DIR="$RUN_DIR/interpreter"
+mkdir -m 700 "$OPENSANDBOX_RUST_ARTIFACT_DIR"
+
+run_scenarios() {
+  local proxy
+  FAILED=0
+  if [[ "${OPENSANDBOX_RUST_INTERPRETER_ONLY:-false}" == true ]]; then
+    local selected="$RUN_DIR/interpreter-selection.txt"
+    if ! cargo test --manifest-path tests/rust/Cargo.toml --locked --test expanded "${OPENSANDBOX_RUST_INTERPRETER_FILTER:-docker_interpreter}" -- --ignored --list >"$selected" 2>&1; then
+      cat "$selected"
+      FAILED=1
+      return
+    fi
+    if ! grep -qE '(^|::)docker_interpreter[^ ]*: test$' "$selected"; then
+      echo "Interpreter filter selected no live interpreter tests" >&2
+      FAILED=1
+      return
+    fi
+  fi
+  for proxy in false true; do
+    export OPENSANDBOX_TEST_USE_SERVER_PROXY="$proxy"
+    if [[ "${OPENSANDBOX_RUST_INTERPRETER_ONLY:-false}" == true ]]; then
+      cargo test --manifest-path tests/rust/Cargo.toml --locked --test expanded "${OPENSANDBOX_RUST_INTERPRETER_FILTER:-docker_interpreter}" -- --ignored --nocapture --test-threads=1 2>&1 | tee "$RUN_DIR/interpreter-$proxy.txt" || FAILED=1
+    else
+      cargo test --manifest-path tests/rust/Cargo.toml --locked sandbox_create_command_files_metrics_egress_kill -- --ignored --nocapture --test-threads=1 2>&1 | tee "$RUN_DIR/basic-$proxy.txt" || FAILED=1
+      cargo test --manifest-path tests/rust/Cargo.toml --locked --test expanded docker_ -- --ignored --nocapture --test-threads=1 2>&1 | tee "$RUN_DIR/expanded-$proxy.txt" || FAILED=1
+      cargo test --manifest-path tests/rust/Cargo.toml --locked --test overlays docker_ -- --ignored --nocapture --test-threads=1 2>&1 | tee "$RUN_DIR/overlays-$proxy.txt" || FAILED=1
+    fi
+  done
+}
+
+if [[ -n "${OPENSANDBOX_TEST_DOMAIN:-}" ]]; then
+  : "${OPENSANDBOX_RUST_RUN_ID:?Set a unique run ID for existing-server E2E ownership}"
+  trap 'echo "Rust E2E artifacts: $RUN_DIR"' EXIT
+  run_scenarios
+  exit "$FAILED"
+fi
+
 SERVER_PID=""
 export OPENSANDBOX_RUST_RUN_ID="$(basename "$RUN_DIR")"
 TARGET_CONTAINER="$OPENSANDBOX_RUST_RUN_ID-vault-target"
@@ -119,10 +153,5 @@ for attempt in {1..60}; do
   fi
   sleep 1
 done
-FAILED=0
-for proxy in false true; do
-  export OPENSANDBOX_TEST_USE_SERVER_PROXY="$proxy"
-  cargo test --manifest-path tests/rust/Cargo.toml --locked sandbox_create_command_files_metrics_egress_kill -- --ignored --nocapture --test-threads=1 2>&1 | tee "$RUN_DIR/basic-$proxy.txt" || FAILED=1
-  cargo test --manifest-path tests/rust/Cargo.toml --locked --test expanded docker_ -- --ignored --nocapture --test-threads=1 2>&1 | tee "$RUN_DIR/expanded-$proxy.txt" || FAILED=1
-done
+run_scenarios
 exit "$FAILED"

@@ -221,19 +221,50 @@ async fn k8s_secure_signed_pause_snapshot_restore() -> Result {
 #[ignore = "dedicated fast-sandbox runtime with template builder required"]
 async fn k8s_template_create_ready_instantiate_delete() -> Result {
     let manager = manager()?;
-    let template = manager
-        .create_template(CreateTemplateOptions {
-            image: env::var("OPENSANDBOX_SANDBOX_DEFAULT_IMAGE")?,
-            publish: env::var("OPENSANDBOX_RUST_TEMPLATE_PUBLISH")?,
-            resource_limits: None,
-            entrypoint: vec!["sh".into(), "-c".into(), "sleep infinity".into()],
-            metadata: [("rust-e2e-run".into(), env::var("OPENSANDBOX_RUST_RUN_ID")?)].into(),
-            readiness: None,
-            format: None,
-        })
+    // This explicit value overrides inherited PATH and remains literal.
+    let expected_env = std::collections::BTreeMap::from([
+        ("RUST_TEMPLATE_MARKER".into(), "literal-$HOME-模板".into()),
+        (
+            "PATH".into(),
+            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/rust-template-env-marker".into(),
+        ),
+    ]);
+    let created = manager
+        .create_template_with_env(
+            CreateTemplateOptions {
+                image: env::var("OPENSANDBOX_SANDBOX_DEFAULT_IMAGE")?,
+                publish: env::var("OPENSANDBOX_RUST_TEMPLATE_PUBLISH")?,
+                resource_limits: None,
+                entrypoint: vec!["sh".into(), "-c".into(), "sleep infinity".into()],
+                metadata: [("rust-e2e-run".into(), env::var("OPENSANDBOX_RUST_RUN_ID")?)].into(),
+                readiness: None,
+                format: None,
+            },
+            expected_env.clone(),
+        )
         .await?;
+    let template = &created.template;
     let mut sandbox_id: Option<String> = None;
     let outcome: Result = async {
+        if created.env.as_ref() != Some(&expected_env) {
+            return Err("template create env echo mismatch".into());
+        }
+        let fetched = manager.get_template_with_env(&template.template_id).await?;
+        if fetched.env.as_ref() != Some(&expected_env) {
+            return Err("template get env echo mismatch".into());
+        }
+        let listed = manager
+            .list_templates_with_env(TemplateFilter {
+                metadata: template.metadata.clone().unwrap_or_default(),
+                ..Default::default()
+            })
+            .await?;
+        if !listed.items.iter().any(|item| {
+            item.template.template_id == template.template_id
+                && item.env.as_ref() == Some(&expected_env)
+        }) {
+            return Err("template list lost env echo".into());
+        }
         tokio::time::timeout(Duration::from_secs(600), async {
             loop {
                 let status = manager.get_template(&template.template_id).await?.status;
@@ -255,14 +286,25 @@ async fn k8s_template_create_ready_instantiate_delete() -> Result {
         )
         .await?;
         sandbox_id = Some(sandbox.id().into());
-        if sandbox
+        let environment = sandbox
             .commands()
-            .run("printf template", Default::default())
-            .await?
-            .exit_code
-            != Some(0)
-        {
-            return Err("template instance command failed".into());
+            .run(
+                "printf '%s\\n%s' \"$RUST_TEMPLATE_MARKER\" \"$PATH\"",
+                Default::default(),
+            )
+            .await?;
+        let actual = environment
+            .logs
+            .stdout
+            .iter()
+            .map(|item| item.text.as_str())
+            .collect::<String>();
+        let expected = format!(
+            "{}\n{}",
+            expected_env["RUST_TEMPLATE_MARKER"], expected_env["PATH"]
+        );
+        if environment.exit_code != Some(0) || actual != expected {
+            return Err("template instance env mismatch".into());
         }
         Ok(())
     }
