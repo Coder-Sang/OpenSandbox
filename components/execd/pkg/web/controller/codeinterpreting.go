@@ -173,11 +173,28 @@ func (c *CodeInterpretingController) RunCode() {
 	err = codeRunner.Execute(runCodeRequest)
 	if err != nil {
 		recordExecution("failure")
-		c.RespondError(
-			http.StatusInternalServerError,
-			model.ErrorCodeRuntimeError,
-			fmt.Sprintf("error running codes %v", err),
-		)
+		// Execute may fail after init has started the ping writer. Join it
+		// before touching the response, including its headers and status.
+		cancel()
+		stopSSE()
+		select {
+		case <-completeCh:
+			// The runtime already delivered its terminal error.
+			return
+		default:
+		}
+		if c.ctx.Writer.Written() {
+			// Once SSE is committed, a JSON error would corrupt the stream.
+			eventsHandler.OnExecuteError(&execute.ErrorOutput{
+				EName: "RuntimeError", EValue: fmt.Sprintf("error running codes %v", err),
+			})
+		} else {
+			c.RespondError(
+				http.StatusInternalServerError,
+				model.ErrorCodeRuntimeError,
+				fmt.Sprintf("error running codes %v", err),
+			)
+		}
 		return
 	}
 

@@ -133,6 +133,13 @@ failure streams must close cleanly. Transport failures while draining still
 return `Err`. A stream ending without either terminal event is a protocol
 failure rather than partial output accepted as success.
 
+Before streaming starts, a synchronous runtime failure remains an HTTP JSON
+error. After the response has started, execd stops and joins the heartbeat
+writer before reporting a runtime failure through the existing `error` event.
+It does not append a JSON HTTP error to an SSE body or emit a second terminal
+error when the runtime already delivered one. This requires the updated source
+execd build, not an SDK retry or suppression of transport errors.
+
 The current source runtime correlates Jupyter messages to the active request
 and waits for both its `execute_reply` and IOPub `idle` before finalizing a
 successful execution. It forwards `display_data` as existing `result` events,
