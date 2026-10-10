@@ -55,6 +55,8 @@ pub struct CreateFsbTemplateRequest {
         skip_serializing_if = "Option::is_none"
     )]
     pub entrypoint: Option<Vec<String>>,
+    #[serde(rename = "env", default, skip_serializing_if = "Option::is_none")]
+    pub env: Option<std::collections::BTreeMap<String, String>>,
     #[serde(rename = "metadata", default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<std::collections::BTreeMap<String, String>>,
     #[serde(rename = "readiness", default, skip_serializing_if = "Option::is_none")]
@@ -283,6 +285,8 @@ pub struct FsbTemplate {
         skip_serializing_if = "Option::is_none"
     )]
     pub entrypoint: Option<Vec<String>>,
+    #[serde(rename = "env", default, skip_serializing_if = "Option::is_none")]
+    pub env: Option<std::collections::BTreeMap<String, String>>,
     #[serde(rename = "metadata", default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<std::collections::BTreeMap<String, String>>,
     #[serde(rename = "readiness", default, skip_serializing_if = "Option::is_none")]
@@ -1134,7 +1138,7 @@ pub const SCHEMAS: &[(&str, &str)] = &[
     ),
     (
         "RenewSandboxExpirationRequest",
-        r#"{"additionalProperties":false,"properties":{"expiresAt":{"description":"New absolute expiration time in UTC (RFC 3339 format).\nMust be in the future and after the current expiresAt time.\n\nExample: \"2025-11-16T14:30:45Z\"\n","format":"date-time","type":"string"}},"required":["expiresAt"],"type":"object"}"#,
+        r#"{"additionalProperties":false,"properties":{"expiresAt":{"description":"New absolute expiration time in UTC (RFC 3339 format).\nMust be in the future. May be earlier than, equal to, or later than the current expiresAt.\nThe creation-time limit `server.max_sandbox_timeout_seconds` does not apply.\n\nExample: \"2025-11-16T14:30:45Z\"\n","format":"date-time","type":"string"}},"required":["expiresAt"],"type":"object"}"#,
     ),
     (
         "RenewSandboxExpirationResponse",
@@ -1186,7 +1190,7 @@ pub const SCHEMAS: &[(&str, &str)] = &[
     ),
     (
         "CreateFsbTemplateRequest",
-        r##"{"additionalProperties":false,"description":"Request to create a Fast Sandbox template: a fast-sandbox golden-image build\nThe server persists the build intent, projects it onto a\nSandboxTemplate CRD, and reports the asynchronous build through the\ntemplate status. Kernel, execd and guest init are server-side build\ninputs supplied from the `[fsb]` configuration, not client fields.\n","properties":{"entrypoint":{"description":"Guest business command (argv); empty defaults to\n`[\"tail\", \"-f\", \"/dev/null\"]`.\n","items":{"type":"string"},"minItems":1,"type":"array"},"format":{"default":"overlaybd","description":"Storage encoding of the produced snapshot set.","enum":["native","overlaybd"],"type":"string"},"image":{"description":"Source OCI image reference the golden image is built from.","minLength":1,"type":"string"},"metadata":{"additionalProperties":{"type":"string"},"description":"Custom key-value metadata for management, filtering, and tagging.","type":"object"},"publish":{"description":"S3-compatible publish target for the built artifacts,\ne.g. `s3://bucket/publish`.\n","minLength":1,"type":"string"},"readiness":{"$ref":"#/components/schemas/FsbTemplateReadiness"},"resourceLimits":{"$ref":"#/components/schemas/ResourceLimits","description":"Guest machine sizing: `cpu` -> guest vCPUs, `memory` -> guest memory,\n`disk` -> logical size of the guest rootfs (parallel resource keys).\nThe artifact set is stored and P2P-pulled at the `disk` size, so keep\nit just above the expanded source image. Defaults when omitted:\ncpu `1`, memory `512Mi`, disk `2Gi`.\n"}},"required":["image","publish"],"type":"object"}"##,
+        r##"{"additionalProperties":false,"description":"Request to create a Fast Sandbox template: a fast-sandbox golden-image build\nThe server persists the build intent, projects it onto a\nSandboxTemplate CRD, and reports the asynchronous build through the\ntemplate status. Kernel, execd and guest init are server-side build\ninputs supplied from the `[fsb]` configuration, not client fields.\n","properties":{"entrypoint":{"description":"Guest business command (argv); empty defaults to\n`[\"tail\", \"-f\", \"/dev/null\"]`.\n","items":{"type":"string"},"minItems":1,"type":"array"},"env":{"additionalProperties":{"type":"string"},"description":"Environment variables baked into the golden image (injected as\n`/etc/sandbox-init.env` in the guest; literal values only). The\nsource image's own OCI `Config.Env` is inherited like a container\nruntime would; an env with the same name here overrides the\ninherited value. Names must be valid shell variable names\n(`[A-Za-z_][A-Za-z0-9_]*`).\n","example":{"LOG_LEVEL":"info"},"type":"object"},"format":{"default":"overlaybd","description":"Storage encoding of the produced snapshot set.","enum":["native","overlaybd"],"type":"string"},"image":{"description":"Source OCI image reference the golden image is built from.","minLength":1,"type":"string"},"metadata":{"additionalProperties":{"type":"string"},"description":"Custom key-value metadata for management, filtering, and tagging.","type":"object"},"publish":{"description":"S3-compatible publish target for the built artifacts,\ne.g. `s3://bucket/publish`.\n","minLength":1,"type":"string"},"readiness":{"$ref":"#/components/schemas/FsbTemplateReadiness"},"resourceLimits":{"$ref":"#/components/schemas/ResourceLimits","description":"Guest machine sizing: `cpu` -> guest vCPUs, `memory` -> guest memory,\n`disk` -> logical size of the guest rootfs (parallel resource keys).\nThe artifact set is stored and P2P-pulled at the `disk` size, so keep\nit just above the expanded source image. Defaults when omitted:\ncpu `1`, memory `512Mi`, disk `2Gi`.\n"}},"required":["image","publish"],"type":"object"}"##,
     ),
     (
         "FsbTemplateStatus",
@@ -1194,7 +1198,7 @@ pub const SCHEMAS: &[(&str, &str)] = &[
     ),
     (
         "FsbTemplate",
-        r##"{"additionalProperties":false,"description":"A fsb template: a golden image whose build is declared and executed\nby fast-sandbox.\n","properties":{"createdAt":{"description":"Creation timestamp (RFC 3339 UTC).","format":"date-time","type":"string"},"entrypoint":{"description":"Guest business command (argv).","items":{"type":"string"},"type":"array"},"format":{"description":"Snapshot storage encoding.","enum":["native","overlaybd"],"type":"string"},"image":{"description":"Source OCI image reference.","type":"string"},"metadata":{"additionalProperties":{"type":"string"},"description":"Custom metadata from the creation request.","type":"object"},"publish":{"description":"S3-compatible publish target.","type":"string"},"readiness":{"$ref":"#/components/schemas/FsbTemplateReadiness"},"resourceLimits":{"$ref":"#/components/schemas/ResourceLimits"},"status":{"$ref":"#/components/schemas/FsbTemplateStatus"},"templateId":{"description":"Server-generated template ID (`tpl_<uuid>`).","type":"string"},"updatedAt":{"description":"Last update timestamp (RFC 3339 UTC).","format":"date-time","type":"string"}},"required":["templateId","image","publish","format","status","createdAt","updatedAt"],"type":"object"}"##,
+        r##"{"additionalProperties":false,"description":"A fsb template: a golden image whose build is declared and executed\nby fast-sandbox.\n","properties":{"createdAt":{"description":"Creation timestamp (RFC 3339 UTC).","format":"date-time","type":"string"},"entrypoint":{"description":"Guest business command (argv).","items":{"type":"string"},"type":"array"},"env":{"additionalProperties":{"type":"string"},"description":"Environment variables baked into the golden image.","type":"object"},"format":{"description":"Snapshot storage encoding.","enum":["native","overlaybd"],"type":"string"},"image":{"description":"Source OCI image reference.","type":"string"},"metadata":{"additionalProperties":{"type":"string"},"description":"Custom metadata from the creation request.","type":"object"},"publish":{"description":"S3-compatible publish target.","type":"string"},"readiness":{"$ref":"#/components/schemas/FsbTemplateReadiness"},"resourceLimits":{"$ref":"#/components/schemas/ResourceLimits"},"status":{"$ref":"#/components/schemas/FsbTemplateStatus"},"templateId":{"description":"Server-generated template ID (`tpl_<uuid>`).","type":"string"},"updatedAt":{"description":"Last update timestamp (RFC 3339 UTC).","format":"date-time","type":"string"}},"required":["templateId","image","publish","format","status","createdAt","updatedAt"],"type":"object"}"##,
     ),
     (
         "ListFsbTemplatesResponse",

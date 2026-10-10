@@ -195,8 +195,10 @@ impl std::fmt::Debug for CommandStatusResponse {
 pub struct CreateIsolatedSessionRequest {
     #[serde(rename = "profile", default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<CreateIsolatedSessionRequestProfile>,
-    #[serde(rename = "workspace")]
-    pub workspace: IsolatedWorkspaceSpec,
+    #[serde(rename = "workspace", default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<IsolatedWorkspaceSpec>,
+    #[serde(rename = "overlays", default, skip_serializing_if = "Option::is_none")]
+    pub overlays: Option<Vec<IsolatedOverlaySpec>>,
     #[serde(
         rename = "extra_writable",
         default,
@@ -524,6 +526,21 @@ impl std::fmt::Debug for HardeningLayerStateState {
 }
 
 #[derive(Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct IdentityUploadFileRequestBody {
+    #[serde(rename = "metadata", default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<String>,
+    #[serde(rename = "file", default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<Vec<u8>>,
+    #[serde(flatten)]
+    pub additional_properties: std::collections::BTreeMap<String, serde_json::Value>,
+}
+impl std::fmt::Debug for IdentityUploadFileRequestBody {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("IdentityUploadFileRequestBody(<redacted>)")
+    }
+}
+
+#[derive(Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct IsolatedBackgroundRunResponse {
     #[serde(rename = "session_id")]
     pub session_id: String,
@@ -560,6 +577,58 @@ pub struct IsolatedCreateSessionResponse {
 impl std::fmt::Debug for IsolatedCreateSessionResponse {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("IsolatedCreateSessionResponse(<redacted>)")
+    }
+}
+
+#[derive(Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct IsolatedOverlaySpec {
+    #[serde(rename = "path")]
+    pub path: String,
+    #[serde(rename = "mode", default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<IsolatedOverlaySpecMode>,
+    #[serde(rename = "persist", default, skip_serializing_if = "Option::is_none")]
+    pub persist: Option<bool>,
+    #[serde(flatten)]
+    pub additional_properties: std::collections::BTreeMap<String, serde_json::Value>,
+}
+impl std::fmt::Debug for IsolatedOverlaySpec {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("IsolatedOverlaySpec(<redacted>)")
+    }
+}
+
+#[derive(Clone, Default, PartialEq, Eq)]
+pub enum IsolatedOverlaySpecMode {
+    #[default]
+    Rw,
+    Overlay,
+    Ro,
+    Unknown(String),
+}
+impl serde::Serialize for IsolatedOverlaySpecMode {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(match self {
+            Self::Rw => "rw",
+            Self::Overlay => "overlay",
+            Self::Ro => "ro",
+            Self::Unknown(value) => value.as_str(),
+        })
+    }
+}
+impl<'de> serde::Deserialize<'de> for IsolatedOverlaySpecMode {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = <String as serde::Deserialize>::deserialize(deserializer)?;
+        Ok(match value.as_str() {
+            "rw" => Self::Rw,
+            "overlay" => Self::Overlay,
+            "ro" => Self::Ro,
+            _ => Self::Unknown(value),
+        })
+    }
+}
+impl std::fmt::Debug for IsolatedOverlaySpecMode {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("IsolatedOverlaySpecMode(<redacted>)")
     }
 }
 
@@ -1084,6 +1153,8 @@ pub struct SessionState {
     pub profile: Option<SessionStateProfile>,
     #[serde(rename = "workspace", default, skip_serializing_if = "Option::is_none")]
     pub workspace: Option<IsolatedWorkspaceSpec>,
+    #[serde(rename = "overlays", default, skip_serializing_if = "Option::is_none")]
+    pub overlays: Option<Vec<IsolatedOverlaySpec>>,
     #[serde(
         rename = "extra_writable",
         default,
@@ -1306,11 +1377,15 @@ pub const SCHEMAS: &[(&str, &str)] = &[
     ),
     (
         "CreateIsolatedSessionRequest",
-        r##"{"properties":{"binds":{"description":"Additional host paths bind-mounted into the namespace with an explicit source-to-destination mapping. Unlike extra_writable (which mounts source==destination read-write), each entry may map a distinct destination path and be mounted read-only. The source path of every entry must fall within the configured writable allowlist.","items":{"$ref":"#/components/schemas/BindMount"},"type":"array"},"env_passthrough":{"$ref":"#/components/schemas/EnvPassthroughSpec"},"extra_writable":{"items":{"type":"string"},"type":"array"},"gid":{"format":"uint32","type":"integer"},"idle_timeout_seconds":{"type":"integer"},"profile":{"enum":["strict","balanced"],"type":"string"},"share_net":{"type":"boolean"},"uid":{"format":"uint32","type":"integer"},"uid_mode":{"description":"Controls how user identity is established inside the namespace. \"setpriv\" (default) uses real setuid via setpriv(1). \"userns\" creates a user namespace via --unshare-user --disable-userns.","enum":["setpriv","userns"],"type":"string"},"workspace":{"$ref":"#/components/schemas/IsolatedWorkspaceSpec"}},"required":["workspace"],"type":"object"}"##,
+        r##"{"description":"Creates an isolated session with one or more overlay mounts. The legacy `workspace` field is kept as sugar for a single-element `overlays` list: at least one of `workspace` or `overlays` must be provided, and when both are present `workspace` is prepended to `overlays`.","properties":{"binds":{"description":"Additional host paths bind-mounted into the namespace with an explicit source-to-destination mapping. Unlike extra_writable (which mounts source==destination read-write), each entry may map a distinct destination path and be mounted read-only. The source path of every entry must fall within the configured writable allowlist.","items":{"$ref":"#/components/schemas/BindMount"},"type":"array"},"env_passthrough":{"$ref":"#/components/schemas/EnvPassthroughSpec"},"extra_writable":{"items":{"type":"string"},"type":"array"},"gid":{"format":"uint32","type":"integer"},"idle_timeout_seconds":{"type":"integer"},"overlays":{"description":"Independent overlay mounts inside one namespace. Each entry gets its own copy-on-write upper (or a direct/ro bind for rw/ro modes). bubblewrap applies mounts shallow-first, so a nested overlay (for example `/workspace` on top of a `/` root overlay) shadows its ancestors within its own subtree. Paths must be absolute, unique, and clean (no trailing slash, `.` or `..` segments); at most 16 mounts per session (including the legacy `workspace`).","items":{"$ref":"#/components/schemas/IsolatedOverlaySpec"},"maxItems":16,"type":"array"},"profile":{"enum":["strict","balanced"],"type":"string"},"share_net":{"type":"boolean"},"uid":{"format":"uint32","type":"integer"},"uid_mode":{"description":"Controls how user identity is established inside the namespace. \"setpriv\" (default) uses real setuid via setpriv(1). \"userns\" creates a user namespace via --unshare-user --disable-userns.","enum":["setpriv","userns"],"type":"string"},"workspace":{"$ref":"#/components/schemas/IsolatedWorkspaceSpec"}},"type":"object"}"##,
     ),
     (
         "IsolatedWorkspaceSpec",
         r#"{"properties":{"mode":{"enum":["rw","overlay","ro"],"type":"string"},"path":{"type":"string"}},"required":["path"],"type":"object"}"#,
+    ),
+    (
+        "IsolatedOverlaySpec",
+        r#"{"description":"One overlay mount inside the isolated namespace. `mode=overlay` mounts a copy-on-write view: with `persist=true` (default) writes land in a host upper directory tracked and usage-accounted by execd (the substrate for the diff/commit endpoints); with `persist=false` the upper is an ephemeral tmpfs whose writes are discarded when the session ends. `rw` and `ro` bind the host path directly; `persist` applies to overlay mode only and must be omitted for them (execd rejects the request otherwise).","properties":{"mode":{"description":"Mount mode. Defaults to `overlay`.","enum":["rw","overlay","ro"],"type":"string"},"path":{"description":"Mount destination inside the namespace (absolute).","example":"/workspace","type":"string"},"persist":{"description":"Overlay mode only. When true (default; execd treats an omitted value as true) the copy-on-write upper is a host directory allocated per session; when false it is an ephemeral tmpfs whose writes are discarded when the session ends. Must be omitted for `rw` and `ro` modes (execd rejects the request otherwise). Because an ephemeral upper lives inside the namespace only, the filesystem API serves `persist=false` overlays from their host-side (lower) content: in-session writes under such an overlay are not observable through the files API and files-API writes into the overlay are rejected. Overlay mounts with `persist=false` also cannot host background-run logs, so background runs are rejected unless the first overlay is `rw` or `overlay` with `persist=true`.","type":"boolean"}},"required":["path"],"type":"object"}"#,
     ),
     (
         "BindMount",
@@ -1326,7 +1401,7 @@ pub const SCHEMAS: &[(&str, &str)] = &[
     ),
     (
         "IsolatedRunRequest",
-        r#"{"properties":{"background":{"description":"When true (default false), start the code detached inside the\nsession and return a 202 run handle instead of streaming output.\nThe run's combined stdout/stderr is captured to a log file that\ncan be polled via the run logs endpoint; its lifecycle is tracked\nvia the run status endpoint.\nBackground runs share the session's process group, so session-\nlevel signals (for example the SIGINT sent when a foreground run\ntimes out or is cancelled) also reach them; execd cannot signal\nindividual in-namespace processes.\nBackground runs require a writable log location, so sessions with\na read-only (`ro`) workspace reject them with 400: there is no\nhost-visible writable location for the run's log and exit-code\nfiles. rw and overlay workspaces are supported.\n","example":false,"type":"boolean"},"code":{"description":"Shell code to execute inside the session","example":"echo hello","type":"string"},"envs":{"additionalProperties":{"type":"string"},"description":"Environment variables exported into the shell before the code runs","type":"object"},"timeout_seconds":{"description":"Foreground-only timeout. The run is interrupted after this many\nseconds. Ignored for background runs: a background run is not\ntime-limited, and idle GC is suspended while it is active, so a\nlong-running background command keeps the session alive until it\nfinishes (then the normal idle window applies) or the session is\ndeleted.\n","example":60,"minimum":0,"type":"integer"}},"required":["code"],"type":"object"}"#,
+        r#"{"properties":{"background":{"description":"When true (default false), start the code detached inside the\nsession and return a 202 run handle instead of streaming output.\nThe run's combined stdout/stderr is captured to a log file that\ncan be polled via the run logs endpoint; its lifecycle is tracked\nvia the run status endpoint.\nBackground runs share the session's process group, so session-\nlevel signals (for example the SIGINT sent when a foreground run\ntimes out or is cancelled) also reach them; execd cannot signal\nindividual in-namespace processes.\nBackground runs require a writable log location under the first\noverlay, so sessions whose first overlay is read-only (`ro`) or\nan ephemeral overlay (`persist: false`) reject them with 400.\nrw overlays and persistent (`persist: true`) overlays are\nsupported.\n","example":false,"type":"boolean"},"code":{"description":"Shell code to execute inside the session","example":"echo hello","type":"string"},"envs":{"additionalProperties":{"type":"string"},"description":"Environment variables exported into the shell before the code runs","type":"object"},"timeout_seconds":{"description":"Foreground-only timeout. The run is interrupted after this many\nseconds. Ignored for background runs: a background run is not\ntime-limited, and idle GC is suspended while it is active, so a\nlong-running background command keeps the session alive until it\nfinishes (then the normal idle window applies) or the session is\ndeleted.\n","example":60,"minimum":0,"type":"integer"}},"required":["code"],"type":"object"}"#,
     ),
     (
         "IsolatedBackgroundRunResponse",
@@ -1338,7 +1413,7 @@ pub const SCHEMAS: &[(&str, &str)] = &[
     ),
     (
         "SessionState",
-        r##"{"description":"State of an isolated session. Runtime status fields (status, created_at, last_run_at, idle_remaining_seconds) are always present. Creation-parameter fields (profile, workspace, binds, share_net, env_passthrough, uid, gid, uid_mode, extra_writable, idle_timeout_seconds) echo the parameters used to create the session and let a stateless client rebuild a session handle from just a session ID (e.g. after a client restart or in serverless workers). Older execd builds may omit the creation-parameter fields; clients must tolerate them being absent.","properties":{"binds":{"items":{"$ref":"#/components/schemas/BindMount"},"type":"array"},"created_at":{"format":"date-time","type":"string"},"env_passthrough":{"$ref":"#/components/schemas/EnvPassthroughSpec"},"extra_writable":{"items":{"type":"string"},"type":"array"},"gid":{"format":"uint32","type":"integer"},"idle_remaining_seconds":{"nullable":true,"type":"integer"},"idle_timeout_seconds":{"type":"integer"},"last_run_at":{"format":"date-time","type":"string"},"profile":{"description":"Profile the session was created with.","enum":["strict","balanced"],"type":"string"},"share_net":{"type":"boolean"},"status":{"enum":["active","dead","destroyed"],"type":"string"},"uid":{"format":"uint32","type":"integer"},"uid_mode":{"enum":["setpriv","userns"],"type":"string"},"workspace":{"$ref":"#/components/schemas/IsolatedWorkspaceSpec"}},"type":"object"}"##,
+        r##"{"description":"State of an isolated session. Runtime status fields (status, created_at, last_run_at, idle_remaining_seconds) are always present. Creation-parameter fields (profile, workspace, overlays, binds, share_net, env_passthrough, uid, gid, uid_mode, extra_writable, idle_timeout_seconds) echo the parameters used to create the session and let a stateless client rebuild a session handle from just a session ID (e.g. after a client restart or in serverless workers). `overlays` lists the effective mounts; for sessions created via the legacy `workspace` field it repeats that workspace as a single element, and `workspace` itself is only echoed for such single-overlay sessions. Older execd builds may omit the creation-parameter fields; clients must tolerate them being absent.","properties":{"binds":{"items":{"$ref":"#/components/schemas/BindMount"},"type":"array"},"created_at":{"format":"date-time","type":"string"},"env_passthrough":{"$ref":"#/components/schemas/EnvPassthroughSpec"},"extra_writable":{"items":{"type":"string"},"type":"array"},"gid":{"format":"uint32","type":"integer"},"idle_remaining_seconds":{"nullable":true,"type":"integer"},"idle_timeout_seconds":{"type":"integer"},"last_run_at":{"format":"date-time","type":"string"},"overlays":{"description":"Effective overlay mounts of the session.","items":{"$ref":"#/components/schemas/IsolatedOverlaySpec"},"type":"array"},"profile":{"description":"Profile the session was created with.","enum":["strict","balanced"],"type":"string"},"share_net":{"type":"boolean"},"status":{"enum":["active","dead","destroyed"],"type":"string"},"uid":{"format":"uint32","type":"integer"},"uid_mode":{"enum":["setpriv","userns"],"type":"string"},"workspace":{"$ref":"#/components/schemas/IsolatedWorkspaceSpec"}},"type":"object"}"##,
     ),
     (
         "IsolatedSessionSummary",
@@ -2664,6 +2739,957 @@ pub const OPERATIONS: &[super::Operation] = &[
             super::Response {
                 status: "200",
                 content: &[],
+                headers: r#"{}"#,
+            },
+            super::Response {
+                status: "500",
+                content: &[super::MediaType {
+                    content_type: "application/json",
+                    rust_type: "ErrorResponse",
+                    schema: r##"{"$ref":"#/components/schemas/ErrorResponse"}"##,
+                    encoding: r#"{}"#,
+                }],
+                headers: r#"{}"#,
+            },
+        ],
+        security: r#"[{"AccessToken":[]}]"#,
+    },
+    super::Operation {
+        id: "identityGetFilesInfo",
+        method: "GET",
+        path: "/v1/filesystem/{uid}/{gid}/files/info",
+        parameters: &[
+            super::Parameter {
+                name: "uid",
+                location: "path",
+                required: true,
+                rust_type: "i64",
+                schema: r#"{"format":"int64","maximum":4294967294,"minimum":0,"type":"integer"}"#,
+                style: "simple",
+                explode: false,
+            },
+            super::Parameter {
+                name: "gid",
+                location: "path",
+                required: true,
+                rust_type: "i64",
+                schema: r#"{"format":"int64","maximum":4294967294,"minimum":0,"type":"integer"}"#,
+                style: "simple",
+                explode: false,
+            },
+            super::Parameter {
+                name: "path",
+                location: "query",
+                required: true,
+                rust_type: "Vec<String>",
+                schema: r#"{"items":{"type":"string"},"type":"array"}"#,
+                style: "form",
+                explode: true,
+            },
+        ],
+        request_required: false,
+        request: &[],
+        responses: &[
+            super::Response {
+                status: "501",
+                content: &[],
+                headers: r#"{}"#,
+            },
+            super::Response {
+                status: "503",
+                content: &[],
+                headers: r#"{}"#,
+            },
+            super::Response {
+                status: "200",
+                content: &[super::MediaType {
+                    content_type: "application/json",
+                    rust_type: "std::collections::BTreeMap<String, FileInfo>",
+                    schema: r##"{"additionalProperties":{"$ref":"#/components/schemas/FileInfo"},"type":"object"}"##,
+                    encoding: r#"{}"#,
+                }],
+                headers: r#"{}"#,
+            },
+            super::Response {
+                status: "400",
+                content: &[super::MediaType {
+                    content_type: "application/json",
+                    rust_type: "ErrorResponse",
+                    schema: r##"{"$ref":"#/components/schemas/ErrorResponse"}"##,
+                    encoding: r#"{}"#,
+                }],
+                headers: r#"{}"#,
+            },
+            super::Response {
+                status: "404",
+                content: &[super::MediaType {
+                    content_type: "application/json",
+                    rust_type: "ErrorResponse",
+                    schema: r##"{"$ref":"#/components/schemas/ErrorResponse"}"##,
+                    encoding: r#"{}"#,
+                }],
+                headers: r#"{}"#,
+            },
+            super::Response {
+                status: "500",
+                content: &[super::MediaType {
+                    content_type: "application/json",
+                    rust_type: "ErrorResponse",
+                    schema: r##"{"$ref":"#/components/schemas/ErrorResponse"}"##,
+                    encoding: r#"{}"#,
+                }],
+                headers: r#"{}"#,
+            },
+        ],
+        security: r#"[{"AccessToken":[]}]"#,
+    },
+    super::Operation {
+        id: "identityRemoveFiles",
+        method: "DELETE",
+        path: "/v1/filesystem/{uid}/{gid}/files",
+        parameters: &[
+            super::Parameter {
+                name: "uid",
+                location: "path",
+                required: true,
+                rust_type: "i64",
+                schema: r#"{"format":"int64","maximum":4294967294,"minimum":0,"type":"integer"}"#,
+                style: "simple",
+                explode: false,
+            },
+            super::Parameter {
+                name: "gid",
+                location: "path",
+                required: true,
+                rust_type: "i64",
+                schema: r#"{"format":"int64","maximum":4294967294,"minimum":0,"type":"integer"}"#,
+                style: "simple",
+                explode: false,
+            },
+            super::Parameter {
+                name: "path",
+                location: "query",
+                required: true,
+                rust_type: "Vec<String>",
+                schema: r#"{"items":{"type":"string"},"type":"array"}"#,
+                style: "form",
+                explode: true,
+            },
+        ],
+        request_required: false,
+        request: &[],
+        responses: &[
+            super::Response {
+                status: "501",
+                content: &[],
+                headers: r#"{}"#,
+            },
+            super::Response {
+                status: "503",
+                content: &[],
+                headers: r#"{}"#,
+            },
+            super::Response {
+                status: "200",
+                content: &[],
+                headers: r#"{}"#,
+            },
+            super::Response {
+                status: "400",
+                content: &[super::MediaType {
+                    content_type: "application/json",
+                    rust_type: "ErrorResponse",
+                    schema: r##"{"$ref":"#/components/schemas/ErrorResponse"}"##,
+                    encoding: r#"{}"#,
+                }],
+                headers: r#"{}"#,
+            },
+            super::Response {
+                status: "500",
+                content: &[super::MediaType {
+                    content_type: "application/json",
+                    rust_type: "ErrorResponse",
+                    schema: r##"{"$ref":"#/components/schemas/ErrorResponse"}"##,
+                    encoding: r#"{}"#,
+                }],
+                headers: r#"{}"#,
+            },
+        ],
+        security: r#"[{"AccessToken":[]}]"#,
+    },
+    super::Operation {
+        id: "identityChmodFiles",
+        method: "POST",
+        path: "/v1/filesystem/{uid}/{gid}/files/permissions",
+        parameters: &[
+            super::Parameter {
+                name: "uid",
+                location: "path",
+                required: true,
+                rust_type: "i64",
+                schema: r#"{"format":"int64","maximum":4294967294,"minimum":0,"type":"integer"}"#,
+                style: "simple",
+                explode: false,
+            },
+            super::Parameter {
+                name: "gid",
+                location: "path",
+                required: true,
+                rust_type: "i64",
+                schema: r#"{"format":"int64","maximum":4294967294,"minimum":0,"type":"integer"}"#,
+                style: "simple",
+                explode: false,
+            },
+        ],
+        request_required: true,
+        request: &[super::MediaType {
+            content_type: "application/json",
+            rust_type: "std::collections::BTreeMap<String, Permission>",
+            schema: r##"{"additionalProperties":{"$ref":"#/components/schemas/Permission"},"type":"object"}"##,
+            encoding: r#"{}"#,
+        }],
+        responses: &[
+            super::Response {
+                status: "501",
+                content: &[],
+                headers: r#"{}"#,
+            },
+            super::Response {
+                status: "503",
+                content: &[],
+                headers: r#"{}"#,
+            },
+            super::Response {
+                status: "200",
+                content: &[],
+                headers: r#"{}"#,
+            },
+            super::Response {
+                status: "400",
+                content: &[super::MediaType {
+                    content_type: "application/json",
+                    rust_type: "ErrorResponse",
+                    schema: r##"{"$ref":"#/components/schemas/ErrorResponse"}"##,
+                    encoding: r#"{}"#,
+                }],
+                headers: r#"{}"#,
+            },
+            super::Response {
+                status: "500",
+                content: &[super::MediaType {
+                    content_type: "application/json",
+                    rust_type: "ErrorResponse",
+                    schema: r##"{"$ref":"#/components/schemas/ErrorResponse"}"##,
+                    encoding: r#"{}"#,
+                }],
+                headers: r#"{}"#,
+            },
+        ],
+        security: r#"[{"AccessToken":[]}]"#,
+    },
+    super::Operation {
+        id: "identityRenameFiles",
+        method: "POST",
+        path: "/v1/filesystem/{uid}/{gid}/files/mv",
+        parameters: &[
+            super::Parameter {
+                name: "uid",
+                location: "path",
+                required: true,
+                rust_type: "i64",
+                schema: r#"{"format":"int64","maximum":4294967294,"minimum":0,"type":"integer"}"#,
+                style: "simple",
+                explode: false,
+            },
+            super::Parameter {
+                name: "gid",
+                location: "path",
+                required: true,
+                rust_type: "i64",
+                schema: r#"{"format":"int64","maximum":4294967294,"minimum":0,"type":"integer"}"#,
+                style: "simple",
+                explode: false,
+            },
+        ],
+        request_required: true,
+        request: &[super::MediaType {
+            content_type: "application/json",
+            rust_type: "Vec<RenameFileItem>",
+            schema: r##"{"items":{"$ref":"#/components/schemas/RenameFileItem"},"type":"array"}"##,
+            encoding: r#"{}"#,
+        }],
+        responses: &[
+            super::Response {
+                status: "501",
+                content: &[],
+                headers: r#"{}"#,
+            },
+            super::Response {
+                status: "503",
+                content: &[],
+                headers: r#"{}"#,
+            },
+            super::Response {
+                status: "200",
+                content: &[],
+                headers: r#"{}"#,
+            },
+            super::Response {
+                status: "400",
+                content: &[super::MediaType {
+                    content_type: "application/json",
+                    rust_type: "ErrorResponse",
+                    schema: r##"{"$ref":"#/components/schemas/ErrorResponse"}"##,
+                    encoding: r#"{}"#,
+                }],
+                headers: r#"{}"#,
+            },
+            super::Response {
+                status: "404",
+                content: &[super::MediaType {
+                    content_type: "application/json",
+                    rust_type: "ErrorResponse",
+                    schema: r##"{"$ref":"#/components/schemas/ErrorResponse"}"##,
+                    encoding: r#"{}"#,
+                }],
+                headers: r#"{}"#,
+            },
+            super::Response {
+                status: "500",
+                content: &[super::MediaType {
+                    content_type: "application/json",
+                    rust_type: "ErrorResponse",
+                    schema: r##"{"$ref":"#/components/schemas/ErrorResponse"}"##,
+                    encoding: r#"{}"#,
+                }],
+                headers: r#"{}"#,
+            },
+        ],
+        security: r#"[{"AccessToken":[]}]"#,
+    },
+    super::Operation {
+        id: "identitySearchFiles",
+        method: "GET",
+        path: "/v1/filesystem/{uid}/{gid}/files/search",
+        parameters: &[
+            super::Parameter {
+                name: "uid",
+                location: "path",
+                required: true,
+                rust_type: "i64",
+                schema: r#"{"format":"int64","maximum":4294967294,"minimum":0,"type":"integer"}"#,
+                style: "simple",
+                explode: false,
+            },
+            super::Parameter {
+                name: "gid",
+                location: "path",
+                required: true,
+                rust_type: "i64",
+                schema: r#"{"format":"int64","maximum":4294967294,"minimum":0,"type":"integer"}"#,
+                style: "simple",
+                explode: false,
+            },
+            super::Parameter {
+                name: "path",
+                location: "query",
+                required: true,
+                rust_type: "String",
+                schema: r#"{"type":"string"}"#,
+                style: "form",
+                explode: true,
+            },
+            super::Parameter {
+                name: "pattern",
+                location: "query",
+                required: false,
+                rust_type: "String",
+                schema: r#"{"default":"**","type":"string"}"#,
+                style: "form",
+                explode: true,
+            },
+        ],
+        request_required: false,
+        request: &[],
+        responses: &[
+            super::Response {
+                status: "501",
+                content: &[],
+                headers: r#"{}"#,
+            },
+            super::Response {
+                status: "503",
+                content: &[],
+                headers: r#"{}"#,
+            },
+            super::Response {
+                status: "200",
+                content: &[super::MediaType {
+                    content_type: "application/json",
+                    rust_type: "Vec<FileInfo>",
+                    schema: r##"{"items":{"$ref":"#/components/schemas/FileInfo"},"type":"array"}"##,
+                    encoding: r#"{}"#,
+                }],
+                headers: r#"{}"#,
+            },
+            super::Response {
+                status: "400",
+                content: &[super::MediaType {
+                    content_type: "application/json",
+                    rust_type: "ErrorResponse",
+                    schema: r##"{"$ref":"#/components/schemas/ErrorResponse"}"##,
+                    encoding: r#"{}"#,
+                }],
+                headers: r#"{}"#,
+            },
+            super::Response {
+                status: "404",
+                content: &[super::MediaType {
+                    content_type: "application/json",
+                    rust_type: "ErrorResponse",
+                    schema: r##"{"$ref":"#/components/schemas/ErrorResponse"}"##,
+                    encoding: r#"{}"#,
+                }],
+                headers: r#"{}"#,
+            },
+            super::Response {
+                status: "500",
+                content: &[super::MediaType {
+                    content_type: "application/json",
+                    rust_type: "ErrorResponse",
+                    schema: r##"{"$ref":"#/components/schemas/ErrorResponse"}"##,
+                    encoding: r#"{}"#,
+                }],
+                headers: r#"{}"#,
+            },
+        ],
+        security: r#"[{"AccessToken":[]}]"#,
+    },
+    super::Operation {
+        id: "identityReplaceContent",
+        method: "POST",
+        path: "/v1/filesystem/{uid}/{gid}/files/replace",
+        parameters: &[
+            super::Parameter {
+                name: "uid",
+                location: "path",
+                required: true,
+                rust_type: "i64",
+                schema: r#"{"format":"int64","maximum":4294967294,"minimum":0,"type":"integer"}"#,
+                style: "simple",
+                explode: false,
+            },
+            super::Parameter {
+                name: "gid",
+                location: "path",
+                required: true,
+                rust_type: "i64",
+                schema: r#"{"format":"int64","maximum":4294967294,"minimum":0,"type":"integer"}"#,
+                style: "simple",
+                explode: false,
+            },
+            super::Parameter {
+                name: "verbose",
+                location: "query",
+                required: false,
+                rust_type: "bool",
+                schema: r#"{"default":false,"type":"boolean"}"#,
+                style: "form",
+                explode: true,
+            },
+        ],
+        request_required: true,
+        request: &[super::MediaType {
+            content_type: "application/json",
+            rust_type: "std::collections::BTreeMap<String, ReplaceFileContentItem>",
+            schema: r##"{"additionalProperties":{"$ref":"#/components/schemas/ReplaceFileContentItem"},"type":"object"}"##,
+            encoding: r#"{}"#,
+        }],
+        responses: &[
+            super::Response {
+                status: "501",
+                content: &[],
+                headers: r#"{}"#,
+            },
+            super::Response {
+                status: "503",
+                content: &[],
+                headers: r#"{}"#,
+            },
+            super::Response {
+                status: "200",
+                content: &[super::MediaType {
+                    content_type: "application/json",
+                    rust_type: "std::collections::BTreeMap<String, ReplaceFileContentResult>",
+                    schema: r##"{"additionalProperties":{"$ref":"#/components/schemas/ReplaceFileContentResult"},"type":"object"}"##,
+                    encoding: r#"{}"#,
+                }],
+                headers: r#"{}"#,
+            },
+            super::Response {
+                status: "400",
+                content: &[super::MediaType {
+                    content_type: "application/json",
+                    rust_type: "ErrorResponse",
+                    schema: r##"{"$ref":"#/components/schemas/ErrorResponse"}"##,
+                    encoding: r#"{}"#,
+                }],
+                headers: r#"{}"#,
+            },
+            super::Response {
+                status: "500",
+                content: &[super::MediaType {
+                    content_type: "application/json",
+                    rust_type: "ErrorResponse",
+                    schema: r##"{"$ref":"#/components/schemas/ErrorResponse"}"##,
+                    encoding: r#"{}"#,
+                }],
+                headers: r#"{}"#,
+            },
+        ],
+        security: r#"[{"AccessToken":[]}]"#,
+    },
+    super::Operation {
+        id: "identityUploadFile",
+        method: "POST",
+        path: "/v1/filesystem/{uid}/{gid}/files/upload",
+        parameters: &[
+            super::Parameter {
+                name: "uid",
+                location: "path",
+                required: true,
+                rust_type: "i64",
+                schema: r#"{"format":"int64","maximum":4294967294,"minimum":0,"type":"integer"}"#,
+                style: "simple",
+                explode: false,
+            },
+            super::Parameter {
+                name: "gid",
+                location: "path",
+                required: true,
+                rust_type: "i64",
+                schema: r#"{"format":"int64","maximum":4294967294,"minimum":0,"type":"integer"}"#,
+                style: "simple",
+                explode: false,
+            },
+        ],
+        request_required: true,
+        request: &[super::MediaType {
+            content_type: "multipart/form-data",
+            rust_type: "IdentityUploadFileRequestBody",
+            schema: r#"{"properties":{"file":{"description":"File to upload","format":"binary","type":"string"},"metadata":{"description":"JSON-encoded file metadata (FileMetadata object)","example":"{\"path\":\"/workspace/file.txt\",\"owner\":\"admin\",\"group\":\"admin\",\"mode\":755}","type":"string"}},"type":"object"}"#,
+            encoding: r#"{"file":{"contentType":"application/octet-stream"},"metadata":{"contentType":"application/json"}}"#,
+        }],
+        responses: &[
+            super::Response {
+                status: "501",
+                content: &[],
+                headers: r#"{}"#,
+            },
+            super::Response {
+                status: "503",
+                content: &[],
+                headers: r#"{}"#,
+            },
+            super::Response {
+                status: "200",
+                content: &[],
+                headers: r#"{}"#,
+            },
+            super::Response {
+                status: "400",
+                content: &[super::MediaType {
+                    content_type: "application/json",
+                    rust_type: "ErrorResponse",
+                    schema: r##"{"$ref":"#/components/schemas/ErrorResponse"}"##,
+                    encoding: r#"{}"#,
+                }],
+                headers: r#"{}"#,
+            },
+            super::Response {
+                status: "500",
+                content: &[super::MediaType {
+                    content_type: "application/json",
+                    rust_type: "ErrorResponse",
+                    schema: r##"{"$ref":"#/components/schemas/ErrorResponse"}"##,
+                    encoding: r#"{}"#,
+                }],
+                headers: r#"{}"#,
+            },
+        ],
+        security: r#"[{"AccessToken":[]}]"#,
+    },
+    super::Operation {
+        id: "identityDownloadFile",
+        method: "GET",
+        path: "/v1/filesystem/{uid}/{gid}/files/download",
+        parameters: &[
+            super::Parameter {
+                name: "uid",
+                location: "path",
+                required: true,
+                rust_type: "i64",
+                schema: r#"{"format":"int64","maximum":4294967294,"minimum":0,"type":"integer"}"#,
+                style: "simple",
+                explode: false,
+            },
+            super::Parameter {
+                name: "gid",
+                location: "path",
+                required: true,
+                rust_type: "i64",
+                schema: r#"{"format":"int64","maximum":4294967294,"minimum":0,"type":"integer"}"#,
+                style: "simple",
+                explode: false,
+            },
+            super::Parameter {
+                name: "path",
+                location: "query",
+                required: true,
+                rust_type: "String",
+                schema: r#"{"type":"string"}"#,
+                style: "form",
+                explode: true,
+            },
+            super::Parameter {
+                name: "offset",
+                location: "query",
+                required: false,
+                rust_type: "i64",
+                schema: r#"{"minimum":1,"type":"integer"}"#,
+                style: "form",
+                explode: true,
+            },
+            super::Parameter {
+                name: "limit",
+                location: "query",
+                required: false,
+                rust_type: "i64",
+                schema: r#"{"minimum":1,"type":"integer"}"#,
+                style: "form",
+                explode: true,
+            },
+            super::Parameter {
+                name: "Range",
+                location: "header",
+                required: false,
+                rust_type: "String",
+                schema: r#"{"type":"string"}"#,
+                style: "simple",
+                explode: false,
+            },
+        ],
+        request_required: false,
+        request: &[],
+        responses: &[
+            super::Response {
+                status: "501",
+                content: &[],
+                headers: r#"{}"#,
+            },
+            super::Response {
+                status: "503",
+                content: &[],
+                headers: r#"{}"#,
+            },
+            super::Response {
+                status: "200",
+                content: &[
+                    super::MediaType {
+                        content_type: "application/octet-stream",
+                        rust_type: "Vec<u8>",
+                        schema: r#"{"format":"binary","type":"string"}"#,
+                        encoding: r#"{}"#,
+                    },
+                    super::MediaType {
+                        content_type: "text/plain",
+                        rust_type: "String",
+                        schema: r#"{"description":"Line-based content returned when offset/limit parameters are used","type":"string"}"#,
+                        encoding: r#"{}"#,
+                    },
+                ],
+                headers: r#"{"Content-Disposition":{"description":"Attachment header with filename (byte-range mode only)","schema":{"type":"string"}},"Content-Length":{"description":"File size in bytes (byte-range mode only)","schema":{"type":"integer"}}}"#,
+            },
+            super::Response {
+                status: "206",
+                content: &[super::MediaType {
+                    content_type: "application/octet-stream",
+                    rust_type: "Vec<u8>",
+                    schema: r#"{"format":"binary","type":"string"}"#,
+                    encoding: r#"{}"#,
+                }],
+                headers: r#"{"Content-Length":{"description":"Length of the returned range","schema":{"type":"integer"}},"Content-Range":{"description":"Range of bytes being returned","schema":{"type":"string"}}}"#,
+            },
+            super::Response {
+                status: "400",
+                content: &[super::MediaType {
+                    content_type: "application/json",
+                    rust_type: "ErrorResponse",
+                    schema: r##"{"$ref":"#/components/schemas/ErrorResponse"}"##,
+                    encoding: r#"{}"#,
+                }],
+                headers: r#"{}"#,
+            },
+            super::Response {
+                status: "404",
+                content: &[super::MediaType {
+                    content_type: "application/json",
+                    rust_type: "ErrorResponse",
+                    schema: r##"{"$ref":"#/components/schemas/ErrorResponse"}"##,
+                    encoding: r#"{}"#,
+                }],
+                headers: r#"{}"#,
+            },
+            super::Response {
+                status: "416",
+                content: &[super::MediaType {
+                    content_type: "application/json",
+                    rust_type: "ErrorResponse",
+                    schema: r##"{"$ref":"#/components/schemas/ErrorResponse"}"##,
+                    encoding: r#"{}"#,
+                }],
+                headers: r#"{}"#,
+            },
+            super::Response {
+                status: "500",
+                content: &[super::MediaType {
+                    content_type: "application/json",
+                    rust_type: "ErrorResponse",
+                    schema: r##"{"$ref":"#/components/schemas/ErrorResponse"}"##,
+                    encoding: r#"{}"#,
+                }],
+                headers: r#"{}"#,
+            },
+        ],
+        security: r#"[{"AccessToken":[]}]"#,
+    },
+    super::Operation {
+        id: "identityListDirectory",
+        method: "GET",
+        path: "/v1/filesystem/{uid}/{gid}/directories/list",
+        parameters: &[
+            super::Parameter {
+                name: "uid",
+                location: "path",
+                required: true,
+                rust_type: "i64",
+                schema: r#"{"format":"int64","maximum":4294967294,"minimum":0,"type":"integer"}"#,
+                style: "simple",
+                explode: false,
+            },
+            super::Parameter {
+                name: "gid",
+                location: "path",
+                required: true,
+                rust_type: "i64",
+                schema: r#"{"format":"int64","maximum":4294967294,"minimum":0,"type":"integer"}"#,
+                style: "simple",
+                explode: false,
+            },
+            super::Parameter {
+                name: "path",
+                location: "query",
+                required: true,
+                rust_type: "String",
+                schema: r#"{"type":"string"}"#,
+                style: "form",
+                explode: true,
+            },
+            super::Parameter {
+                name: "depth",
+                location: "query",
+                required: false,
+                rust_type: "i32",
+                schema: r#"{"default":1,"format":"int32","minimum":0,"type":"integer"}"#,
+                style: "form",
+                explode: true,
+            },
+        ],
+        request_required: false,
+        request: &[],
+        responses: &[
+            super::Response {
+                status: "501",
+                content: &[],
+                headers: r#"{}"#,
+            },
+            super::Response {
+                status: "503",
+                content: &[],
+                headers: r#"{}"#,
+            },
+            super::Response {
+                status: "200",
+                content: &[super::MediaType {
+                    content_type: "application/json",
+                    rust_type: "Vec<FileInfo>",
+                    schema: r##"{"items":{"$ref":"#/components/schemas/FileInfo"},"type":"array"}"##,
+                    encoding: r#"{}"#,
+                }],
+                headers: r#"{}"#,
+            },
+            super::Response {
+                status: "400",
+                content: &[super::MediaType {
+                    content_type: "application/json",
+                    rust_type: "ErrorResponse",
+                    schema: r##"{"$ref":"#/components/schemas/ErrorResponse"}"##,
+                    encoding: r#"{}"#,
+                }],
+                headers: r#"{}"#,
+            },
+            super::Response {
+                status: "404",
+                content: &[super::MediaType {
+                    content_type: "application/json",
+                    rust_type: "ErrorResponse",
+                    schema: r##"{"$ref":"#/components/schemas/ErrorResponse"}"##,
+                    encoding: r#"{}"#,
+                }],
+                headers: r#"{}"#,
+            },
+            super::Response {
+                status: "500",
+                content: &[super::MediaType {
+                    content_type: "application/json",
+                    rust_type: "ErrorResponse",
+                    schema: r##"{"$ref":"#/components/schemas/ErrorResponse"}"##,
+                    encoding: r#"{}"#,
+                }],
+                headers: r#"{}"#,
+            },
+        ],
+        security: r#"[{"AccessToken":[]}]"#,
+    },
+    super::Operation {
+        id: "identityMakeDirs",
+        method: "POST",
+        path: "/v1/filesystem/{uid}/{gid}/directories",
+        parameters: &[
+            super::Parameter {
+                name: "uid",
+                location: "path",
+                required: true,
+                rust_type: "i64",
+                schema: r#"{"format":"int64","maximum":4294967294,"minimum":0,"type":"integer"}"#,
+                style: "simple",
+                explode: false,
+            },
+            super::Parameter {
+                name: "gid",
+                location: "path",
+                required: true,
+                rust_type: "i64",
+                schema: r#"{"format":"int64","maximum":4294967294,"minimum":0,"type":"integer"}"#,
+                style: "simple",
+                explode: false,
+            },
+        ],
+        request_required: true,
+        request: &[super::MediaType {
+            content_type: "application/json",
+            rust_type: "std::collections::BTreeMap<String, Permission>",
+            schema: r##"{"additionalProperties":{"$ref":"#/components/schemas/Permission"},"type":"object"}"##,
+            encoding: r#"{}"#,
+        }],
+        responses: &[
+            super::Response {
+                status: "501",
+                content: &[],
+                headers: r#"{}"#,
+            },
+            super::Response {
+                status: "503",
+                content: &[],
+                headers: r#"{}"#,
+            },
+            super::Response {
+                status: "200",
+                content: &[],
+                headers: r#"{}"#,
+            },
+            super::Response {
+                status: "400",
+                content: &[super::MediaType {
+                    content_type: "application/json",
+                    rust_type: "ErrorResponse",
+                    schema: r##"{"$ref":"#/components/schemas/ErrorResponse"}"##,
+                    encoding: r#"{}"#,
+                }],
+                headers: r#"{}"#,
+            },
+            super::Response {
+                status: "500",
+                content: &[super::MediaType {
+                    content_type: "application/json",
+                    rust_type: "ErrorResponse",
+                    schema: r##"{"$ref":"#/components/schemas/ErrorResponse"}"##,
+                    encoding: r#"{}"#,
+                }],
+                headers: r#"{}"#,
+            },
+        ],
+        security: r#"[{"AccessToken":[]}]"#,
+    },
+    super::Operation {
+        id: "identityRemoveDirs",
+        method: "DELETE",
+        path: "/v1/filesystem/{uid}/{gid}/directories",
+        parameters: &[
+            super::Parameter {
+                name: "uid",
+                location: "path",
+                required: true,
+                rust_type: "i64",
+                schema: r#"{"format":"int64","maximum":4294967294,"minimum":0,"type":"integer"}"#,
+                style: "simple",
+                explode: false,
+            },
+            super::Parameter {
+                name: "gid",
+                location: "path",
+                required: true,
+                rust_type: "i64",
+                schema: r#"{"format":"int64","maximum":4294967294,"minimum":0,"type":"integer"}"#,
+                style: "simple",
+                explode: false,
+            },
+            super::Parameter {
+                name: "path",
+                location: "query",
+                required: true,
+                rust_type: "Vec<String>",
+                schema: r#"{"items":{"type":"string"},"type":"array"}"#,
+                style: "form",
+                explode: true,
+            },
+        ],
+        request_required: false,
+        request: &[],
+        responses: &[
+            super::Response {
+                status: "501",
+                content: &[],
+                headers: r#"{}"#,
+            },
+            super::Response {
+                status: "503",
+                content: &[],
+                headers: r#"{}"#,
+            },
+            super::Response {
+                status: "200",
+                content: &[],
+                headers: r#"{}"#,
+            },
+            super::Response {
+                status: "400",
+                content: &[super::MediaType {
+                    content_type: "application/json",
+                    rust_type: "ErrorResponse",
+                    schema: r##"{"$ref":"#/components/schemas/ErrorResponse"}"##,
+                    encoding: r#"{}"#,
+                }],
                 headers: r#"{}"#,
             },
             super::Response {

@@ -67,6 +67,53 @@ mod tests {
     }
 
     #[test]
+    fn isolated_overlays_and_legacy_workspace_roundtrip() {
+        for value in [
+            json!({"workspace": {"path": "/workspace", "mode": "overlay"}}),
+            json!({"overlays": [{"path": "/"}, {"path": "/workspace", "mode": "overlay", "persist": false}]}),
+            json!({"workspace": {"path": "/workspace"}, "overlays": [{"path": "/data", "persist": true}]}),
+        ] {
+            let model: execd::CreateIsolatedSessionRequest = from_value(value.clone()).unwrap();
+            assert_eq!(to_value(model).unwrap(), value);
+        }
+        let legacy: execd::SessionState = from_value(json!({"status": "ready"})).unwrap();
+        assert!(legacy.overlays.is_none());
+        let value = json!({"overlays": [{"path": "/workspace", "persist": false}]});
+        let state: execd::SessionState = from_value(value.clone()).unwrap();
+        assert_eq!(to_value(state).unwrap(), value);
+    }
+
+    #[test]
+    fn template_env_is_optional_and_roundtrips() {
+        for env in [None, Some(json!({"LOG_LEVEL": "info", "LITERAL": "$HOME"}))] {
+            let mut request = json!({"image": "example:latest", "publish": "s3://bucket/publish"});
+            let mut response = json!({"templateId": "tpl_test", "image": "example:latest", "publish": "s3://bucket/publish", "format": "overlaybd", "status": {"phase": "Ready"}, "createdAt": "2026-10-10T00:00:00Z", "updatedAt": "2026-10-10T00:00:00Z"});
+            if let Some(env) = env {
+                request["env"] = env.clone();
+                response["env"] = env;
+            }
+            let model: lifecycle::CreateFsbTemplateRequest = from_value(request.clone()).unwrap();
+            assert_eq!(to_value(model).unwrap(), request);
+            let model: lifecycle::FsbTemplate = from_value(response.clone()).unwrap();
+            assert_eq!(to_value(model).unwrap(), response);
+        }
+    }
+
+    #[test]
+    fn identity_filesystem_metadata_keeps_unsigned_id_bounds() {
+        let op = execd::OPERATIONS.iter().find(|op| op.id == "identityUploadFile").unwrap();
+        for name in ["uid", "gid"] {
+            let parameter = op.parameters.iter().find(|p| p.name == name).unwrap();
+            assert_eq!(parameter.location, "path");
+            assert!(parameter.required);
+            let schema: serde_json::Value = serde_json::from_str(parameter.schema).unwrap();
+            assert_eq!(schema["maximum"], 4294967294_u64);
+        }
+        assert!(op.responses.iter().any(|response| response.status == "501"));
+        assert!(op.responses.iter().any(|response| response.status == "503"));
+    }
+
+    #[test]
     fn defaults_and_component_isolation() {
         let _: lifecycle::NetworkPolicy = Default::default();
         let _: egress::NetworkPolicy = Default::default();

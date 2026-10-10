@@ -374,7 +374,7 @@ fn create_body(options: CreateIsolatedSessionOptions) -> Result<CreateIsolatedSe
         ));
     }
     Ok(CreateIsolatedSessionRequest {
-        workspace: options.workspace,
+        workspace: Some(options.workspace),
         profile: options.profile,
         extra_writable: options.extra_writable,
         binds: options.binds,
