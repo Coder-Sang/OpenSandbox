@@ -32,29 +32,6 @@ When routing cannot proceed, the failure is precise — clients can branch on st
 
 Once a sandbox is reached, its responses pass through **verbatim**, including redirects and errors. The ingress never follows a redirect itself, so a stale `Location` can never leak credentials to an unrelated endpoint.
 
-### Diagnosing a truncated execution stream
-
-A streaming response cannot be replaced with a JSON `502` after its headers
-have been sent. If copying the upstream response fails, ingress aborts that
-response. An HTTP/1.1 client may report `unexpected EOF during chunk size line`
-when the connection ends without the terminating chunk. This describes the
-truncated HTTP response, not a Jupyter error or its root cause.
-
-HTTP proxy failure diagnostics associate the failure with the request method
-and path, upstream socket endpoints and reuse state, request-write error class,
-request-context state, and failure phase. They omit query strings, headers,
-request bodies, and raw error messages. Ordinary successful requests do not
-emit these additional diagnostics. Preserve these failure logs together with
-execd logs and client execution-phase diagnostics before deleting the sandbox.
-
-A `closed` upstream read means the local socket was closed, but is
-not by itself proof that the kernel crashed or the client disconnected.
-Compare `context_error` and `request_write_error` with the upstream connection
-fields. In particular, an error on the old execution's connection can occur
-near the start of a reuse request without belonging to that new request. Do not
-infer ownership from timestamps alone or retry code with side effects merely
-to hide an EOF.
-
 ## WebSocket support
 
 WebSocket is a first-class path, not an upgrade hack bolted onto HTTP proxying:

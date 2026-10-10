@@ -97,14 +97,17 @@ func (c *CodeInterpretingController) RunCommand() {
 	// closes the response writer.
 	defer func() { cancel(); stopSSE() }()
 
-	// Before the first event, returned errors remain structured JSON.
-	// After streaming starts, they must use the existing SSE error event.
+	// SSE headers are committed lazily on the first event write
+	// (see writeSingleEvent), so a synchronous error from Execute below can
+	// still be surfaced as a structured JSON error response.
 	err = codeRunner.Execute(runCodeRequest)
 	if err != nil {
 		recordExecution("failure")
-		cancel()
-		stopSSE()
-		c.respondExecutionError(completeCh, eventsHandler, fmt.Sprintf("error running commands %v", err))
+		c.RespondError(
+			http.StatusInternalServerError,
+			model.ErrorCodeRuntimeError,
+			fmt.Sprintf("error running commands %v", err),
+		)
 		return
 	}
 

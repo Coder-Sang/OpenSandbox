@@ -173,9 +173,11 @@ func (c *CodeInterpretingController) RunCode() {
 	err = codeRunner.Execute(runCodeRequest)
 	if err != nil {
 		recordExecution("failure")
-		cancel()
-		stopSSE()
-		c.respondExecutionError(completeCh, eventsHandler, fmt.Sprintf("error running codes %v", err))
+		c.RespondError(
+			http.StatusInternalServerError,
+			model.ErrorCodeRuntimeError,
+			fmt.Sprintf("error running codes %v", err),
+		)
 		return
 	}
 
@@ -407,14 +409,17 @@ func (c *CodeInterpretingController) RunInSession() {
 	}
 	runReq.Hooks = hooks
 
-	// Before the first event, returned errors remain structured JSON.
-	// After streaming starts, they must use the existing SSE error event.
+	// SSE headers are committed lazily on the first event write
+	// (see writeSingleEvent), so a synchronous error from
+	// RunInBashSession can still be surfaced as a structured JSON error.
 	err := codeRunner.RunInBashSession(ctx, runReq)
 	if err != nil {
 		recordExecution("failure")
-		cancel()
-		stopSSE()
-		c.respondExecutionError(completeCh, hooks, fmt.Sprintf("error running in session. %v", err))
+		c.RespondError(
+			http.StatusInternalServerError,
+			model.ErrorCodeRuntimeError,
+			fmt.Sprintf("error running in session. %v", err),
+		)
 		return
 	}
 

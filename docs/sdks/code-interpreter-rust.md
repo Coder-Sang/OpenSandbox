@@ -11,6 +11,12 @@ itself. Use the [sandbox SDK](/sdks/rust) for lifecycle management and an
 [interpreter-enabled image](/examples/code-interpreter) for code execution.
 An ordinary Python image is not sufficient.
 
+::: warning Both crates are unpublished
+Neither `opensandbox` nor `opensandbox-code-interpreter` is published on crates.io.
+Use source path or Git dependencies. Pin a reviewed revision and commit your
+application's `Cargo.lock`.
+:::
+
 ## Runtime requirements
 
 The sandbox must start Jupyter Server with a kernel for the requested language,
@@ -20,19 +26,11 @@ For the default readiness probe, keep `JUPYTER_PORT` aligned with that server's
 port. If sandbox creation overrides the image entrypoint, explicitly start
 Jupyter there rather than relying on the image's `CMD`.
 
-The current source runtime selects kernelspecs by their declared language. For
-Python it prefers a matching spec other than `python3`, and falls back to the
-standard `python3` ipykernel spec when no preferred spec exists. This fallback is
-an unreleased runtime fix, not an SDK workaround. Older released execd images
-that skip `python3` need a matching kernelspec registered under another name,
-such as `python`, or an upgraded execd build. A successful readiness probe does
-not verify kernelspec availability or the full execution stream.
-
-::: warning Both crates are unpublished
-Neither `opensandbox` nor `opensandbox-code-interpreter` is published on crates.io.
-Use source path or Git dependencies. Pin a reviewed revision and commit your
-application's `Cargo.lock`.
-:::
+Some execd versions skip the stock `python3` kernelspec when selecting a Python
+kernel. Those versions require a matching spec registered under another name,
+such as `python`. This SDK does not change execd's kernel selection. A successful
+readiness probe does not verify kernelspec availability or a complete execution
+stream.
 
 ## Installation
 
@@ -133,27 +131,20 @@ failure streams must close cleanly. Transport failures while draining still
 return `Err`. A stream ending without either terminal event is a protocol
 failure rather than partial output accepted as success.
 
-Before streaming starts, a synchronous runtime failure remains an HTTP JSON
-error. After the response has started, execd stops and joins the heartbeat
-writer before reporting a runtime failure through the existing `error` event.
-It does not append a JSON HTTP error to an SSE body or emit a second terminal
-error when the runtime already delivered one. This requires the updated source
-execd build, not an SDK retry or suppression of transport errors.
+An `execution_count` event is optional and is not a prerequisite for retaining a
+result. Rust preserves MIME bundles delivered by the runtime in
+`ExecutionResult::raw`. The SDK cannot recover output omitted by execd or output
+sent after a successful completion marker, and it does not suppress transport
+errors or retry executions automatically.
 
-The current source runtime correlates Jupyter messages to the active request
-and waits for both its `execute_reply` and IOPub `idle` before finalizing a
-successful execution. It forwards `display_data` as existing `result` events,
-including MIME bundles with no positive execution count. An `execution_count`
-event is therefore optional and is not a prerequisite for displaying a result
-or completing an execution. Execd retains its existing `text/plain` to `text`
-wire mapping and forwards other MIME keys unchanged. Rust preserves the bundle
-in `ExecutionResult::raw`.
-
-These stream fixes are also unreleased. Use an execd build containing them for
-rich-output and terminal-ordering guarantees. A legacy image can pass readiness
-and context creation while still losing HTML/JSON output or sending completion
-before results or errors. Validate persistent state, rich results, kernel errors,
-and interruption against the deployed runtime, not just context provisioning.
+::: warning Runtime compatibility is separate from SDK validation
+This Rust SDK change does not include execd or ingress fixes. A runtime that
+omits rich outputs, finalizes before output is delivered, or truncates a stream
+can fail the full interpreter acceptance scenario even if readiness and context
+creation succeed. Validate persistent state, rich results, kernel errors,
+interruption, and immediate context reuse against the deployed runtime.
+SDK unit tests passing does not establish live-runtime acceptance.
+:::
 
 ## Readiness and cleanup
 

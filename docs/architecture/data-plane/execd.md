@@ -13,11 +13,6 @@ When the platform creates a sandbox it injects execd next to your entrypoint —
 
 Execd also fronts a small reverse proxy (`/proxy/{port}`), so one exposed host port can reach every port inside the sandbox — see [Single-Host Network (Docker)](/architecture/network/single-host-network).
 
-If a proxied upstream response fails after its headers are sent, execd aborts
-the downstream response instead of reporting a successful end of stream. The
-client must treat a truncated body as a transport failure. Failures before
-response headers are sent still use the proxy's HTTP error response.
-
 ## Capabilities at a glance
 
 | Capability | What you get |
@@ -48,34 +43,6 @@ Sessions use Bash when the image provides it and fall back to POSIX `sh` on mini
 Code contexts are persistent Jupyter kernels managed by execd. You execute code in a context and receive streamed results — standard output, execution results, and errors — across multiple calls that share state, exactly like a notebook.
 
 The official [code-interpreter image](https://github.com/opensandbox-group/sandbox-images) ships Python, Java, Node.js, and Go runtimes with matching Jupyter kernels — see the [Code Interpreter example](/examples/code-interpreter). Code execution is available through the plain sandbox SDKs and the raw API.
-
-## Execution stream errors
-
-For code, command, and shell-session execution, a runtime error before the
-first stream event remains an HTTP JSON error. Once the SSE response starts,
-execd reports failures using the existing `error` event instead of appending a
-JSON HTTP error to the stream. It stops and joins the heartbeat writer before
-handling a returned runtime error, and does not repeat a terminal event already
-sent by the runtime. The heartbeat also stops before either terminal event is
-written, so a queued ping cannot appear after `error` or `execution_complete`.
-These source fixes require an updated execd build. They
-do not change the public event schema or make transport errors safe to ignore.
-
-## Updating the runtime
-
-Changing execd source code or upgrading an SDK does not replace a running
-sandbox's daemon. Build and publish an execd image containing the required
-revision, then configure the lifecycle server's `[runtime].execd_image` for
-new sandbox creation. Use an immutable image tag or digest and verify the new
-sandbox's runtime before rolling it out broadly. For Fast Sandbox, the updated
-binary must also be included in newly built templates.
-
-Existing Docker sandboxes already contain a staged binary, and existing
-Kubernetes sandboxes already ran their execd init container. Updating the
-server's image setting does not hot-swap those running processes. Pre-warmed
-pools, saved images, and templates may still contain an older binary. Plan a
-controlled recreation or pool/template refresh, preserving user state first,
-rather than deleting active sandboxes or replacing their binaries in place.
 
 ## Interactive terminals
 

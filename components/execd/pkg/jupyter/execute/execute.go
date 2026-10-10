@@ -16,7 +16,6 @@
 package execute
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -27,6 +26,8 @@ import (
 	"github.com/alibaba/opensandbox/internal/safego"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
+
+	execdflag "github.com/alibaba/opensandbox/execd/pkg/flag"
 )
 
 type HTTPClient interface {
@@ -36,8 +37,7 @@ type HTTPClient interface {
 type Client struct {
 	httpClient HTTPClient
 
-	conn           *websocket.Conn
-	connectionDone chan struct{}
+	conn *websocket.Conn
 
 	handlers map[MessageType]func(*Message)
 
@@ -45,8 +45,7 @@ type Client struct {
 
 	msgCounter int
 
-	mu      sync.Mutex
-	writeMu sync.Mutex
+	mu sync.Mutex
 
 	wsURL string
 }
@@ -73,18 +72,11 @@ func (c *Client) Connect(wsURL string) error {
 	if err != nil {
 		return fmt.Errorf("failed to connect to kernel: %w", err)
 	}
-	if c.conn != nil {
-		c.conn.Close()
-		close(c.connectionDone)
-	}
 	c.conn = conn
-	c.connectionDone = make(chan struct{})
-	done := c.connectionDone
-	c.handlers = make(map[MessageType]func(*Message))
 
 	c.registerDefaultHandlers()
 
-	safego.Go(func() { c.receiveConnectionMessages(conn, done) })
+	safego.Go(func() { c.receiveMessages() })
 
 	return nil
 }
@@ -95,7 +87,6 @@ func (c *Client) Disconnect() {
 
 	if c.conn != nil {
 		c.conn.Close()
-		close(c.connectionDone)
 		c.conn = nil
 	}
 }
@@ -113,22 +104,21 @@ type streamExecutionState struct {
 	executeMutex sync.Mutex
 	resultMutex  sync.Mutex
 
-	// chanMutex serializes channel closure against sends. Sends select on context
-	// and connection cancellation, allowing teardown even when the consumer stops.
-	chanMutex      sync.RWMutex
-	closed         bool
-	ctx            context.Context
-	connectionDone <-chan struct{}
-	finished       chan struct{}
-	replySeen      bool
-	idleSeen       bool
+	// chanMutex guards resultChan's close-vs-send race. state.result.ExecutionCount/Error can be
+	// set by handleExecuteReply with no corresponding resultChan send at all (e.g. plain print()
+	// cells never emit execute_result), so finalizeExecution's poll loop can observe "done" and
+	// close resultChan at any time -- independent of whether some other handler is concurrently
+	// mid-send (e.g. a late stream message from a background thread that outlives the reply).
+	// Senders take RLock for the duration of their send so the closer's Lock() cannot proceed
+	// until any in-flight send completes; once closed is true, later senders skip the send
+	// instead of racing a closed channel.
+	chanMutex sync.RWMutex
+	closed    bool
 }
 
 func newStreamExecutionState(startTime time.Time) *streamExecutionState {
 	return &streamExecutionState{
 		startTime: startTime,
-		ctx:       context.Background(),
-		finished:  make(chan struct{}),
 		result: &ExecutionResult{
 			Status:        "ok",
 			Stream:        make([]*StreamOutput, 0),
@@ -142,48 +132,24 @@ func newStreamExecutionState(startTime time.Time) *streamExecutionState {
 func (state *streamExecutionState) trySend(resultChan chan *ExecutionResult, notify *ExecutionResult) {
 	state.chanMutex.RLock()
 	defer state.chanMutex.RUnlock()
-	if state.closed || state.ctx.Err() != nil {
+	if state.closed {
 		return
 	}
-	select {
-	case <-state.connectionDone:
-		return
-	default:
-	}
-	select {
-	case resultChan <- notify:
-	case <-state.ctx.Done():
-	case <-state.connectionDone:
-	case <-state.finished:
-	}
+	resultChan <- notify
 }
 
-// closeResultChan waits for in-flight cancellable sends and closes exactly once.
+// closeResultChan closes resultChan after waiting for any in-flight trySend calls to finish, and
+// prevents later trySend calls from sending on the now-closed channel. Must only be called once,
+// from finalizeExecution.
 func (state *streamExecutionState) closeResultChan(resultChan chan *ExecutionResult) {
 	state.chanMutex.Lock()
 	defer state.chanMutex.Unlock()
-	if !state.closed {
-		state.closed = true
-		close(state.finished)
-		close(resultChan)
-	}
+	state.closed = true
+	close(resultChan)
 }
 
 func (c *Client) ExecuteCodeStream(code string, resultChan chan *ExecutionResult) error {
-	return c.ExecuteCodeStreamContext(context.Background(), code, resultChan)
-}
-
-// ExecuteCodeStreamContext owns resultChan once request handlers are installed.
-// Setup errors before installation leave the channel untouched. Write errors,
-// cancellation and disconnect unblock output delivery and close the channel.
-func (c *Client) ExecuteCodeStreamContext(ctx context.Context, code string, resultChan chan *ExecutionResult) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	c.mu.Lock()
-	conn, done := c.conn, c.connectionDone
-	c.mu.Unlock()
-	if conn == nil {
+	if !c.IsConnected() {
 		return errors.New("not connected to kernel, please call Connect method")
 	}
 
@@ -192,46 +158,12 @@ func (c *Client) ExecuteCodeStreamContext(ctx context.Context, code string, resu
 		return err
 	}
 
-	ctx, cancel := context.WithCancel(ctx)
 	state := newStreamExecutionState(time.Now())
-	state.ctx = ctx
-	state.connectionDone = done
 
 	c.clearTemporaryHandlers()
-	c.registerExecuteCodeStreamHandlers(state, resultChan, msg.Header.MessageID)
-	safego.Go(func() {
-		select {
-		case <-ctx.Done():
-			conn.Close()
-		case <-done:
-		case <-state.finished:
-			cancel()
-			return
-		}
-		state.closeResultChan(resultChan)
-		cancel()
-	})
+	c.registerExecuteCodeStreamHandlers(state, resultChan)
 
-	c.writeMu.Lock()
-	c.mu.Lock()
-	current := c.conn == conn
-	c.mu.Unlock()
-	if !current {
-		err = errors.New("kernel connection changed")
-	} else if ctx.Err() != nil {
-		err = ctx.Err()
-	} else {
-		if deadline, ok := ctx.Deadline(); ok {
-			conn.SetWriteDeadline(deadline)
-		} else {
-			conn.SetWriteDeadline(time.Time{})
-		}
-		err = conn.WriteJSON(msg)
-	}
-	c.writeMu.Unlock()
-	if err != nil {
-		cancel()
-		state.closeResultChan(resultChan)
+	if err := c.writeMessage(msg); err != nil {
 		return fmt.Errorf("failed to send execution request: %w", err)
 	}
 
@@ -272,43 +204,20 @@ func (c *Client) buildExecuteMessage(code string) (*Message, error) {
 	return msg, nil
 }
 
-func (c *Client) registerExecuteCodeStreamHandlers(state *streamExecutionState, resultChan chan *ExecutionResult, requestID string) {
-	register := func(kind MessageType, handler func(*Message)) {
-		c.registerHandler(kind, func(msg *Message) {
-			if msg.ParentHeader.MessageID == requestID {
-				handler(msg)
-			}
-		})
-	}
-	register(MsgDisplayData, func(msg *Message) {
-		var display DisplayData
-		if json.Unmarshal(msg.Content, &display) == nil {
-			state.trySend(resultChan, &ExecutionResult{ExecutionData: display.Data})
-		}
-	})
-	register(MsgExecuteReply, func(msg *Message) {
-		state.resultMutex.Lock()
-		alreadyErrored := state.result.Error != nil
-		state.resultMutex.Unlock()
+func (c *Client) registerExecuteCodeStreamHandlers(state *streamExecutionState, resultChan chan *ExecutionResult) {
+	c.registerHandler(MsgExecuteReply, func(msg *Message) {
 		c.handleExecuteReply(msg, state)
-		if !alreadyErrored {
-			var reply ExecuteReply
-			if json.Unmarshal(msg.Content, &reply) == nil && reply.EName != "" {
-				state.trySend(resultChan, &ExecutionResult{Status: "error", Error: &reply.ErrorOutput})
-			}
-		}
-		c.maybeFinalizeExecution(state, resultChan)
 	})
-	register(MsgExecuteResult, func(msg *Message) {
+	c.registerHandler(MsgExecuteResult, func(msg *Message) {
 		c.handleExecuteResult(msg, state, resultChan)
 	})
-	register(MsgStream, func(msg *Message) {
+	c.registerHandler(MsgStream, func(msg *Message) {
 		c.handleStreamOutput(msg, state, resultChan)
 	})
-	register(MsgError, func(msg *Message) {
+	c.registerHandler(MsgError, func(msg *Message) {
 		c.handleExecutionError(msg, state, resultChan)
 	})
-	register(MsgStatus, func(msg *Message) {
+	c.registerHandler(MsgStatus, func(msg *Message) {
 		c.handleExecutionStatus(msg, state, resultChan)
 	})
 }
@@ -321,9 +230,7 @@ func (c *Client) handleExecuteReply(msg *Message, state *streamExecutionState) {
 
 	state.resultMutex.Lock()
 	defer state.resultMutex.Unlock()
-	state.replySeen = true
 	state.result.ExecutionCount = execReply.ExecutionCount
-	state.result.Status = execReply.Status
 	if execReply.EName != "" {
 		state.result.Error = &execReply.ErrorOutput
 	}
@@ -335,8 +242,12 @@ func (c *Client) handleExecuteResult(msg *Message, state *streamExecutionState, 
 		return
 	}
 
-	// Output sends select on cancellation and run outside resultMutex, so a stalled
-	// consumer cannot prevent execution teardown.
+	// resultChan send happens outside resultMutex: sending can block indefinitely on a full,
+	// undrained channel, and holding resultMutex across that block would starve any other
+	// goroutine that needs it -- including finalizeExecution's poll loop. trySend (see
+	// streamExecutionState) separately makes this send race-free against finalizeExecution
+	// closing resultChan, since ExecutionCount/Error can also be set by handleExecuteReply with
+	// no send of its own.
 	notify := &ExecutionResult{
 		ExecutionCount: execResult.ExecutionCount,
 		ExecutionData:  execResult.Data,
@@ -394,39 +305,41 @@ func (c *Client) handleExecutionStatus(msg *Message, state *streamExecutionState
 		return
 	}
 
-	state.resultMutex.Lock()
-	state.idleSeen = true
-	state.resultMutex.Unlock()
-	c.maybeFinalizeExecution(state, resultChan)
-}
-
-func (c *Client) maybeFinalizeExecution(state *streamExecutionState, resultChan chan *ExecutionResult) {
-	state.resultMutex.Lock()
-	ready := state.replySeen && state.idleSeen
-	state.resultMutex.Unlock()
-	if !ready {
-		return
-	}
 	state.executeMutex.Lock()
 	defer state.executeMutex.Unlock()
 	if state.executeDone {
 		return
 	}
 	state.executeDone = true
-	c.finalizeExecution(state, resultChan)
+	safego.Go(func() { c.finalizeExecution(state, resultChan) })
 }
 
 func (c *Client) finalizeExecution(state *streamExecutionState, resultChan chan *ExecutionResult) {
 	// See handleExecuteResult: resultChan send must stay outside resultMutex.
 	state.resultMutex.Lock()
 	state.result.ExecutionTime = time.Since(state.startTime)
-	notify := &ExecutionResult{
-		ExecutionTime:  state.result.ExecutionTime,
-		ExecutionCount: state.result.ExecutionCount,
-		Status:         state.result.Status,
-	}
+	executionTime := state.result.ExecutionTime
 	state.resultMutex.Unlock()
+
+	notify := &ExecutionResult{
+		ExecutionTime: executionTime,
+	}
 	state.trySend(resultChan, notify)
+
+	pollInterval := execdflag.JupyterIdlePollInterval
+	if pollInterval <= 0 {
+		pollInterval = 100 * time.Millisecond
+	}
+
+	for {
+		state.resultMutex.Lock()
+		done := state.result.ExecutionCount > 0 || state.result.Error != nil
+		state.resultMutex.Unlock()
+		if done {
+			break
+		}
+		time.Sleep(pollInterval)
+	}
 
 	// closeResultChan waits for any send from handleExecuteResult/handleStreamOutput/
 	// handleExecutionError still in flight to finish before closing, and marks resultChan closed
@@ -436,18 +349,9 @@ func (c *Client) finalizeExecution(state *streamExecutionState, resultChan chan 
 }
 
 func (c *Client) writeMessage(msg *Message) error {
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
 	c.mu.Lock()
-	conn := c.conn
-	c.mu.Unlock()
-	if conn == nil {
-		return errors.New("not connected to kernel")
-	}
-	if err := conn.SetWriteDeadline(time.Time{}); err != nil {
-		return err
-	}
-	return conn.WriteJSON(msg)
+	defer c.mu.Unlock()
+	return c.conn.WriteJSON(msg)
 }
 
 func (c *Client) ExecuteCodeWithCallback(code string, handler CallbackHandler) error {
@@ -485,16 +389,8 @@ func (c *Client) ExecuteCodeWithCallback(code string, handler CallbackHandler) e
 		Channel:      "shell",
 	}
 
-	c.clearTemporaryHandlers()
-	register := func(kind MessageType, callback func(*Message)) {
-		c.registerHandler(kind, func(response *Message) {
-			if response.ParentHeader.MessageID == msgID {
-				callback(response)
-			}
-		})
-	}
 	if handler.OnExecuteResult != nil {
-		register(MsgExecuteResult, func(msg *Message) {
+		c.registerHandler(MsgExecuteResult, func(msg *Message) {
 			var execResult ExecuteResult
 			if err := json.Unmarshal(msg.Content, &execResult); err != nil {
 				return
@@ -504,7 +400,7 @@ func (c *Client) ExecuteCodeWithCallback(code string, handler CallbackHandler) e
 	}
 
 	if handler.OnStream != nil {
-		register(MsgStream, func(msg *Message) {
+		c.registerHandler(MsgStream, func(msg *Message) {
 			var stream StreamOutput
 			if err := json.Unmarshal(msg.Content, &stream); err != nil {
 				return
@@ -514,7 +410,7 @@ func (c *Client) ExecuteCodeWithCallback(code string, handler CallbackHandler) e
 	}
 
 	if handler.OnDisplayData != nil {
-		register(MsgDisplayData, func(msg *Message) {
+		c.registerHandler(MsgDisplayData, func(msg *Message) {
 			var display DisplayData
 			if err := json.Unmarshal(msg.Content, &display); err != nil {
 				return
@@ -524,7 +420,7 @@ func (c *Client) ExecuteCodeWithCallback(code string, handler CallbackHandler) e
 	}
 
 	if handler.OnError != nil {
-		register(MsgError, func(msg *Message) {
+		c.registerHandler(MsgError, func(msg *Message) {
 			var errOutput ErrorOutput
 			if err := json.Unmarshal(msg.Content, &errOutput); err != nil {
 				return
@@ -534,7 +430,7 @@ func (c *Client) ExecuteCodeWithCallback(code string, handler CallbackHandler) e
 	}
 
 	if handler.OnStatus != nil {
-		register(MsgStatus, func(msg *Message) {
+		c.registerHandler(MsgStatus, func(msg *Message) {
 			var status StatusUpdate
 			if err := json.Unmarshal(msg.Content, &status); err != nil {
 				return
@@ -543,7 +439,9 @@ func (c *Client) ExecuteCodeWithCallback(code string, handler CallbackHandler) e
 		})
 	}
 
-	err = c.writeMessage(msg)
+	c.mu.Lock()
+	err = c.conn.WriteJSON(msg)
+	c.mu.Unlock()
 	if err != nil {
 		return fmt.Errorf("failed to send execution request: %w", err)
 	}
@@ -566,31 +464,24 @@ func (c *Client) clearTemporaryHandlers() {
 	c.registerDefaultHandlers()
 }
 
-func (c *Client) receiveConnectionMessages(conn *websocket.Conn, done chan struct{}) {
-	defer func() {
-		c.mu.Lock()
-		defer c.mu.Unlock()
-		if c.conn == conn {
-			conn.Close()
-			c.conn = nil
-			close(done)
-		}
-	}()
+func (c *Client) receiveMessages() {
 	for {
-		var msg Message
-		if conn.ReadJSON(&msg) != nil {
-			return
-		}
 		c.mu.Lock()
-		if c.conn != conn {
-			c.mu.Unlock()
-			return
-		}
-		handler := c.handlers[MessageType(msg.Header.MessageType)]
+		conn := c.conn
 		c.mu.Unlock()
-		if handler != nil {
-			handler(&msg)
+
+		if conn == nil {
+			break
 		}
+
+		var msg Message
+		err := conn.ReadJSON(&msg)
+		if err != nil {
+			// connection may already be closed
+			break
+		}
+
+		c.handleMessage(&msg)
 	}
 }
 

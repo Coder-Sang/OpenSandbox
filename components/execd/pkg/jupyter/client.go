@@ -15,7 +15,6 @@
 package jupyter
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -151,11 +150,6 @@ func (c *Client) DisconnectFromKernel() {
 
 func (c *Client) ExecuteCodeStream(kernelId, code string, resultChan chan *execute.ExecutionResult) error {
 	return c.executeClient.ExecuteCodeStream(code, resultChan)
-}
-
-// ExecuteCodeStreamContext stops stream delivery when the execution's consumer is cancelled.
-func (c *Client) ExecuteCodeStreamContext(ctx context.Context, kernelId, code string, resultChan chan *execute.ExecutionResult) error {
-	return c.executeClient.ExecuteCodeStreamContext(ctx, code, resultChan)
 }
 
 func (c *Client) ExecuteCodeWithCallback(code string, handler execute.CallbackHandler) error {
