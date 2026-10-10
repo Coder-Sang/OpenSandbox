@@ -19,8 +19,9 @@ pub use execd::{
     BindMount, CapabilitiesResponse as IsolatedCapabilities,
     CreateIsolatedSessionRequestProfile as IsolationProfile,
     CreateIsolatedSessionRequestUidMode as IsolationUidMode, EnvPassthroughSpec,
-    IsolatedBackgroundRunResponse as IsolatedBackgroundRun, IsolatedRunStatus,
-    IsolatedSessionSummary, IsolatedWorkspaceSpec, IsolatedWorkspaceSpecMode as WorkspaceMode,
+    IsolatedBackgroundRunResponse as IsolatedBackgroundRun, IsolatedOverlaySpec,
+    IsolatedOverlaySpecMode as OverlayMode, IsolatedRunStatus, IsolatedSessionSummary,
+    IsolatedWorkspaceSpec, IsolatedWorkspaceSpecMode as WorkspaceMode,
     SessionState as IsolatedSessionState,
 };
 
@@ -37,6 +38,39 @@ pub struct CreateIsolatedSessionOptions {
     pub gid: Option<i64>,
     pub uid_mode: Option<IsolationUidMode>,
     pub idle_timeout: Option<Duration>,
+}
+/// Creation options for workspace, overlays-only, or combined sessions.
+/// Mount paths use clean absolute Linux syntax, regardless of the client platform.
+#[derive(Clone, Debug, Default)]
+pub struct CreateIsolatedSessionAdvancedOptions {
+    pub workspace: Option<IsolatedWorkspaceSpec>,
+    pub overlays: Vec<IsolatedOverlaySpec>,
+    pub profile: Option<IsolationProfile>,
+    pub extra_writable: Option<Vec<String>>,
+    pub binds: Option<Vec<BindMount>>,
+    pub share_net: Option<bool>,
+    pub env_passthrough: Option<EnvPassthroughSpec>,
+    pub uid: Option<i64>,
+    pub gid: Option<i64>,
+    pub uid_mode: Option<IsolationUidMode>,
+    pub idle_timeout: Option<Duration>,
+}
+impl From<CreateIsolatedSessionOptions> for CreateIsolatedSessionAdvancedOptions {
+    fn from(options: CreateIsolatedSessionOptions) -> Self {
+        Self {
+            workspace: Some(options.workspace),
+            overlays: vec![],
+            profile: options.profile,
+            extra_writable: options.extra_writable,
+            binds: options.binds,
+            share_net: options.share_net,
+            env_passthrough: options.env_passthrough,
+            uid: options.uid,
+            gid: options.gid,
+            uid_mode: options.uid_mode,
+            idle_timeout: options.idle_timeout,
+        }
+    }
 }
 #[derive(Clone, Default)]
 pub struct IsolatedRunOptions {
@@ -104,6 +138,20 @@ impl IsolatedSessions {
         Ok(response.sessions)
     }
     pub async fn create(&self, options: CreateIsolatedSessionOptions) -> Result<IsolatedSession> {
+        nonblank(&options.workspace.path, "workspace.path")?;
+        self.create_shared(options.into()).await
+    }
+    pub async fn create_advanced(
+        &self,
+        options: CreateIsolatedSessionAdvancedOptions,
+    ) -> Result<IsolatedSession> {
+        validate_mounts(&options)?;
+        self.create_shared(options).await
+    }
+    async fn create_shared(
+        &self,
+        options: CreateIsolatedSessionAdvancedOptions,
+    ) -> Result<IsolatedSession> {
         let body = create_body(options)?;
         let info: execd::IsolatedCreateSessionResponse = self
             .transport
@@ -178,13 +226,31 @@ impl IsolatedSessions {
         create: CreateIsolatedSessionOptions,
         run: IsolatedRunOptions,
     ) -> Result<RunOnceResult> {
+        nonblank(&create.workspace.path, "workspace.path")?;
+        self.run_once_shared(code, create.into(), run).await
+    }
+    pub async fn run_once_advanced(
+        &self,
+        code: &str,
+        create: CreateIsolatedSessionAdvancedOptions,
+        run: IsolatedRunOptions,
+    ) -> Result<RunOnceResult> {
+        validate_mounts(&create)?;
+        self.run_once_shared(code, create, run).await
+    }
+    async fn run_once_shared(
+        &self,
+        code: &str,
+        create: CreateIsolatedSessionAdvancedOptions,
+        run: IsolatedRunOptions,
+    ) -> Result<RunOnceResult> {
         let service = self.clone();
         let code = code.to_owned();
         let (mut sender, receiver) = tokio::sync::oneshot::channel();
         // The owned task survives cancellation of the caller. Once creation
         // succeeds, receiver loss interrupts streaming and triggers deletion.
         tokio::spawn(async move {
-            let session = match service.create(create).await {
+            let session = match service.create_shared(create).await {
                 Ok(session) => session,
                 Err(error) => {
                     let _ = sender.send(Err(error));
@@ -363,8 +429,44 @@ fn seconds(value: Option<Duration>, field: &str) -> Result<Option<i64>> {
         })
         .transpose()
 }
-fn create_body(options: CreateIsolatedSessionOptions) -> Result<CreateIsolatedSessionRequest> {
-    nonblank(&options.workspace.path, "workspace.path")?;
+fn validate_mounts(options: &CreateIsolatedSessionAdvancedOptions) -> Result<()> {
+    let overlays = &options.overlays;
+    let count = usize::from(options.workspace.is_some()) + overlays.len();
+    if !(1..=16).contains(&count) {
+        return Err(Error::InvalidConfig(
+            "Expected 1 to 16 isolated mounts".into(),
+        ));
+    }
+    let mut paths = std::collections::BTreeSet::new();
+    for path in options
+        .workspace
+        .iter()
+        .map(|w| w.path.as_str())
+        .chain(overlays.iter().map(|o| o.path.as_str()))
+    {
+        if !path.starts_with('/')
+            || path.contains('\0')
+            || (path != "/" && path[1..].split('/').any(|s| matches!(s, "" | "." | "..")))
+            || !paths.insert(path)
+        {
+            return Err(Error::InvalidConfig(
+                "Mount paths must be absolute, clean and unique".into(),
+            ));
+        }
+    }
+    if overlays
+        .iter()
+        .any(|o| o.persist.is_some() && matches!(o.mode, Some(OverlayMode::Rw | OverlayMode::Ro)))
+    {
+        return Err(Error::InvalidConfig(
+            "persist must be omitted for rw/ro overlays".into(),
+        ));
+    }
+    Ok(())
+}
+fn create_body(
+    options: CreateIsolatedSessionAdvancedOptions,
+) -> Result<CreateIsolatedSessionRequest> {
     if options.uid.is_some_and(|v| u32::try_from(v).is_err())
         || options.gid.is_some_and(|v| u32::try_from(v).is_err())
         || (options.gid.is_some() && options.uid.is_none())
@@ -374,7 +476,8 @@ fn create_body(options: CreateIsolatedSessionOptions) -> Result<CreateIsolatedSe
         ));
     }
     Ok(CreateIsolatedSessionRequest {
-        workspace: Some(options.workspace),
+        workspace: options.workspace,
+        overlays: (!options.overlays.is_empty()).then_some(options.overlays),
         profile: options.profile,
         extra_writable: options.extra_writable,
         binds: options.binds,

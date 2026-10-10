@@ -451,7 +451,7 @@ impl SandboxManager {
             .empty(Method::DELETE, self.path(&["snapshots", id])?, None::<&()>)
             .await
     }
-    pub async fn create_template(&self, options: CreateTemplateOptions) -> Result<TemplateInfo> {
+    fn template_body(options: CreateTemplateOptions) -> Result<Value> {
         let mut value = json!({"image":options.image,"publish":options.publish,"entrypoint":options.entrypoint,"metadata":options.metadata});
         if let Some(resources) = options.resource_limits {
             value["resourceLimits"] = json!(resources);
@@ -469,18 +469,63 @@ impl SandboxManager {
             }
             value["readiness"] = wire;
         }
-        let body: api::CreateFsbTemplateRequest = convert(value)?;
+        Ok(value)
+    }
+    pub async fn create_template(&self, options: CreateTemplateOptions) -> Result<TemplateInfo> {
+        let body: api::CreateFsbTemplateRequest = convert(Self::template_body(options)?)?;
         let response: api::FsbTemplate = self
             .transport
             .json(Method::POST, self.path(&["templates"])?, Some(&body))
             .await?;
         convert(response)
     }
+    /// Create a template with literal environment values, including an explicit empty map.
+    /// Names must match ASCII `[A-Za-z_][A-Za-z0-9_]*`. Values are not shell-expanded.
+    /// Environment defaults may be baked into the template image. Do not use secrets.
+    pub async fn create_template_with_env(
+        &self,
+        options: CreateTemplateOptions,
+        env: BTreeMap<String, String>,
+    ) -> Result<TemplateInfoWithEnv> {
+        for name in env.keys() {
+            let mut bytes = name.bytes();
+            if !bytes
+                .next()
+                .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+                || !bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
+            {
+                return Err(invalid(
+                    "template env names must match [A-Za-z_][A-Za-z0-9_]*",
+                ));
+            }
+        }
+        let mut body: api::CreateFsbTemplateRequest = convert(Self::template_body(options)?)?;
+        body.env = Some(env);
+        self.transport
+            .sensitive_json(Method::POST, self.path(&["templates"])?, Some(&body))
+            .await
+    }
+    /// Fetch a template while retaining its environment defaults.
+    pub async fn get_template_with_env(&self, id: &str) -> Result<TemplateInfoWithEnv> {
+        self.transport
+            .sensitive_json(Method::GET, self.path(&["templates", id])?, None::<&()>)
+            .await
+    }
+    /// List templates while retaining environment defaults and pagination.
+    pub async fn list_templates_with_env(
+        &self,
+        filter: TemplateFilter,
+    ) -> Result<ListTemplatesWithEnvResponse> {
+        let url = self.template_list_url(filter)?;
+        self.transport
+            .sensitive_json(Method::GET, url, None::<&()>)
+            .await
+    }
     pub async fn get_template(&self, id: &str) -> Result<TemplateInfo> {
         self.get_model::<api::FsbTemplate, _>(self.path(&["templates", id])?)
             .await
     }
-    pub async fn list_templates(&self, filter: TemplateFilter) -> Result<ListTemplatesResponse> {
+    fn template_list_url(&self, filter: TemplateFilter) -> Result<Url> {
         let mut url = self.path(&["templates"])?;
         query(
             &mut url,
@@ -489,7 +534,10 @@ impl SandboxManager {
             filter.page,
             filter.page_size,
         )?;
-        self.get_model::<api::ListFsbTemplatesResponse, _>(url)
+        Ok(url)
+    }
+    pub async fn list_templates(&self, filter: TemplateFilter) -> Result<ListTemplatesResponse> {
+        self.get_model::<api::ListFsbTemplatesResponse, _>(self.template_list_url(filter)?)
             .await
     }
     pub async fn delete_template(&self, id: &str) -> Result<()> {

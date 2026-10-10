@@ -355,3 +355,27 @@ pub struct ListTemplatesResponse {
     pub items: Vec<TemplateInfo>,
     pub pagination: Option<PaginationInfo>,
 }
+
+/// A template response retaining environment defaults without changing `TemplateInfo`.
+#[derive(Clone, Deserialize)]
+pub struct TemplateInfoWithEnv {
+    #[serde(flatten)]
+    pub template: TemplateInfo,
+    /// Missing and null defaults are `None`, while an explicit empty map is `Some`.
+    pub env: Option<BTreeMap<String, String>>,
+}
+impl std::fmt::Debug for TemplateInfoWithEnv {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TemplateInfoWithEnv")
+            .field("template", &"<redacted>")
+            .field("env", &self.env.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
+}
+
+/// Environment-aware template list with the same pagination as the legacy list.
+#[derive(Clone, Debug, Deserialize)]
+pub struct ListTemplatesWithEnvResponse {
+    pub items: Vec<TemplateInfoWithEnv>,
+    pub pagination: Option<PaginationInfo>,
+}

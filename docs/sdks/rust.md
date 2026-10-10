@@ -11,10 +11,12 @@ It uses Rust 2021 and requires Rust 1.85 or later.
 
 The branch is based on the official OpenSandbox `release-1.1.1` tag. Generated
 `api` models include that release's identity-scoped filesystem operations,
-isolated-session overlays and template environment fields. These wire models do
-not imply equivalent handwritten service coverage: the isolated-session facade
-still uses its legacy workspace options, and the template facade does not yet
-expose template environment variables. Crate versions remain `1.1.0`.
+isolated-session overlays and template environment fields. The handwritten
+facade provides advanced overlay creation and template environment methods
+without changing existing option structs or method return types. Crate versions
+remain `1.1.0`. SDK coverage does not establish runtime acceptance: the official
+1.1.1 interpreter still has known live failures, and isolation and VM template
+operations require their respective runtime prerequisites.
 
 ::: warning Source installation only
 The first version is not published on crates.io. Use a local path or a Git
@@ -162,6 +164,54 @@ remote run. The `run_once` helper returns `RunOnceResult` with separate `executi
 and `cleanup` results and a `session_id` for retrying failed cleanup. It attempts
 cleanup on cancellation while Tokio is alive; runtime shutdown and process crashes
 can still prevent cleanup. Keep server-side idle GC as a fallback.
+
+### Multiple overlays and overlays-only sessions
+
+Existing `CreateIsolatedSessionOptions`, `create` and `run_once` remain available.
+Use `CreateIsolatedSessionAdvancedOptions` with `create_advanced` or
+`run_once_advanced` when `workspace` is optional or multiple overlays are needed:
+
+```rust
+use opensandbox::{CreateIsolatedSessionAdvancedOptions, IsolatedOverlaySpec, OverlayMode};
+
+let session = sandbox.isolated().create_advanced(CreateIsolatedSessionAdvancedOptions {
+    overlays: vec![IsolatedOverlaySpec {
+        path: "/workspace".into(),
+        mode: Some(OverlayMode::Overlay),
+        persist: Some(true),
+        ..Default::default()
+    }],
+    ..Default::default()
+}).await?;
+// Run work, then explicitly delete even if the work fails.
+session.delete().await?;
+```
+
+Provide at least one workspace or overlay. Paths must be absolute, unique and
+clean Linux paths. A workspace, when supplied, precedes the overlays, and the
+combined limit is 16 mounts. `persist` must be omitted for `rw` and `ro` modes.
+The SDK cannot determine whether a path is accessible inside the sandbox.
+An ephemeral overlay (`persist=false`) discards writes on deletion, does not
+expose those writes through the files API, and cannot provide background-log
+storage as the first mount. These are runtime semantics, not SDK workarounds.
+Both one-shot methods retain the same execution/cleanup and cancellation rules.
+
+## Template environment variables
+
+Keep `manager.create_template(options)` for the existing interface, which omits
+`env`. Use `manager.create_template_with_env(options, env)` to supply a
+`BTreeMap<String, String>`, including an explicit empty map. Keys must match
+`[A-Za-z_][A-Za-z0-9_]*`. Values are literal, not shell expressions. Template
+variables override the source image's inherited environment and are baked into
+the golden image, so do not use them as an ephemeral secret-injection mechanism.
+
+The environment-aware create/get/list methods return `TemplateInfoWithEnv`
+(or `ListTemplatesWithEnvResponse`) with the existing template information and
+an optional `env` map. Use `get_template_with_env` and `list_templates_with_env`
+when the server's environment echo must be retained. Existing methods retain
+`TemplateInfo` and `ListTemplatesResponse` for source compatibility. Debug output
+of the environment-aware wrapper redacts values. Full create/build/instantiate
+acceptance requires a dedicated fast-sandbox runtime, artifact storage and KVM.
 
 ## Credential Vault
 

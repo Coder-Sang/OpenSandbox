@@ -158,6 +158,193 @@ fn body(request: &str) -> Value {
     serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap()
 }
 
+fn advanced(paths: &[&str]) -> CreateIsolatedSessionAdvancedOptions {
+    CreateIsolatedSessionAdvancedOptions {
+        overlays: paths
+            .iter()
+            .map(|path| IsolatedOverlaySpec {
+                path: (*path).into(),
+                ..Default::default()
+            })
+            .collect(),
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn advanced_wire_preserves_workspace_and_overlay_order() {
+    let mut data = Server::start(vec![
+        reply(json!({"session_id":"overlays"})),
+        reply(json!({"session_id":"combined"})),
+        reply(json!({"session_id":"legacy"})),
+        reply(json!({"session_id":"workspace-only"})),
+    ])
+    .await;
+    let sandbox = sandbox(&mut data).await;
+    let service = sandbox.isolated();
+    let mut options = advanced(&["/", "/workspace"]);
+    options.overlays[0].persist = Some(false);
+    service.create_advanced(options).await.unwrap();
+    let wire = body(&data.next().await);
+    assert!(wire.get("workspace").is_none());
+    assert_eq!(
+        wire["overlays"],
+        json!([{"path":"/","persist":false},{"path":"/workspace"}])
+    );
+    let mut options: CreateIsolatedSessionAdvancedOptions = create().into();
+    options.overlays = advanced(&["/z", "/a"]).overlays;
+    service.create_advanced(options).await.unwrap();
+    let wire = body(&data.next().await);
+    // Contract keeps workspace as prepended sugar, not duplicated in overlays.
+    assert_eq!(wire["workspace"]["path"], "/workspace");
+    assert_eq!(wire["overlays"], json!([{"path":"/z"},{"path":"/a"}]));
+    assert_eq!(wire["idle_timeout_seconds"], 60);
+    let mut legacy = create();
+    legacy.workspace.path = "relative/../legacy/".into();
+    service.create(legacy).await.unwrap();
+    let wire = body(&data.next().await);
+    assert_eq!(wire["workspace"]["path"], "relative/../legacy/");
+    assert!(wire.get("overlays").is_none());
+    service.create_advanced(create().into()).await.unwrap();
+    let wire = body(&data.next().await);
+    assert_eq!(wire["workspace"]["path"], "/workspace");
+    assert!(wire.get("overlays").is_none());
+}
+
+#[tokio::test]
+async fn advanced_validation_rejects_before_http() {
+    let mut data = Server::start(vec![reply(json!({"session_id":"valid"}))]).await;
+    let sandbox = sandbox(&mut data).await;
+    let service = sandbox.isolated();
+    let mut invalid = vec![
+        CreateIsolatedSessionAdvancedOptions::default(),
+        advanced(&[]),
+    ];
+    for path in [
+        "", "relative", "//", "/a/", "/a//b", "/./a", "/a/..", "/a\0b",
+    ] {
+        invalid.push(advanced(&[path]));
+        let mut workspace: CreateIsolatedSessionAdvancedOptions = create().into();
+        workspace.workspace.as_mut().unwrap().path = path.into();
+        invalid.push(workspace);
+    }
+    invalid.push(advanced(&["/a", "/a"]));
+    let mut duplicate: CreateIsolatedSessionAdvancedOptions = create().into();
+    duplicate.overlays = advanced(&["/workspace"]).overlays;
+    invalid.push(duplicate);
+    let paths: Vec<String> = (0..17).map(|i| format!("/m{i}")).collect();
+    let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
+    invalid.push(advanced(&refs));
+    let mut combined: CreateIsolatedSessionAdvancedOptions = create().into();
+    combined.overlays = advanced(&refs[..16]).overlays;
+    invalid.push(combined);
+    for mode in [OverlayMode::Rw, OverlayMode::Ro] {
+        for persist in [true, false] {
+            let mut options = advanced(&["/a"]);
+            let overlay = &mut options.overlays[0];
+            overlay.mode = Some(mode.clone());
+            overlay.persist = Some(persist);
+            invalid.push(options);
+        }
+    }
+    let mut uid = advanced(&["/a"]);
+    uid.gid = Some(1);
+    invalid.push(uid);
+    let mut timeout = advanced(&["/a"]);
+    timeout.idle_timeout = Some(Duration::from_millis(1));
+    invalid.push(timeout);
+    for options in invalid {
+        assert!(matches!(
+            service.create_advanced(options.clone()).await,
+            Err(opensandbox::Error::InvalidConfig(_))
+        ));
+        assert!(matches!(
+            service
+                .run_once_advanced("true", options, Default::default())
+                .await,
+            Err(opensandbox::Error::InvalidConfig(_))
+        ));
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), data.requests.recv())
+            .await
+            .is_err()
+    );
+    let mut valid: CreateIsolatedSessionAdvancedOptions = create().into();
+    valid.overlays = advanced(&refs[..15]).overlays;
+    valid.overlays[0].mode = Some(OverlayMode::Rw);
+    valid.overlays[1].mode = Some(OverlayMode::Ro);
+    service.create_advanced(valid).await.unwrap();
+    assert!(data
+        .next()
+        .await
+        .starts_with("POST /route/v1/isolated/session "));
+}
+
+#[tokio::test]
+async fn advanced_run_once_reports_execution_and_cleanup_independently() {
+    for (run_status, delete_status) in [(200, 204), (500, 204), (200, 500), (500, 500)] {
+        let mut data = Server::start(vec![
+            reply(json!({"session_id":"advanced"})),
+            (
+                run_status,
+                "content-type: text/event-stream\r\n".into(),
+                if run_status == 200 {
+                    "data: {\"type\":\"execution_complete\"}\n\n".into()
+                } else {
+                    "failed".into()
+                },
+            ),
+            (delete_status, String::new(), String::new()),
+        ])
+        .await;
+        let sandbox = sandbox(&mut data).await;
+        let result = sandbox
+            .isolated()
+            .run_once_advanced("true", advanced(&["/a"]), Default::default())
+            .await
+            .unwrap();
+        assert_eq!(result.session_id, "advanced");
+        assert_eq!(result.execution.is_ok(), run_status == 200);
+        assert_eq!(result.cleanup.is_ok(), delete_status == 204);
+        assert!(body(&data.next().await).get("workspace").is_none());
+        assert!(data.next().await.contains("/advanced/run "));
+        assert!(data
+            .next()
+            .await
+            .starts_with("DELETE /route/v1/isolated/session/advanced "));
+    }
+}
+
+#[tokio::test]
+async fn cancelled_advanced_run_once_deletes_created_session() {
+    let mut data = Server::start(vec![
+        reply(json!({"session_id":"cancelled"})),
+        (
+            200,
+            "content-type: text/event-stream\r\nx-test-held: true\r\n".into(),
+            "data: {\"type\":\"init\",\"text\":\"run\"}\n\n".into(),
+        ),
+        (204, String::new(), String::new()),
+    ])
+    .await;
+    let sandbox = sandbox(&mut data).await;
+    let task = tokio::spawn(async move {
+        sandbox
+            .isolated()
+            .run_once_advanced("sleep 1000", advanced(&["/"]), Default::default())
+            .await
+    });
+    assert!(body(&data.next().await).get("workspace").is_none());
+    assert!(data.next().await.contains("/cancelled/run "));
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    assert!(data
+        .next()
+        .await
+        .starts_with("DELETE /route/v1/isolated/session/cancelled "));
+}
+
 #[tokio::test]
 async fn cursor_bounds_and_sensitive_errors() {
     let secret = "private-env-command-secret";
