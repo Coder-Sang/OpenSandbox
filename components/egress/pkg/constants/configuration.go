@@ -87,11 +87,29 @@ const (
 	EnvMitmproxyPort             = "OPENSANDBOX_EGRESS_MITMPROXY_PORT"
 	EnvMitmproxyScript           = "OPENSANDBOX_EGRESS_MITMPROXY_SCRIPT"
 	EnvMitmproxyUpstreamTrustDir = "OPENSANDBOX_EGRESS_MITMPROXY_UPSTREAM_TRUST_DIR"
-	EnvMitmproxySslInsecure      = "OPENSANDBOX_EGRESS_MITMPROXY_SSL_INSECURE"
+	// EnvMitmproxyUpstreamExtraCA: path to a PEM file with one or more extra CA
+	// certificates, passed to mitmproxy ssl_verify_upstream_trusted_ca. Additive
+	// with the system/confdir trust, and applies to every mitmproxy upstream TLS
+	// connection (HTTPS proxy and intercepted origins), not only the proxy hop.
+	EnvMitmproxyUpstreamExtraCA = "OPENSANDBOX_EGRESS_MITMPROXY_UPSTREAM_EXTRA_CA"
+	EnvMitmproxySslInsecure     = "OPENSANDBOX_EGRESS_MITMPROXY_SSL_INSECURE"
+	// EnvExperimentalRevisionRuntime enables the internal OSEP-0023
+	// per-mitmdump revision bootstrap path. It is not a public interception mode.
+	EnvExperimentalRevisionRuntime = "OPENSANDBOX_EGRESS_EXPERIMENTAL_REVISION_RUNTIME"
 	// EnvMitmproxyExtraPorts (EXPERIMENTAL): extra TCP dports to intercept,
 	// appended to the always-on 80,443. Comma-separated. May change or be
 	// removed without notice.
 	EnvMitmproxyExtraPorts = "OPENSANDBOX_EGRESS_MITMPROXY_EXTRA_PORTS"
+
+	// EnvUpstreamProxy: chained upstream proxy endpoint ("http://host:port" or
+	// "https://host:port"). When set, the bundled upstream_proxy.py addon is
+	// loaded and all mitm-handled egress is chained through it (fail-closed:
+	// anything that cannot be chained is refused). Empty = disabled.
+	EnvUpstreamProxy = "OPENSANDBOX_EGRESS_UPSTREAM_PROXY"
+	// EnvUpstreamProxyAuth: complete Proxy-Authorization header value sent on
+	// the upstream CONNECT (e.g. "Basic base64(user:pass)"). Requires
+	// EnvUpstreamProxy. Never logged.
+	EnvUpstreamProxyAuth = "OPENSANDBOX_EGRESS_UPSTREAM_PROXY_AUTH"
 
 	// Comma-separated upstream resolvers: literal IP only (optional :port) — no hostnames (see dnsproxy REDIRECT note).
 	EnvDNSUpstream                 = "OPENSANDBOX_EGRESS_DNS_UPSTREAM"

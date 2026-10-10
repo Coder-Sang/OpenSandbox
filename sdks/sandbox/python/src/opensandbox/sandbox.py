@@ -216,6 +216,20 @@ class Sandbox:
         """
         return self._filesystem_service
 
+    def files_with_identity(self, uid: int, gid: int) -> Filesystem:
+        """Return a separate filesystem client running as the given Linux UID/GID.
+
+        Requires identity-aware Execd. Unsupported servers fail without falling
+        back to the default identity. The existing files client is unchanged.
+        """
+        from opensandbox.adapters.filesystem_adapter import FilesystemAdapter
+
+        if not isinstance(self._filesystem_service, FilesystemAdapter):
+            raise NotImplementedError(
+                "The selected filesystem adapter does not support execution identity"
+            )
+        return self._filesystem_service.with_identity(uid, gid)
+
     @property
     def commands(self) -> Commands:
         """
@@ -341,9 +355,11 @@ class Sandbox:
 
     async def renew(self, timeout: timedelta) -> SandboxRenewResponse:
         """
-        Renew the sandbox expiration time to delay automatic termination.
+        Set the sandbox expiration time.
 
         The new expiration time will be set to the current time plus the provided duration.
+        This may shorten or extend the remaining lifetime. The creation-time
+        server timeout limit does not apply.
 
         Args:
             timeout: Duration to add to the current time to set the new expiration

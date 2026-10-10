@@ -20,6 +20,7 @@ from .allocation_summary import AllocationSummary
 from .allocation_summary_mode import AllocationSummaryMode
 from .allocation_summary_state import AllocationSummaryState
 from .create_fsb_template_request import CreateFsbTemplateRequest
+from .create_fsb_template_request_env import CreateFsbTemplateRequestEnv
 from .create_fsb_template_request_format import CreateFsbTemplateRequestFormat
 from .create_fsb_template_request_metadata import CreateFsbTemplateRequestMetadata
 from .create_sandbox_request import CreateSandboxRequest
@@ -35,6 +36,7 @@ from .endpoint import Endpoint
 from .endpoint_headers import EndpointHeaders
 from .error_response import ErrorResponse
 from .fsb_template import FsbTemplate
+from .fsb_template_env import FsbTemplateEnv
 from .fsb_template_format import FsbTemplateFormat
 from .fsb_template_metadata import FsbTemplateMetadata
 from .fsb_template_readiness import FsbTemplateReadiness
@@ -80,6 +82,7 @@ __all__ = (
     "AllocationSummaryMode",
     "AllocationSummaryState",
     "CreateFsbTemplateRequest",
+    "CreateFsbTemplateRequestEnv",
     "CreateFsbTemplateRequestFormat",
     "CreateFsbTemplateRequestMetadata",
     "CreateSandboxRequest",
@@ -95,6 +98,7 @@ __all__ = (
     "EndpointHeaders",
     "ErrorResponse",
     "FsbTemplate",
+    "FsbTemplateEnv",
     "FsbTemplateFormat",
     "FsbTemplateMetadata",
     "FsbTemplateReadiness",

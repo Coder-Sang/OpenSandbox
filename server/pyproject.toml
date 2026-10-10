@@ -86,6 +86,13 @@ include = [
     "LICENSE",
     "opensandbox_server",
 ]
+# The committed FastPath gRPC stubs must ship in the wheel/sdist. Hatchling
+# applies the repo-root .gitignore as VCS excludes with paths relative to this
+# package root, so the repo-root negation (!server/.../generated/) cannot
+# match and the blanket `**/generated/**` pattern would silently drop them.
+artifacts = [
+    "opensandbox_server/services/fast_sandbox/generated/**",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["opensandbox_server"]

@@ -259,6 +259,28 @@ def test_create_maps_disk_resource_to_rootfs_size(service, crs):
     assert spec["machine"] == {"vcpu": "1", "memory": "512Mi"}
 
 
+def test_create_projects_env_to_crd(service, crs):
+    service.create_template(_create_request(env={"LOG_LEVEL": "info", "API_KEY": "k"}))
+    spec = crs.created[-1]["spec"]
+    assert sorted((e["name"], e["value"]) for e in spec["envs"]) == [
+        ("API_KEY", "k"),
+        ("LOG_LEVEL", "info"),
+    ]
+
+    service.create_template(_create_request())
+    assert "envs" not in crs.created[-1]["spec"]
+
+
+def test_create_rejects_invalid_env_names(service):
+    from fastapi import HTTPException
+
+    for name in ["1BAD", "HAS-DASH", "HAS.EQ=VAL", ""]:
+        with pytest.raises(HTTPException) as excinfo:
+            service.create_template(_create_request(env={name: "x"}))
+        assert excinfo.value.status_code == 400
+        assert "env names" in str(excinfo.value.detail).lower()
+
+
 def test_create_rolls_back_row_on_crd_conflict(service, crs, repo):
     crs.crs[("ns-1", "tpl-dup")] = {"metadata": {"name": "tpl-dup", "namespace": "ns-1"}}
 
@@ -393,12 +415,14 @@ def test_routes_template_lifecycle(client, crs):
             "image": "alpine:3.19",
             "publish": "s3://sandbox-images/publish",
             "format": "native",
+            "env": {"LOG_LEVEL": "info"},
             "metadata": {"origin": "test"},
         },
     )
     assert response.status_code == 201, response.text
     body = response.json()
     assert body["status"]["phase"] == "Pending"
+    assert body["env"] == {"LOG_LEVEL": "info"}
     template_id = body["templateId"]
 
     crs.set_status("ns-1", template_id, {"phase": "Succeeded", "manifestRef": "s3://b/m"})
@@ -407,6 +431,7 @@ def test_routes_template_lifecycle(client, crs):
     assert detail.status_code == 200
     assert detail.json()["status"]["phase"] == "Succeeded"
     assert detail.json()["status"]["manifestRef"] == "s3://b/m"
+    assert detail.json()["env"] == {"LOG_LEVEL": "info"}
 
     listing = client.get("/v1/templates", params={"metadata": "origin%3Dtest"})
     assert listing.status_code == 200

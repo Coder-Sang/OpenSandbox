@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import type { ExecdClient } from "../openapi/execdClient.js";
+import { createExecdClient, type ExecdClient } from "../openapi/execdClient.js";
 import { throwOnOpenApiFetchError } from "./openapiError.js";
 import type { SandboxFiles } from "../services/filesystem.js";
 import type { paths as ExecdPaths } from "../api/execd.js";
@@ -33,6 +33,7 @@ import type {
   WriteEntry,
 } from "../models/filesystem.js";
 import { SandboxApiException, SandboxError } from "../core/exceptions.js";
+import { iterateBodyStream } from "../core/streams.js";
 
 function joinUrl(baseUrl: string, pathname: string): string {
   const base = baseUrl.endsWith("/") ? baseUrl.slice(0, -1) : baseUrl;
@@ -222,6 +223,21 @@ function toPermission(e: {
  * - Implements streaming upload/download helpers
  */
 export class FilesystemAdapter implements SandboxFiles {
+  private static readonly MAX_IDENTITY_ID = 4294967294;
+  // Assert that every generated identity route starts with this prefix.
+  private static readonly identityBasePath:
+    Extract<keyof ExecdPaths, `/v1/filesystem/${string}`> extends never
+      ? never
+      : Exclude<
+          Extract<keyof ExecdPaths, `/v1/filesystem/${string}`>,
+          `/v1/filesystem/{uid}/{gid}/${string}`
+        > extends never ? "/v1/filesystem/{uid}/{gid}" : never =
+    "/v1/filesystem/{uid}/{gid}";
+  private static identityPath(uid: number, gid: number): string {
+    return FilesystemAdapter.identityBasePath
+      .replace("{uid}", String(uid))
+      .replace("{gid}", String(gid));
+  }
   private readonly fetch: typeof fetch;
 
   private static readonly Api = {
@@ -246,9 +262,24 @@ export class FilesystemAdapter implements SandboxFiles {
 
   constructor(
     private readonly client: ExecdClient,
-    private readonly opts: FilesystemAdapterOptions
+    private readonly opts: FilesystemAdapterOptions,
+    private readonly identityBaseUrl: string = opts.baseUrl
   ) {
     this.fetch = opts.fetch ?? fetch;
+  }
+
+  withIdentity(uid: number, gid: number): SandboxFiles {
+    for (const [name, value] of [["uid", uid], ["gid", gid]] as const) {
+      if (!Number.isInteger(value) || value < 0 || value > FilesystemAdapter.MAX_IDENTITY_ID) {
+        throw new RangeError(name + " must be an integer between 0 and " + FilesystemAdapter.MAX_IDENTITY_ID);
+      }
+    }
+    const opts = {
+      ...this.opts,
+      baseUrl: this.identityBaseUrl.replace(/\/+$/, "") +
+        FilesystemAdapter.identityPath(uid, gid),
+    };
+    return new FilesystemAdapter(createExecdClient(opts), opts, this.identityBaseUrl);
   }
 
   private parseIsoDate(field: string, v: unknown): Date {
@@ -389,6 +420,7 @@ export class FilesystemAdapter implements SandboxFiles {
       req as unknown as typeof FilesystemAdapter.Api.ReplaceContentsRequest;
     const { error, response } = await this.client.POST("/files/replace", {
       body,
+      parseAs: "text",
     });
     throwOnOpenApiFetchError({ error, response }, "Replace contents failed");
   }
@@ -403,15 +435,33 @@ export class FilesystemAdapter implements SandboxFiles {
     const { data, error, response } = await this.client.POST("/files/replace", {
       params: { query: { verbose: true } },
       body,
+      parseAs: "text",
     });
     throwOnOpenApiFetchError({ error, response }, "Replace contents failed");
 
-    const ok = data as typeof FilesystemAdapter.Api.ReplaceContentsOk | undefined;
-    if (!ok) return [];
-    return Object.entries(ok).map(([path, result]) => ({
-      path,
-      replacedCount: result.replacedCount,
-    }));
+    const text = data?.trim() ?? "";
+    if (!text) return [];
+
+    let ok: typeof FilesystemAdapter.Api.ReplaceContentsOk | undefined;
+    try {
+      ok = JSON.parse(text) as typeof FilesystemAdapter.Api.ReplaceContentsOk;
+    } catch (e) {
+      throw new Error(
+        `Replace contents failed: unexpected response shape (${e instanceof Error ? e.message : String(e)})`
+      );
+    }
+    if (typeof ok !== "object" || ok === null || Array.isArray(ok)) {
+      throw new Error("Replace contents failed: unexpected response shape (expected object)");
+    }
+    return Object.entries(ok).map(([path, result]) => {
+      const replacedCount = (result as { replacedCount?: unknown } | null)?.replacedCount;
+      if (typeof replacedCount !== "number") {
+        throw new Error(
+          `Replace contents failed: unexpected response shape (invalid entry for ${path})`
+        );
+      }
+      return { path, replacedCount };
+    });
   }
 
   async search(entry: SearchEntry): Promise<SearchFilesResponse> {
@@ -610,12 +660,7 @@ export class FilesystemAdapter implements SandboxFiles {
 
     const body = res.body as ReadableStream<Uint8Array> | null;
     if (!body) return;
-    const reader = body.getReader();
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) return;
-      if (value) yield value;
-    }
+    yield* iterateBodyStream(body);
   }
 
   async readFile(

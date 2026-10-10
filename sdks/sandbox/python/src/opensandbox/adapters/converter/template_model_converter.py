@@ -25,6 +25,9 @@ from typing import Literal, cast
 from opensandbox.api.lifecycle.models.create_fsb_template_request import (
     CreateFsbTemplateRequest as ApiCreateTemplateRequest,
 )
+from opensandbox.api.lifecycle.models.create_fsb_template_request_env import (
+    CreateFsbTemplateRequestEnv,
+)
 from opensandbox.api.lifecycle.models.create_fsb_template_request_format import (
     CreateFsbTemplateRequestFormat,
 )
@@ -97,6 +100,7 @@ class TemplateModelConverter:
             if request.readiness is not None
             else UNSET
         )
+        api_env = CreateFsbTemplateRequestEnv.from_dict(request.env) if request.env else UNSET
         return ApiCreateTemplateRequest(
             image=request.image,
             publish=request.publish,
@@ -108,6 +112,7 @@ class TemplateModelConverter:
             entrypoint=(
                 request.entrypoint if request.entrypoint is not None else UNSET
             ),
+            env=api_env,
             metadata=api_metadata,
             readiness=api_readiness,
             format_=(
@@ -168,6 +173,11 @@ class TemplateModelConverter:
                 else None
             ),
             entrypoint=entrypoint,
+            env=(
+                dict(api_template.env.additional_properties)
+                if not isinstance(api_template.env, Unset)
+                else None
+            ),
             metadata=TemplateModelConverter._metadata_to_dict(
                 api_template.metadata
             ),

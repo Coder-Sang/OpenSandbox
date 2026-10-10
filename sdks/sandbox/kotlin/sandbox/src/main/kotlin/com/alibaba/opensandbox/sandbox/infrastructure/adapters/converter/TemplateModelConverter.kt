@@ -49,6 +49,7 @@ internal object TemplateModelConverter {
             publish = this.publish,
             resourceLimits = this.resourceLimits,
             entrypoint = this.entrypoint,
+            env = this.env,
             metadata = this.metadata,
             readiness = this.readiness?.toApiFsbTemplateReadiness(),
             format =
@@ -80,6 +81,7 @@ internal object TemplateModelConverter {
             updatedAt = this.updatedAt,
             resourceLimits = this.resourceLimits,
             entrypoint = this.entrypoint,
+            env = this.env,
             metadata = this.metadata,
             readiness = this.readiness?.toTemplateReadiness(),
         )

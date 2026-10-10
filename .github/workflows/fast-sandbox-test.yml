@@ -1,0 +1,82 @@
+name: Fast Sandbox Integration Tests
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+  pull-requests: read
+  actions: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    uses: ./.github/workflows/detect-changes.yml
+    with:
+      area: fast-sandbox
+
+  integration:
+    name: Integration Env (self-hosted kvm)
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
+    runs-on: kvm
+    timeout-minutes: 180
+    steps:
+      # actions/checkout always executes as the runner user; the script
+      # steps below run as root and leave root-owned files (venv, pycache)
+      # in the workspace, so hand ownership back before every checkout.
+      - name: Reset workspace ownership
+        run: sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE" 2>/dev/null || true
+
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.25'
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Test integration script failure handling
+        # The self-hosted runner's system python3 may still be Python 3.6.
+        run: uv run --no-project --python 3.12 python -m unittest discover -s scripts/tests -p test_fast_sandbox_integration_env.py -v
+
+      - name: Run integration tests
+        run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh up --auto-clean
+
+      - name: Run SDK e2e
+        timeout-minutes: 30
+        run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh sdk-e2e
+
+      # Collect the env's own failure dump ($WORK/logs/failure-*.txt: kind
+      # nodes/pods, controller / firecracker-runtime / fastlet / builder /
+      # server / gateway / RustFS log tails, SandboxTemplates, SandboxPool,
+      # events) plus live status, BEFORE teardown removes the cluster.
+      - name: Collect failure diagnostics
+        if: failure()
+        run: |
+          work="/data/fast-sandbox-env"; [ -d "$work" ] || work="$PWD/.fast-sandbox-env"
+          mkdir -p diagnostics
+          sudo cp -a "$work/logs" "$work/run.log" diagnostics/ 2>/dev/null || true
+          sudo chown -R "$(id -u):$(id -g)" diagnostics || true
+          sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh status \
+            > diagnostics/live-status.txt 2>&1 || true
+
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fast-sandbox-diagnostics-${{ github.run_attempt }}
+          path: diagnostics/
+          retention-days: 7
+
+      - name: Teardown
+        if: always()
+        run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh down

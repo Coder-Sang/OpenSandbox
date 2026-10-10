@@ -44,6 +44,7 @@ import com.alibaba.opensandbox.sandbox.domain.services.Diagnostics
 import com.alibaba.opensandbox.sandbox.domain.services.Egress
 import com.alibaba.opensandbox.sandbox.domain.services.Filesystem
 import com.alibaba.opensandbox.sandbox.domain.services.Health
+import com.alibaba.opensandbox.sandbox.domain.services.IdentityFilesystem
 import com.alibaba.opensandbox.sandbox.domain.services.IsolationService
 import com.alibaba.opensandbox.sandbox.domain.services.Metrics
 import com.alibaba.opensandbox.sandbox.domain.services.Sandboxes
@@ -82,12 +83,13 @@ import java.time.OffsetDateTime
  *     .build()
  *
  * // Use the sandbox
- * sandbox.writeFile("script.py", "print('Hello World')")
- * val result = sandbox.execute("python script.py")
- * println(result.stdout) // Output: Hello World
+ * sandbox.files().writeFile("script.py", "print('Hello World')")
+ * val result = sandbox.commands().run("python script.py")
+ * println(result.logs.stdout.firstOrNull()?.text) // Output: Hello World
  *
  * // Always clean up resources
- * sandbox.terminate()
+ * sandbox.kill()
+ * sandbox.close()
  * ```
  *
  */
@@ -116,6 +118,25 @@ class Sandbox internal constructor(
      * @return Service for filesystem manipulation
      */
     fun files() = fileSystemService
+
+    /**
+     * Returns an independent filesystem client using explicit Linux credentials.
+     * Unsupported servers fail without falling back to the default identity.
+     *
+     * @throws UnsupportedOperationException if the configured filesystem does not support identity scoping
+     * @throws IllegalArgumentException if uid or gid is outside 0..4294967294
+     */
+    fun filesWithIdentity(
+        uid: Long,
+        gid: Long,
+    ): Filesystem {
+        val adapter =
+            fileSystemService as? IdentityFilesystem
+                ?: throw UnsupportedOperationException(
+                    "The selected filesystem adapter does not support execution identity",
+                )
+        return adapter.withIdentity(uid, gid)
+    }
 
     /**
      * Provides access to command execution operations.
@@ -652,10 +673,11 @@ class Sandbox internal constructor(
     }
 
     /**
-     * Gets the current status of this sandbox.
+     * Gets the public endpoint for a sandbox service port.
      *
-     * @return Current sandbox status including state and metadata
-     * @throws SandboxException if status cannot be retrieved
+     * @param port The port number to get the endpoint for
+     * @return Endpoint address and request headers for the service
+     * @throws SandboxException if the endpoint cannot be resolved
      */
     fun getEndpoint(port: Int): SandboxEndpoint {
         return sandboxService.getSandboxEndpoint(id, port, httpClientProvider.config.useServerProxy)
@@ -676,9 +698,9 @@ class Sandbox internal constructor(
     }
 
     /**
-     * Gets the current status of this sandbox.
+     * Gets current resource metrics (CPU/memory) for this sandbox.
      *
-     * @return Current sandbox status including state and metadata
+     * @return Latest reported metrics snapshot
      */
     fun getMetrics(): SandboxMetrics {
         return metricsService.getMetrics(id)
@@ -707,9 +729,11 @@ class Sandbox internal constructor(
     }
 
     /**
-     * Renew the sandbox expiration time to delay automatic termination.
+     * Set the sandbox expiration time.
      *
      * The new expiration time will be set to the current time plus the provided duration.
+     * This may shorten or extend the remaining lifetime. The creation-time
+     * server timeout limit does not apply.
      *
      * @param timeout Duration to add to the current time to set the new expiration
      * @throws SandboxException if the operation fails

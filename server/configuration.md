@@ -68,7 +68,7 @@ Example files in this repository:
 | `port` | integer | `8080` | Listen port (1–65535). |
 | `api_key` | string \| omitted | `null` | If set to a non-empty string, requests must send header `OPEN-SANDBOX-API-KEY` with this value (except documented public routes such as `/health`, `/docs`, `/redoc`). If omitted or empty, API key checks are skipped, but startup now requires explicit risk acknowledgment: interactive TTY confirmation (`YES`) or `OPENSANDBOX_INSECURE_SERVER=YES`. |
 | `eip` | string \| omitted | `null` | Public IP or hostname used as the **host part** when the server returns sandbox endpoint URLs (notably Docker runtime). |
-| `max_sandbox_timeout_seconds` | integer \| omitted | `null` | Upper bound on sandbox TTL in seconds for **create** requests that specify `timeout`. Must be ≥ **60** if set. Omit to disable the server-side cap. |
+| `max_sandbox_timeout_seconds` | integer \| omitted | `null` | Upper bound on sandbox TTL in seconds for **create** requests that specify `timeout`. Does not apply to `renew-expiration` or cap total sandbox lifetime. Must be ≥ **60** if set. Omit to disable the creation-time cap. |
 | `timeout_keep_alive` | integer | `30` | Idle keep-alive timeout (seconds) passed to uvicorn. |
 | `timeout_graceful_shutdown` | integer | `5` | Seconds uvicorn waits for in-flight requests to finish before forcing shutdown. Ensures Ctrl+C terminates promptly even when a long-running operation (e.g. image pull) is in progress. |
 | `limit_concurrency` | integer | `1024` | Maximum concurrent connections before returning 503. Provides backpressure protection under burst load. Set to `0` to disable the cap (TOML cannot express `null`). |
@@ -128,6 +128,7 @@ Configuration for the server-side reverse-proxy routes.
 | `sandbox_binds` | string[] | `[]` | Host bind mounts applied to **every** sandbox container, Docker `-v` syntax (`host:container[:mode]`); prepended to binds derived from a request's `volumes`. |
 | `port_range_min` | integer | `40000` | Lower bound of the host port range used by bridge-mode sandbox port allocation. Must be less than `port_range_max`. Each sandbox needs 2–3 host ports (2 without egress, 3 with egress sidecar). Narrow this range to match your firewall policy — e.g., 100 concurrent sandboxes ≈ 300 ports. |
 | `port_range_max` | integer | `60000` | Upper bound of the host port range. Range must span ≥ 100 ports for reliable allocation. |
+| `publish_host` | string | `"0.0.0.0"` | The host **address** Docker publishes bridge-mode sandbox ports on (the `HostIp` of every port binding, the egress sidecar's included). `0.0.0.0` publishes on every interface of the host. Set an IP to keep sandbox ports (execd, the sandbox HTTP port, the egress API) off public interfaces: `127.0.0.1` when the server runs on the host, or the Docker bridge gateway (e.g. `172.17.0.1`) when the server runs in a container and reaches sandboxes through host-published ports (`host_ip` / `eip` then name that same address for clients). Must be an IPv4 address, not a name (the port probe is IPv4-only). |
 
 ---
 
@@ -138,13 +139,14 @@ If `runtime.type = "kubernetes"` and the `[kubernetes]` table is absent, the ser
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `kubeconfig_path` | string \| omitted | `null` | Path to kubeconfig (expandable, e.g. `~/.kube/config`). In-cluster configs often leave this unset and rely on in-cluster credentials. |
+| `insecure_skip_tls_verify` | boolean | `false` | Skip TLS verification for the Kubernetes API server. Temporary workaround only when in-cluster ServiceAccount CA does not match the apiserver certificate; disable once cluster CA is fixed. |
 | `namespace` | string \| omitted | `null` | Namespace for sandbox workloads. |
 | `workload_provider` | string \| omitted | `null` | One of: **`batchsandbox`**, **`agent-sandbox`**. If omitted, the **first registered** provider is used (currently **`batchsandbox`**). |
 | `batchsandbox_template_file` | string \| omitted | `null` | Path to **BatchSandbox** CR YAML template when `workload_provider = "batchsandbox"`. |
 | `image_pull_policy` | string \| omitted | `"IfNotPresent"` | Image pull policy for the BatchSandbox main container. Values: **`Always`**, **`IfNotPresent`**, **`Never`**. |
 | `sandbox_create_timeout_seconds` | integer | `60` | Max time to wait for a new sandbox to become ready (e.g. IP assigned), in seconds. |
 | `pool_acquisition_timeout_seconds` | integer | `30` | Max cumulative time to wait while Pool capacity prevents allocation. This does not extend `sandbox_create_timeout_seconds`. |
-| `sandbox_create_poll_interval_seconds` | float | `1.0` | Poll interval while waiting for readiness. |
+| `sandbox_create_poll_interval_seconds` | float | `1.0` | Fallback status-check interval when no workload change notification arrives during creation. |
 | `informer_resync_seconds` | integer | `300` | **[Beta]** Full resync period for the informer cache. |
 | `informer_watch_timeout_seconds` | integer | `60` | **[Beta]** Watch stream restart interval. |
 | `read_qps` | float | `0` | K8s API **get/list** rate limit (QPS). **0** = unlimited. |
@@ -239,6 +241,7 @@ Configures the **egress sidecar** image and enforcement mode. The server only at
 | `readiness_timeout_seconds` | float | `30.0` | **Docker only.** Maximum time to wait for the egress sidecar health endpoint to become ready. Must be greater than `0`. |
 | `requests` | map string → string \| omitted | `null` | **Kubernetes only.** Resource requests for the generated egress sidecar. |
 | `limits` | map string → string \| omitted | `null` | **Kubernetes only.** Resource limits for the generated egress sidecar. |
+| `upstream_proxy` | table \| omitted | `null` | `[egress.upstream_proxy]` sub-table (`url`, optional `authorization`, Docker-only `ca_cert_path`, Kubernetes-only `ca_secret_name`) chaining mitmproxy-handled egress through an upstream HTTP(S) CONNECT proxy. Requires `mode = "dns+nft"`. See [Chained upstream proxy](#chained-upstream-proxy). |
 
 ```toml
 [egress]
@@ -260,6 +263,44 @@ When `otlp_endpoint` is configured, the server injects it into every egress side
 - The value is infrastructure config: it is read only from the server config file and is not settable through the create API or per-request `env`.
 - Use a **fully qualified service name or an IP** (e.g. `otel-collector.observability.svc.cluster.local` on Kubernetes). The sidecar's automatic egress allow rule matches the configured host exactly, while the resolver expands partial service names (e.g. `otel-collector.observability`) to FQDNs the rule does not match, so telemetry would be blocked under a default-deny policy.
 - The sidecar exports **delta** temporality; a collector feeding Prometheus/GMP needs the `deltatocumulative` processor.
+
+### Chained upstream proxy
+
+```toml
+[egress]
+image = "opensandbox/egress:v1.1.7"
+mode = "dns+nft"
+
+[egress.upstream_proxy]
+url = "http://proxy.example.com:3128"
+# Optional: complete Proxy-Authorization header value for the upstream CONNECT.
+# authorization = "Basic <base64>"
+# Optional: extra CA bundle trusted in addition to the system roots.
+# Docker: absolute PEM path on the Docker daemon host.
+# ca_cert_path = "/etc/ssl/private-ca/upstream-proxy-ca.pem"
+# Kubernetes: Secret holding the bundle under the fixed key "ca.crt".
+# ca_secret_name = "corp-proxy-ca"
+```
+
+When configured, the server injects `OPENSANDBOX_EGRESS_UPSTREAM_PROXY` (and `OPENSANDBOX_EGRESS_UPSTREAM_PROXY_AUTH` when `authorization` is set) into every egress sidecar, chaining all mitmproxy-handled egress through the proxy. Notes:
+
+- Requires `mode = "dns+nft"`; config loading fails otherwise (the egress sidecar refuses the upstream proxy under `dns`).
+- Applies to Docker and Kubernetes sandboxes created **with** `networkPolicy`; sandboxes without a `networkPolicy` get no egress sidecar and are not chained.
+- Each such create request must enable transparent MITM (`credentialProxy.enabled=true` or env `OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT=true`), or creation is rejected with `400`.
+- `OPENSANDBOX_EGRESS_MITMPROXY_SSL_INSECURE` set to a truthy value (`1`/`true`/`yes`/`y`/`on`) in the request env is rejected while `upstream_proxy` is configured.
+- Fast sandboxes reject `networkPolicy` on create and on policy replace/patch while `upstream_proxy` is configured: the shared-Fastlet egress cannot chain through the proxy. Deleting rules stays available. Pool mode already rejects `networkPolicy`.
+- The endpoint is admin config only — it cannot be set per request, and `OPENSANDBOX_EGRESS_UPSTREAM_PROXY`/`OPENSANDBOX_EGRESS_UPSTREAM_PROXY_AUTH` in request `env` are rejected.
+- `url` must be `http://host[:port]` or `https://host[:port]` (IPv6 literals allowed); credentials in the URL, query, fragment, and non-root paths are rejected at config load, as are control characters and characters outside the URL host charset (e.g. `\`, space, `|`). `%` is allowed only inside a bracketed IPv6 zone ID. Use `authorization` for credentials.
+- `authorization` is injected as a literal env var into the sidecar — visible via `docker inspect` and the Pod spec, same as `OPENSANDBOX_EGRESS_TOKEN`. Protect the config file.
+- Config changes apply to **newly created** sandboxes only; existing sidecars are unaffected.
+- `ca_cert_path` (**Docker only**) is an absolute POSIX path on the Docker daemon host (which may be remote — it is not checked locally) pointing to a PEM bundle with one or more CA certificates; the file is bind-mounted read-only into the egress sidecar only. `:` is rejected because it collides with bind syntax.
+- `ca_secret_name` (**Kubernetes only**) names a Secret holding the PEM bundle under the fixed key `ca.crt`; the Secret is projected as a Pod volume and mounted read-only into the egress sidecar only (other containers never see it).
+- The CA fields are runtime-specific: setting `ca_secret_name` with `runtime.type = "docker"`, or `ca_cert_path` with `runtime.type = "kubernetes"`, fails at config load rather than being silently ignored.
+- A missing Secret/key, unreadable path, or invalid PEM fails closed through runtime/sidecar behavior (the Pod volume or Docker bind fails to set up, or mitmproxy rejects the file) — traffic is never silently chained with reduced verification.
+- The extra CA **augments** the system trust store — it does not replace `/etc/ssl/certs` — and applies globally to **all** mitmproxy upstream TLS verification (the HTTPS proxy connection and intercepted origins), not only the proxy hop.
+- Without a CA field, an `https://` proxy's certificate is verified against the egress image's system trust store, so a private CA needs one of the fields above (or a custom egress image).
+- Data-plane behavior (fail-closed direct-dial guard, UID+IP+port-scoped nft reachability, infra DNS for hostname endpoints) is documented in [`components/egress/docs/mitmproxy-transparent.md`](../components/egress/docs/mitmproxy-transparent.md#6-chain-through-an-upstream-proxy-corporateforward-egress).
+- For runtime compatibility, rotation, verification, and troubleshooting, see [Chained Upstream Proxy Operations](../docs/guides/egress-upstream-proxy.md).
 
 ### IPv6 and egress
 
@@ -355,7 +396,7 @@ snapshot_recovery_interval_seconds = 15
 export OPENSANDBOX_STORE_POSTGRESQL_DSN='postgresql://opensandbox:password@postgres:5432/opensandbox?sslmode=require'
 ```
 
-For Kubernetes configuration, see [Kubernetes Deployment](../docs/kubernetes/deployment.md#use-postgresql-for-server-persistence).
+For Kubernetes configuration, see [Kubernetes Deployment](../docs/deployment/index.md#use-postgresql-for-server-persistence).
 
 ---
 
@@ -374,6 +415,11 @@ Optional **strong isolation** runtimes (gVisor, Kata, Firecracker).
 - If `type` is empty, **`docker_runtime`** and **`k8s_runtime_class`** must be omitted.
 - If `type` is **`firecracker`**, **`k8s_runtime_class`** is **required** (`docker` runtime cannot use Firecracker).
 - If `type` is **`gvisor`** or **`kata`**, at least one of **`docker_runtime`** or **`k8s_runtime_class`** must be set.
+
+One Server process has one `[secure_runtime]` profile; API requests cannot select
+a different runtime class. To offer multiple profiles in one Kubernetes cluster,
+deploy separately addressed Server releases as described in
+[Multiple Runtime Profiles on Kubernetes](../docs/guides/secure-container.md#multiple-runtime-profiles-on-kubernetes).
 
 See [`docs/guides/secure-container.md`](../docs/guides/secure-container.md) for installation and node requirements.
 

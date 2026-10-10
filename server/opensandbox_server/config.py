@@ -26,12 +26,21 @@ import ipaddress
 import logging
 import os
 import re
+import string
 from pathlib import Path
 from typing import Any, ClassVar, Dict, Literal, Optional
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit
 
 from kubernetes.utils.quantity import parse_quantity
-from pydantic import BaseModel, Field, SecretStr, ValidationError, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 try:  # Python 3.11+
     import tomllib  # type: ignore[attr-defined]
@@ -76,6 +85,14 @@ GATEWAY_ROUTE_MODE_URI = "uri"
 
 EGRESS_MODE_DNS = "dns"
 EGRESS_MODE_DNS_NFT = "dns+nft"
+
+# ASCII characters Go's net/url leaves unescaped in the host slot
+# (shouldEscape(c, encodeHost)); the egress component parses
+# OPENSANDBOX_EGRESS_UPSTREAM_PROXY with url.Parse, so the server validator
+# mirrors that host charset exactly. Non-ASCII stays allowed like Go.
+_UPSTREAM_PROXY_HOST_ASCII = frozenset(
+    string.ascii_letters + string.digits + "-._~!$&'()*+,;=:[]<>\""
+)
 
 
 def _is_valid_kubernetes_container_resource_name(name: str) -> bool:
@@ -592,7 +609,8 @@ class ServerConfig(BaseModel):
         default=None,
         ge=60,
         description=(
-            "Maximum allowed sandbox TTL in seconds for requests that specify timeout. "
+            "Maximum allowed sandbox TTL in seconds for create requests that specify timeout. "
+            "Does not apply to renew-expiration requests or cap total sandbox lifetime. "
             "Omit from config to disable the server-side upper bound."
         ),
     )
@@ -616,6 +634,14 @@ class KubernetesRuntimeConfig(BaseModel):
     kubeconfig_path: Optional[str] = Field(
         default=None,
         description="Absolute path to the kubeconfig file used for API authentication.",
+    )
+    insecure_skip_tls_verify: bool = Field(
+        default=False,
+        description=(
+            "Skip TLS certificate verification for the Kubernetes API server. "
+            "Use only as a temporary workaround when in-cluster ServiceAccount CA "
+            "does not match the apiserver certificate; disable once cluster CA is fixed."
+        ),
     )
     informer_resync_seconds: int = Field(
         default=300,
@@ -725,7 +751,7 @@ class KubernetesRuntimeConfig(BaseModel):
     sandbox_create_poll_interval_seconds: float = Field(
         default=1.0,
         gt=0,
-        description="Polling interval in seconds when waiting for a sandbox to become ready after creation.",
+        description="Fallback status-check interval in seconds when no workload change notification arrives during creation.",
     )
     execd_init_resources: Optional["ExecdInitResources"] = Field(
         default=None,
@@ -797,6 +823,175 @@ class StorageConfig(BaseModel):
 
 DEFAULT_EGRESS_DISABLE_IPV6 = True
 
+
+class EgressUpstreamProxyConfig(BaseModel):
+    """Chained upstream CONNECT proxy for the egress sidecar.
+
+    Mirrors the egress component's ``parseUpstreamProxy`` validation so an
+    invalid endpoint fails server startup instead of failing sandbox creation
+    later. Error messages never echo the configured URL: a userinfo URL would
+    otherwise leak credentials into logs.
+    """
+
+    model_config = ConfigDict(hide_input_in_errors=True)
+
+    url: str = Field(
+        ...,
+        description=(
+            "Upstream proxy endpoint (http://host[:port] or https://host[:port]). "
+            "Injected into the egress sidecar as OPENSANDBOX_EGRESS_UPSTREAM_PROXY. "
+            "Credentials, query, fragment, and paths are rejected; use "
+            "authorization for credentials."
+        ),
+        min_length=1,
+    )
+    authorization: Optional[SecretStr] = Field(
+        default=None,
+        description=(
+            "Complete Proxy-Authorization header value sent on the upstream "
+            "CONNECT (e.g. 'Basic <base64>'), injected as "
+            "OPENSANDBOX_EGRESS_UPSTREAM_PROXY_AUTH. Never logged."
+        ),
+    )
+    ca_cert_path: Optional[str] = Field(
+        default=None,
+        description=(
+            "Docker only: absolute POSIX path on the Docker daemon host to a "
+            "PEM CA bundle mounted read-only into the egress sidecar."
+        ),
+    )
+    ca_secret_name: Optional[str] = Field(
+        default=None,
+        description=(
+            "Kubernetes only: Secret containing the upstream CA bundle under "
+            "the fixed ca.crt key; mounted only into the egress sidecar."
+        ),
+    )
+
+    @field_validator("url")
+    @classmethod
+    def validate_url(cls, url: str) -> str:
+        url = url.strip()
+        if not url:
+            raise ValueError("egress.upstream_proxy.url: value is empty")
+        # urlsplit silently strips tab/CR/LF, which Go's parser rejects —
+        # check the raw string first so both sides agree.
+        if any(ord(c) < 0x20 or c == "\x7f" for c in url):
+            raise ValueError(
+                "egress.upstream_proxy.url: control characters are not allowed"
+            )
+        if "://" not in url:
+            raise ValueError(
+                "egress.upstream_proxy.url: missing scheme, "
+                "want http://host:port or https://host:port"
+            )
+        try:
+            parsed = urlsplit(url)
+        except ValueError:
+            raise ValueError("egress.upstream_proxy.url: invalid URL") from None
+        if parsed.scheme not in ("http", "https"):
+            raise ValueError(
+                "egress.upstream_proxy.url: unsupported scheme, want http or https"
+            )
+        if (
+            parsed.username is not None
+            or parsed.password is not None
+            or "@" in parsed.netloc
+        ):
+            raise ValueError(
+                "egress.upstream_proxy.url: userinfo is not allowed, "
+                "use authorization for credentials"
+            )
+        host = parsed.hostname
+        if not host:
+            raise ValueError("egress.upstream_proxy.url: missing host")
+        if "?" in url or "#" in url or parsed.query or parsed.fragment:
+            raise ValueError(
+                "egress.upstream_proxy.url: query and fragment are not allowed"
+            )
+        if parsed.path not in ("", "/"):
+            raise ValueError("egress.upstream_proxy.url: path is not allowed")
+        try:
+            port = parsed.port
+        except ValueError:
+            raise ValueError(
+                "egress.upstream_proxy.url: invalid port, want 1-65535"
+            ) from None
+        if port is not None and not 1 <= port <= 65535:
+            raise ValueError("egress.upstream_proxy.url: invalid port, want 1-65535")
+        # userinfo is already rejected, so a bracketed netloc means the
+        # host is an IPv6 literal where "%<zone>" is legitimate.
+        bracketed = parsed.netloc.startswith("[")
+        if "%" in host and not bracketed:
+            raise ValueError("egress.upstream_proxy.url: invalid host")
+        if any(
+            ord(c) < 0x80 and c != "%" and c not in _UPSTREAM_PROXY_HOST_ASCII
+            for c in host
+        ):
+            raise ValueError("egress.upstream_proxy.url: invalid host")
+        return url
+
+    @field_validator("authorization")
+    @classmethod
+    def validate_authorization(
+        cls, authorization: Optional[SecretStr]
+    ) -> Optional[SecretStr]:
+        if authorization is None:
+            return None
+        secret = authorization.get_secret_value()
+        if not secret.strip():
+            return None
+        if "\r" in secret or "\n" in secret:
+            raise ValueError(
+                "egress.upstream_proxy.authorization must not contain newlines"
+            )
+        return authorization
+
+    @field_validator("ca_cert_path")
+    @classmethod
+    def validate_ca_cert_path(cls, path: Optional[str]) -> Optional[str]:
+        if path is None:
+            return None
+        path = path.strip()
+        if not path:
+            raise ValueError("egress.upstream_proxy.ca_cert_path: value is empty")
+        if "\x00" in path:
+            raise ValueError(
+                "egress.upstream_proxy.ca_cert_path: NUL is not allowed"
+            )
+        # The path lives on the Docker daemon host, which may be remote —
+        # never stat it here. It must be POSIX-absolute because the bind
+        # source is resolved by the daemon (typically Linux); Path.is_absolute
+        # is platform-dependent and would reject "/x/y" when the server itself
+        # runs on Windows. ":" is rejected because it collides with the
+        # "src:dst:mode" bind syntax.
+        if not path.startswith("/") or ":" in path:
+            raise ValueError(
+                "egress.upstream_proxy.ca_cert_path must be an absolute POSIX "
+                "path without ':'"
+            )
+        return path
+
+    @field_validator("ca_secret_name")
+    @classmethod
+    def validate_ca_secret_name(cls, name: Optional[str]) -> Optional[str]:
+        if name is None:
+            return None
+        name = name.strip()
+        if not name or len(name) > 253:
+            raise ValueError(
+                "egress.upstream_proxy.ca_secret_name must be a DNS-1123 subdomain"
+            )
+        if not all(
+            0 < len(label) <= 63 and _KUBERNETES_DNS_LABEL_RE.fullmatch(label)
+            for label in name.split(".")
+        ):
+            raise ValueError(
+                "egress.upstream_proxy.ca_secret_name must be a DNS-1123 subdomain"
+            )
+        return name
+
+
 class EgressConfig(BaseModel):
     image: Optional[str] = Field(
         default=None,
@@ -848,6 +1043,17 @@ class EgressConfig(BaseModel):
             "If both are unset, the resources block is omitted (namespace LimitRange defaults may apply)."
         ),
     )
+    upstream_proxy: Optional[EgressUpstreamProxyConfig] = Field(
+        default=None,
+        description=(
+            "Chained upstream HTTP(S) CONNECT proxy for mitmproxy-handled egress. "
+            "Server-side only; injected as OPENSANDBOX_EGRESS_UPSTREAM_PROXY[_AUTH] "
+            "on every egress sidecar. Sandboxes created with networkPolicy must "
+            "enable transparent MITM (credentialProxy.enabled or env "
+            "OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT=true) or creation is rejected. "
+            'Requires mode = "dns+nft".'
+        ),
+    )
 
     @field_validator("otlp_endpoint")
     @classmethod
@@ -897,6 +1103,15 @@ class EgressConfig(BaseModel):
             limit = limits[resource_name]
             if parse_quantity(request) > parse_quantity(limit):
                 raise ValueError(f"resource request for {resource_name!r} ({request!r}) must not exceed limit ({limit!r})")
+        return self
+
+    @model_validator(mode="after")
+    def validate_upstream_proxy_requires_dns_nft(self) -> EgressConfig:
+        # The egress sidecar refuses the upstream proxy unless
+        # OPENSANDBOX_EGRESS_MODE=dns+nft; fail at config load instead of
+        # crash-looping every sidecar.
+        if self.upstream_proxy is not None and self.mode != EGRESS_MODE_DNS_NFT:
+            raise ValueError('egress.upstream_proxy requires egress.mode = "dns+nft"')
         return self
 
 
@@ -1049,6 +1264,18 @@ class DockerConfig(BaseModel):
             "Each sandbox needs 2–3 host ports (2 without egress, 3 with egress sidecar)."
         ),
     )
+    publish_host: str = Field(
+        default="0.0.0.0",
+        description=(
+            "Host address Docker publishes bridge-mode sandbox ports on (the HostIp of every port "
+            "binding, the egress sidecar's included). The default 0.0.0.0 publishes on every host "
+            "interface. Set an IP address to keep sandbox ports off public interfaces: 127.0.0.1 "
+            "when the server runs on the host, or the Docker bridge gateway (e.g. 172.17.0.1) when "
+            "the server runs in a container and reaches sandboxes through host-published ports. "
+            "Must be an IPv4 address (Docker does not resolve names in port bindings, and the port "
+            "probe is IPv4-only)."
+        ),
+    )
     pids_limit: Optional[int] = Field(
         default=4096,
         ge=1,
@@ -1071,6 +1298,28 @@ class DockerConfig(BaseModel):
             "volumes. Useful for mounting a private CA certificate into all sandboxes."
         ),
     )
+
+    @field_validator("publish_host")
+    @classmethod
+    def validate_publish_host(cls, value: str) -> str:
+        host = (value or "").strip()
+        if not host:
+            return "0.0.0.0"
+        try:
+            parsed = ipaddress.ip_address(host)
+        except ValueError as exc:
+            raise ValueError(
+                f"docker.publish_host must be an IP address (got {value!r}): Docker publishes ports "
+                "on addresses, not names."
+            ) from exc
+        if not isinstance(parsed, ipaddress.IPv4Address):
+            # The port allocator probes with an AF_INET socket: an IPv6 literal would pass here and
+            # then fail every probe (gaierror, not EADDRNOTAVAIL), so say so at config load.
+            raise ValueError(
+                f"docker.publish_host must be an IPv4 address (got {value!r}): the port allocator "
+                "probes with an IPv4 socket."
+            )
+        return host
 
     @model_validator(mode="after")
     def validate_port_range(self) -> "DockerConfig":
@@ -1201,6 +1450,10 @@ class TenantsConfig(BaseModel):
 
 
 class AppConfig(BaseModel):
+    # Config values may be secrets (store dsn, egress upstream proxy
+    # authorization); never echo raw inputs inside validation errors.
+    model_config = ConfigDict(hide_input_in_errors=True)
+
     server: ServerConfig = Field(default_factory=ServerConfig)
     proxy: ProxyConfig = Field(
         default_factory=ProxyConfig,
@@ -1261,6 +1514,16 @@ class AppConfig(BaseModel):
                 )
         else:
             raise ValueError(f"Unsupported runtime type '{self.runtime.type}'.")
+        upstream_proxy = self.egress.upstream_proxy if self.egress else None
+        if upstream_proxy is not None:
+            if self.runtime.type == "docker" and upstream_proxy.ca_secret_name is not None:
+                raise ValueError(
+                    "egress.upstream_proxy.ca_secret_name requires runtime.type = 'kubernetes'"
+                )
+            if self.runtime.type == "kubernetes" and upstream_proxy.ca_cert_path is not None:
+                raise ValueError(
+                    "egress.upstream_proxy.ca_cert_path requires runtime.type = 'docker'"
+                )
         return self
 
 
@@ -1408,6 +1671,7 @@ __all__ = [
     "PostgreSQLStoreConfig",
     "KubernetesRuntimeConfig",
     "EgressConfig",
+    "EgressUpstreamProxyConfig",
     "EGRESS_MODE_DNS",
     "EGRESS_MODE_DNS_NFT",
     "SecureRuntimeConfig",

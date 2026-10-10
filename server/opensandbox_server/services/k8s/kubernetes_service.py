@@ -27,6 +27,7 @@ from datetime import datetime, timezone
 from typing import Optional, Dict, Any
 
 from fastapi import HTTPException, status
+from kubernetes.client import ApiException
 
 from opensandbox_server.extensions import (
     apply_access_renew_extend_seconds_to_mapping,
@@ -50,6 +51,7 @@ from opensandbox_server.config import AppConfig, INGRESS_MODE_GATEWAY, SecureAcc
 from opensandbox_server.services.constants import (
     SANDBOX_ID_LABEL,
     SANDBOX_MANAGED_VOLUMES_LABEL,
+    SANDBOX_TENANT_LABEL,
     SandboxErrorCodes,
 )
 from opensandbox_server.services.endpoint_auth import generate_egress_token, generate_secure_access_token
@@ -82,7 +84,9 @@ from opensandbox_server.services.signing import (
 )
 from opensandbox_server.services.k8s.workload_access import (
     _delete_workload_or_404,
-    _get_workload_or_404,
+    _enforce_tenant_ownership,
+    _get_owned_workload_or_404,
+    _workload_labels,
 )
 from opensandbox_server.services.sandbox_service import SandboxService
 from opensandbox_server.services.validators import (
@@ -105,10 +109,20 @@ from opensandbox_server.services.k8s.client import (
 )
 from opensandbox_server.services.k8s.provider_factory import create_workload_provider
 from opensandbox_server.services.snapshot_restore import resolve_sandbox_image_from_request
-from opensandbox_server.tenants.context import get_current_tenant
+from opensandbox_server.tenants.context import (
+    get_current_tenant,
+    get_observed_namespace,
+    get_resolved_sandbox_ns,
+    remember_resolved_sandbox_ns,
+)
 from opensandbox_server.tenants.provider import TenantProvider
 
 logger = logging.getLogger(__name__)
+
+# A 403 on the cluster-wide LIST means the service account lacks RBAC list
+# permission; that is a deployment property no retry fixes within a window
+# this short, so back off flat (not exponential) and say so once per window.
+_CLUSTER_LOOKUP_FORBIDDEN_BACKOFF_SECONDS = 600.0
 
 
 def _is_namespace_not_found(exc: Exception) -> bool:
@@ -139,6 +153,10 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
         self.namespace = self.app_config.kubernetes.namespace
         self.execd_image = runtime_config.execd_image
         self._tenant_provider: Optional[TenantProvider] = None
+        # Monotonic timestamp of the last RBAC-forbidden cluster-wide lookup;
+        # lookups are skipped until the backoff window elapses. Thread-race
+        # tolerant: a stale read costs at most one extra denied LIST.
+        self._cluster_lookup_forbidden_monotonic: Optional[float] = None
 
         try:
             self.k8s_client = K8sClient(self.app_config.kubernetes)
@@ -198,6 +216,20 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
             return self.namespace
 
         if self._tenant_provider is not None:
+            # Namespace observed by ingress at observed_at (renew-intent
+            # payload). First-hand but possibly stale by processing time:
+            # try it before the tenant scan, and only trust it when a
+            # workload actually exists there — otherwise fall through.
+            observed_ns = get_observed_namespace()
+            if observed_ns and observed_ns != self.namespace:
+                try:
+                    workload = self.workload_provider.get_workload(
+                        sandbox_id=sandbox_id, namespace=observed_ns
+                    )
+                    if workload:
+                        return observed_ns
+                except Exception:
+                    pass
             for entry in self._tenant_provider.list_tenants():
                 if entry.namespace == self.namespace:
                     continue
@@ -209,20 +241,97 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
                         return entry.namespace
                 except Exception:
                     continue
+            return self._find_sandbox_namespace_cluster_wide(sandbox_id)
 
+        # No tenant provider (single-tenant mode): the server owns exactly
+        # its configured namespace. Resolving beyond it could reach sandboxes
+        # of other servers in the cluster, and single-tenant proxy routes
+        # are unauthenticated, so the lookup stays namespace-scoped.
+        return None
+
+    def _find_sandbox_namespace_cluster_wide(self, sandbox_id: str) -> Optional[str]:
+        """Locate a sandbox by its id label across all namespaces.
+
+        Heals the window after a restart when no tenant information is
+        cached (multi-tenant mode only). Requires cluster-wide list
+        permission; a 403 opens a backoff window during which lookups
+        degrade to "not found" (skipped, with one warning per window).
+        """
+        last_forbidden = self._cluster_lookup_forbidden_monotonic
+        if (
+            last_forbidden is not None
+            and time.monotonic() - last_forbidden
+            < _CLUSTER_LOOKUP_FORBIDDEN_BACKOFF_SECONDS
+        ):
+            return None
+        try:
+            selector = f"{SANDBOX_ID_LABEL}={sandbox_id}"
+            workloads = self.workload_provider.list_workloads_all_namespaces(selector)
+            namespaces = {
+                (workload.get("metadata") or {}).get("namespace")
+                for workload in workloads
+            }
+            namespaces.discard(None)
+            if len(namespaces) == 1:
+                return namespaces.pop()
+            if namespaces:
+                # Duplicate sandbox-id labels across namespaces: resolving by
+                # picking one arbitrarily could act on the wrong sandbox.
+                logger.warning(
+                    "cluster-wide lookup for sandbox %s matched %d namespaces "
+                    "(%s); treating as unresolved (duplicate sandbox labels?)",
+                    sandbox_id,
+                    len(namespaces),
+                    ", ".join(sorted(namespaces)),
+                )
+        except ApiException as exc:
+            if exc.status == 403:
+                # Cluster-wide list permission is a deployment property;
+                # re-asking per intent only re-denies.
+                self._cluster_lookup_forbidden_monotonic = time.monotonic()
+                logger.warning(
+                    "cluster-wide sandbox lookup denied (missing RBAC list "
+                    "permission for the service account?); backing off %.0fs; "
+                    "renew intents for sandboxes outside namespace %s will be "
+                    "skipped until access is granted",
+                    _CLUSTER_LOOKUP_FORBIDDEN_BACKOFF_SECONDS,
+                    self.namespace,
+                )
+            else:
+                logger.debug(
+                    "cluster-wide sandbox lookup failed for %s",
+                    sandbox_id,
+                    exc_info=True,
+                )
+            return None
+        except Exception:
+            logger.debug(
+                "cluster-wide sandbox lookup failed for %s",
+                sandbox_id,
+                exc_info=True,
+            )
+            return None
         return None
 
     def _resolve_namespace_for_lookup(self, sandbox_id: str) -> str:
         """Resolve namespace with cross-namespace fallback for background tasks.
 
         When ContextVar has no tenant (renew workers, proxy path), try to
-        locate the sandbox across all known namespaces.
+        locate the sandbox across all known namespaces. A namespace resolved
+        earlier in the same execution flow (e.g. the earlier steps of one
+        renew attempt) is memoized so each step pays for the lookup once.
         """
         tenant = get_current_tenant()
         if tenant:
             return tenant.namespace
+        memo = get_resolved_sandbox_ns(sandbox_id)
+        if memo:
+            return memo
         found = self._find_sandbox_namespace(sandbox_id)
-        return found if found else self.namespace
+        if found:
+            remember_resolved_sandbox_ns(sandbox_id, found)
+            return found
+        return self.namespace
 
     async def _wait_for_sandbox_ready(
         self,
@@ -245,7 +354,7 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
             f"Waiting for sandbox {sandbox_id} to be Running with IP (timeout: {timeout_seconds}s)"
         )
         
-        start_time = time.time()
+        start_time = time.monotonic()
         last_state = None
         last_message = None
         pool_capacity_started_at: float | None = None
@@ -257,120 +366,205 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
             float(timeout_seconds),
         )
         
-        while time.time() - start_time < timeout_seconds:
-            try:
-                workload = await asyncio.to_thread(
-                    self.workload_provider.get_workload,
-                    sandbox_id=sandbox_id,
-                    namespace=self._resolve_namespace(),
+        loop = asyncio.get_running_loop()
+        changed = asyncio.Event()
+        active = True
+
+        pending_workload: Dict[str, Any] | None = None
+        reading_workload = True
+        workload_identity: tuple[str, str] | None = None
+
+        def accept_event(event_type: str, obj: Dict[str, Any], during_read: bool) -> None:
+            nonlocal pending_workload
+            if not active:
+                return
+            metadata = obj.get("metadata") or {}
+            # Never let an event overlapping a GET replace that GET's result.
+            # Deleted/replaced objects must also be resolved by a normal read.
+            pending_workload = (
+                obj
+                if not during_read and not reading_workload
+                and event_type in ("ADDED", "MODIFIED", "SYNC")
+                and metadata.get("resourceVersion")
+                and not metadata.get("deletionTimestamp")
+                and workload_identity is not None
+                and (metadata.get("name"), metadata.get("uid")) == workload_identity
+                else None
+            )
+            changed.set()
+
+        def notify(event_type: str, obj: Dict[str, Any]) -> None:
+            if active:
+                loop.call_soon_threadsafe(accept_event, event_type, obj, reading_workload)
+
+        unsubscribe = None
+        try:
+            unsubscribe = self.workload_provider.subscribe_workload(
+                sandbox_id, self._resolve_namespace(), notify
+            )
+        except Exception as exc:
+            logger.warning(f"Cannot subscribe to sandbox {sandbox_id}; using polling: {exc}")
+
+        async def wait_for_change() -> None:
+            now = time.monotonic()
+            remaining = timeout_seconds - (now - start_time)
+            if pool_capacity_started_at is not None:
+                remaining = min(
+                    remaining,
+                    effective_pool_acquisition_timeout_seconds
+                    - pool_capacity_blocked_seconds
+                    - (now - pool_capacity_started_at),
                 )
+            delay = max(0.0, min(poll_interval_seconds, remaining))
+            if unsubscribe is None:
+                await asyncio.sleep(delay)
+            else:
+                try:
+                    await asyncio.wait_for(changed.wait(), timeout=delay)
+                except asyncio.TimeoutError:
+                    pass
 
-                if not workload:
-                    logger.debug(f"Workload not found yet for sandbox {sandbox_id}")
-                    await asyncio.sleep(poll_interval_seconds)
-                    continue
-                
-                status_info = _normalize_create_status(
-                    self.workload_provider.get_status(workload)
-                )
-                current_state = status_info["state"]
-                current_reason = status_info["reason"]
-                current_message = status_info["message"]
-
-                if current_state != last_state or current_message != last_message:
-                    logger.info(
-                        f"Sandbox {sandbox_id} state: {current_state} - {current_message}"
-                    )
-                    last_state = current_state
-                    last_message = current_message
-
-                if current_state in ("Running", "Allocated"):
-                    return workload
-                if _is_unschedulable_status(status_info):
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail={
-                            "code": SandboxErrorCodes.INVALID_PARAMETER,
-                            "message": (
-                                f"Sandbox {sandbox_id} is unschedulable: "
-                                f"{current_message or current_reason or 'no scheduler details'}"
-                            ),
-                        },
-                    )
-                if current_state == "Failed":
-                    raise HTTPException(
-                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                        detail={
-                            "code": SandboxErrorCodes.K8S_POD_FAILED,
-                            "message": (
-                                f"Sandbox {sandbox_id} failed: "
-                                f"{current_message or current_reason or 'no failure details'}"
-                            ),
-                        },
-                    )
-                if _is_quota_exhausted_status(status_info):
-                    # Quota admission rejection is terminal (controller cannot
-                    # create the Pod until quota is raised) — fail fast instead
-                    # of blind-waiting until POD_READY_TIMEOUT.
-                    raise _build_quota_exceeded_error(
-                        current_message or current_reason or "no quota details"
-                    )
-
-                now = time.time()
-                pool_capacity_exhausted = _is_pool_capacity_exhausted_status(
-                    status_info
-                )
-                if pool_capacity_exhausted:
-                    if pool_capacity_started_at is None:
-                        pool_capacity_started_at = now
-                elif pool_capacity_started_at is not None:
-                    pool_capacity_blocked_seconds += now - pool_capacity_started_at
-                    pool_capacity_started_at = None
-
-                current_pool_capacity_blocked_seconds = pool_capacity_blocked_seconds
-                if pool_capacity_started_at is not None:
-                    current_pool_capacity_blocked_seconds += (
-                        now - pool_capacity_started_at
-                    )
+        try:
+            while time.monotonic() - start_time < timeout_seconds:
                 if (
-                    current_pool_capacity_blocked_seconds
+                    pool_capacity_started_at is not None
+                    and pool_capacity_blocked_seconds
+                    + time.monotonic() - pool_capacity_started_at
                     >= effective_pool_acquisition_timeout_seconds
                 ):
-                    raise self._pool_capacity_exhausted_error(
-                        pool_acquisition_timeout_seconds
+                    raise self._pool_capacity_exhausted_error(pool_acquisition_timeout_seconds)
+                # Clear before reading so changes during the read remain observable.
+                changed.clear()
+                try:
+                    workload = pending_workload
+                    pending_workload = None
+                    if workload is None:
+                        reading_workload = True
+                        try:
+                            workload = await asyncio.to_thread(
+                                self.workload_provider.get_workload,
+                                sandbox_id=sandbox_id,
+                                namespace=self._resolve_namespace(),
+                            )
+                        finally:
+                            reading_workload = False
+                        metadata = workload.get("metadata") if isinstance(workload, dict) else None
+                        workload_identity = (
+                            (metadata["name"], metadata["uid"])
+                            if isinstance(metadata, dict) and metadata.get("name") and metadata.get("uid") else None
+                        )
+
+                    if not workload:
+                        logger.debug(f"Workload not found yet for sandbox {sandbox_id}")
+                        await wait_for_change()
+                        continue
+
+                    status_info = _normalize_create_status(
+                        self.workload_provider.get_status(workload)
+                    )
+                    current_state = status_info["state"]
+                    current_reason = status_info["reason"]
+                    current_message = status_info["message"]
+
+                    if current_state != last_state or current_message != last_message:
+                        logger.info(
+                            f"Sandbox {sandbox_id} state: {current_state} - {current_message}"
+                        )
+                        last_state = current_state
+                        last_message = current_message
+
+                    if current_state in ("Running", "Allocated"):
+                        return workload
+                    if _is_unschedulable_status(status_info):
+                        raise HTTPException(
+                            status_code=status.HTTP_400_BAD_REQUEST,
+                            detail={
+                                "code": SandboxErrorCodes.INVALID_PARAMETER,
+                                "message": (
+                                    f"Sandbox {sandbox_id} is unschedulable: "
+                                    f"{current_message or current_reason or 'no scheduler details'}"
+                                ),
+                            },
+                        )
+                    if current_state == "Failed":
+                        raise HTTPException(
+                            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                            detail={
+                                "code": SandboxErrorCodes.K8S_POD_FAILED,
+                                "message": (
+                                    f"Sandbox {sandbox_id} failed: "
+                                    f"{current_message or current_reason or 'no failure details'}"
+                                ),
+                            },
+                        )
+                    if _is_quota_exhausted_status(status_info):
+                        # Quota admission rejection is terminal (controller cannot
+                        # create the Pod until quota is raised) — fail fast instead
+                        # of blind-waiting until POD_READY_TIMEOUT.
+                        raise _build_quota_exceeded_error(
+                            current_message or current_reason or "no quota details"
+                        )
+
+                    now = time.monotonic()
+                    pool_capacity_exhausted = _is_pool_capacity_exhausted_status(
+                        status_info
+                    )
+                    if pool_capacity_exhausted:
+                        if pool_capacity_started_at is None:
+                            pool_capacity_started_at = now
+                    elif pool_capacity_started_at is not None:
+                        pool_capacity_blocked_seconds += now - pool_capacity_started_at
+                        pool_capacity_started_at = None
+
+                    current_pool_capacity_blocked_seconds = pool_capacity_blocked_seconds
+                    if pool_capacity_started_at is not None:
+                        current_pool_capacity_blocked_seconds += (
+                            now - pool_capacity_started_at
+                        )
+                    if (
+                        current_pool_capacity_blocked_seconds
+                        >= effective_pool_acquisition_timeout_seconds
+                    ):
+                        raise self._pool_capacity_exhausted_error(
+                            pool_acquisition_timeout_seconds
+                        )
+
+                except HTTPException:
+                    raise
+                except Exception as e:
+                    logger.warning(
+                        f"Error checking sandbox {sandbox_id} status: {e}",
+                        exc_info=True
                     )
 
-            except HTTPException:
-                raise
-            except Exception as e:
-                logger.warning(
-                    f"Error checking sandbox {sandbox_id} status: {e}",
-                    exc_info=True
+                await wait_for_change()
+
+            end_time = time.monotonic()
+            elapsed = end_time - start_time
+            if pool_capacity_started_at is not None:
+                pool_capacity_blocked_seconds += end_time - pool_capacity_started_at
+            if (
+                pool_capacity_blocked_seconds
+                >= effective_pool_acquisition_timeout_seconds
+            ):
+                raise self._pool_capacity_exhausted_error(
+                    pool_acquisition_timeout_seconds
                 )
-
-            await asyncio.sleep(poll_interval_seconds)
-
-        end_time = time.time()
-        elapsed = end_time - start_time
-        if pool_capacity_started_at is not None:
-            pool_capacity_blocked_seconds += end_time - pool_capacity_started_at
-        if (
-            pool_capacity_blocked_seconds
-            >= effective_pool_acquisition_timeout_seconds
-        ):
-            raise self._pool_capacity_exhausted_error(
-                pool_acquisition_timeout_seconds
+            raise HTTPException(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                detail={
+                    "code": SandboxErrorCodes.K8S_POD_READY_TIMEOUT,
+                    "message": (
+                        f"Timeout waiting for sandbox {sandbox_id} to be Running with IP. "
+                        f"Elapsed: {elapsed:.1f}s, Last state: {last_state}"
+                    ),
+                },
             )
-        raise HTTPException(
-            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-            detail={
-                "code": SandboxErrorCodes.K8S_POD_READY_TIMEOUT,
-                "message": (
-                    f"Timeout waiting for sandbox {sandbox_id} to be Running with IP. "
-                    f"Elapsed: {elapsed:.1f}s, Last state: {last_state}"
-                ),
-            },
-        )
+
+        finally:
+            active = False
+            if unsubscribe is not None:
+                unsubscribe()
 
     @staticmethod
     def _pool_capacity_exhausted_error(
@@ -861,6 +1055,9 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
                 egress_token_factory=generate_egress_token,
                 secure_access_token_factory=generate_secure_access_token,
             )
+            tenant = get_current_tenant()
+            if tenant is not None:
+                context.labels[SANDBOX_TENANT_LABEL] = tenant.name
             apply_access_renew_extend_seconds_to_mapping(context.annotations, request.extensions)
             apply_extensions_to_mapping(context.annotations, request.extensions)
 
@@ -1112,7 +1309,7 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
     def get_sandbox(self, sandbox_id: str) -> Sandbox:
         try:
             ns = self._resolve_namespace_for_lookup(sandbox_id)
-            workload = _get_workload_or_404(
+            workload = _get_owned_workload_or_404(
                 self.workload_provider,
                 ns,
                 sandbox_id,
@@ -1130,9 +1327,15 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
             namespace=self._resolve_namespace(),
             label_selector=SANDBOX_ID_LABEL,
         )
-        return [
-            _build_sandbox_from_workload(workload, self.workload_provider) for workload in workloads
-        ]
+        tenant = get_current_tenant()
+        sandboxes = []
+        for workload in workloads:
+            if tenant is not None:
+                owner = _workload_labels(workload).get(SANDBOX_TENANT_LABEL)
+                if owner is not None and owner != tenant.name:
+                    continue
+            sandboxes.append(_build_sandbox_from_workload(workload, self.workload_provider))
+        return sandboxes
 
     def list_sandboxes(self, request: ListSandboxesRequest) -> ListSandboxesResponse:
         try:
@@ -1149,10 +1352,15 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
             ) from e
     
     def delete_sandbox(self, sandbox_id: str) -> None:
+        ns = self._resolve_namespace()
+        if get_current_tenant() is not None:
+            # Ownership 404 must not enter the handler below: that path treats
+            # 404 as "workload gone" and sweeps still-live managed PVCs.
+            _get_owned_workload_or_404(self.workload_provider, ns, sandbox_id)
         try:
             _delete_workload_or_404(
                 self.workload_provider,
-                self._resolve_namespace(),
+                ns,
                 sandbox_id,
             )
             logger.info(f"Deleted sandbox: {sandbox_id}")
@@ -1234,7 +1442,12 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
     
     def pause_sandbox(self, sandbox_id: str) -> None:
         try:
-            self.workload_provider.pause_sandbox(sandbox_id, self._resolve_namespace())
+            ns = self._resolve_namespace()
+            if get_current_tenant() is not None:
+                _get_owned_workload_or_404(self.workload_provider, ns, sandbox_id)
+            self.workload_provider.pause_sandbox(sandbox_id, ns)
+        except HTTPException:
+            raise
         except NotImplementedError:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -1272,7 +1485,12 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
 
     def resume_sandbox(self, sandbox_id: str) -> None:
         try:
-            self.workload_provider.resume_sandbox(sandbox_id, self._resolve_namespace())
+            ns = self._resolve_namespace()
+            if get_current_tenant() is not None:
+                _get_owned_workload_or_404(self.workload_provider, ns, sandbox_id)
+            self.workload_provider.resume_sandbox(sandbox_id, ns)
+        except HTTPException:
+            raise
         except NotImplementedError:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -1316,6 +1534,7 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
         )
         if not workload:
             return None
+        _enforce_tenant_ownership(workload, sandbox_id)
         if isinstance(workload, dict):
             annotations = workload.get("metadata", {}).get("annotations") or {}
         else:
@@ -1344,7 +1563,7 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
 
         try:
             ns = self._resolve_namespace_for_lookup(sandbox_id)
-            workload = _get_workload_or_404(
+            workload = _get_owned_workload_or_404(
                 self.workload_provider,
                 ns,
                 sandbox_id,
@@ -1382,7 +1601,7 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
 
     def patch_sandbox_metadata(self, sandbox_id: str, patch: PatchSandboxMetadataRequest) -> Sandbox:
         """Patch sandbox metadata via JSON Merge Patch (RFC 7396). Does not restart the sandbox."""
-        workload = _get_workload_or_404(
+        workload = _get_owned_workload_or_404(
             self.workload_provider,
             self._resolve_namespace(),
             sandbox_id,
@@ -1471,7 +1690,7 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
 
         try:
             ns = self._resolve_namespace_for_lookup(sandbox_id)
-            workload = _get_workload_or_404(
+            workload = _get_owned_workload_or_404(
                 self.workload_provider,
                 ns,
                 sandbox_id,

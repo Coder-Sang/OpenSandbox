@@ -195,6 +195,19 @@ class SandboxSync:
         """
         return self._filesystem_service
 
+    def files_with_identity(self, uid: int, gid: int) -> FilesystemSync:
+        """Return an independent filesystem client using explicit Linux credentials.
+
+        Requires identity-aware Execd; unsupported servers never trigger fallback.
+        """
+        from opensandbox.sync.adapters.filesystem_adapter import FilesystemAdapterSync
+
+        if not isinstance(self._filesystem_service, FilesystemAdapterSync):
+            raise NotImplementedError(
+                "The selected filesystem adapter does not support execution identity"
+            )
+        return self._filesystem_service.with_identity(uid, gid)
+
     @property
     def commands(self) -> CommandsSync:
         """
@@ -320,9 +333,11 @@ class SandboxSync:
 
     def renew(self, timeout: timedelta) -> SandboxRenewResponse:
         """
-        Renew the sandbox expiration time to delay automatic termination.
+        Set the sandbox expiration time.
 
         The new expiration time will be set to the current time plus the provided duration.
+        This may shorten or extend the remaining lifetime. The creation-time
+        server timeout limit does not apply.
 
         Args:
             timeout: Duration to add to the current time to set the new expiration
@@ -709,17 +724,23 @@ class SandboxSync:
                 # Template-backed (fsb) sandboxes have no sandbox-side egress
                 # sidecar: policy operations go through the lifecycle control
                 # plane.
-                execd_endpoint = budget.endpoint_sync(lambda: sandbox_service.get_sandbox_endpoint(
-                    response.id, DEFAULT_EXECD_PORT, config.use_server_proxy
-                ))
+                execd_endpoint = budget.endpoint_sync(
+                    lambda: sandbox_service.get_sandbox_endpoint(
+                        response.id, DEFAULT_EXECD_PORT, config.use_server_proxy
+                    )
+                )
                 egress_service = factory.create_network_policy_service(response.id)
             else:
-                execd_endpoint = budget.endpoint_sync(lambda: sandbox_service.get_sandbox_endpoint(
-                    response.id, DEFAULT_EXECD_PORT, config.use_server_proxy
-                ))
-                egress_endpoint = budget.endpoint_sync(lambda: sandbox_service.get_sandbox_endpoint(
-                    response.id, DEFAULT_EGRESS_PORT, config.use_server_proxy
-                ))
+                execd_endpoint = budget.endpoint_sync(
+                    lambda: sandbox_service.get_sandbox_endpoint(
+                        response.id, DEFAULT_EXECD_PORT, config.use_server_proxy
+                    )
+                )
+                egress_endpoint = budget.endpoint_sync(
+                    lambda: sandbox_service.get_sandbox_endpoint(
+                        response.id, DEFAULT_EGRESS_PORT, config.use_server_proxy
+                    )
+                )
                 # The server is authoritative about the runtime backing: for
                 # fsb- prefixed sandboxes it reports `template` even when the
                 # create used a snapshotId (a restore boots the template's
@@ -771,7 +792,7 @@ class SandboxSync:
             )
 
             return sandbox
-        except Exception as e:
+        except BaseException as e:
             report_sandbox_create_metric(
                 config,
                 sandbox_id=sandbox_id,
@@ -785,9 +806,14 @@ class SandboxSync:
                         f"Sandbox creation failed during initialization. Attempting to terminate zombie sandbox: {sandbox_id}"
                     )
                     sandbox_service.kill_sandbox(sandbox_id)
-                except Exception:
-                    pass
+                except Exception as cleanup_ex:
+                    logger.error(
+                        f"Failed to clean up sandbox {sandbox_id} after creation failure",
+                        exc_info=cleanup_ex,
+                    )
             config.close_transport_if_owned()
+            if not isinstance(e, Exception):
+                raise
             if isinstance(e, SandboxException):
                 raise
             raise SandboxInternalException(
@@ -835,9 +861,11 @@ class SandboxSync:
         try:
             sandbox_service = factory.create_sandbox_service()
             budget = ReadinessBudget(connect_timeout, health_check_polling_interval)
-            execd_endpoint = budget.endpoint_sync(lambda: sandbox_service.get_sandbox_endpoint(
-                sandbox_id, DEFAULT_EXECD_PORT, config.use_server_proxy
-            ))
+            execd_endpoint = budget.endpoint_sync(
+                lambda: sandbox_service.get_sandbox_endpoint(
+                    sandbox_id, DEFAULT_EXECD_PORT, config.use_server_proxy
+                )
+            )
             origin = execd_endpoint.origin or SandboxOrigin.UNKNOWN
             if origin == SandboxOrigin.TEMPLATE:
                 # Template-backed (fsb) sandboxes have no sandbox-side egress
@@ -845,9 +873,11 @@ class SandboxSync:
                 # plane, and the egress sidecar endpoint is never resolved.
                 egress_service = factory.create_network_policy_service(sandbox_id)
             else:
-                egress_endpoint = budget.endpoint_sync(lambda: sandbox_service.get_sandbox_endpoint(
-                    sandbox_id, DEFAULT_EGRESS_PORT, config.use_server_proxy
-                ))
+                egress_endpoint = budget.endpoint_sync(
+                    lambda: sandbox_service.get_sandbox_endpoint(
+                        sandbox_id, DEFAULT_EGRESS_PORT, config.use_server_proxy
+                    )
+                )
                 egress_service = factory.create_egress_service(egress_endpoint)
 
             sandbox = cls(
@@ -926,9 +956,11 @@ class SandboxSync:
             sandbox_service.resume_sandbox(sandbox_id)
 
             budget = ReadinessBudget(resume_timeout, health_check_polling_interval)
-            execd_endpoint = budget.endpoint_sync(lambda: sandbox_service.get_sandbox_endpoint(
-                sandbox_id, DEFAULT_EXECD_PORT, config.use_server_proxy
-            ))
+            execd_endpoint = budget.endpoint_sync(
+                lambda: sandbox_service.get_sandbox_endpoint(
+                    sandbox_id, DEFAULT_EXECD_PORT, config.use_server_proxy
+                )
+            )
             origin = execd_endpoint.origin or SandboxOrigin.UNKNOWN
             if origin == SandboxOrigin.TEMPLATE:
                 # Template-backed (fsb) sandboxes have no sandbox-side egress
@@ -936,9 +968,11 @@ class SandboxSync:
                 # plane, and the egress sidecar endpoint is never resolved.
                 egress_service = factory.create_network_policy_service(sandbox_id)
             else:
-                egress_endpoint = budget.endpoint_sync(lambda: sandbox_service.get_sandbox_endpoint(
-                    sandbox_id, DEFAULT_EGRESS_PORT, config.use_server_proxy
-                ))
+                egress_endpoint = budget.endpoint_sync(
+                    lambda: sandbox_service.get_sandbox_endpoint(
+                        sandbox_id, DEFAULT_EGRESS_PORT, config.use_server_proxy
+                    )
+                )
                 egress_service = factory.create_egress_service(egress_endpoint)
 
             sandbox = cls(

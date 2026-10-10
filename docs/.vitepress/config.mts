@@ -171,11 +171,19 @@ export default defineConfig({
               link: "/architecture/fast-sandbox/scheduling",
             },
             { text: "Networking", link: "/architecture/fast-sandbox/networking" },
+            {
+              text: "Pause, Resume, and Snapshots",
+              link: "/architecture/fast-sandbox/checkpoints",
+            },
             { text: "High Availability", link: "/architecture/fast-sandbox/ha" },
             { text: "Storage", link: "/architecture/fast-sandbox/storage" },
             {
               text: "Firecracker",
               link: "/architecture/fast-sandbox/firecracker",
+            },
+            {
+              text: "Performance",
+              link: "/architecture/fast-sandbox/performance",
             },
           ],
         },
@@ -189,6 +197,10 @@ export default defineConfig({
               text: "Kubernetes Deployment",
               link: "/deployment/",
             },
+            {
+              text: "ACK Deployment",
+              link: "/deployment/ack",
+            },
           ],
         },
       ],
@@ -201,11 +213,20 @@ export default defineConfig({
           items: [
             { text: "Overview", link: "/guides/" },
             { text: "Credential Vault", link: "/guides/credential-vault" },
+            {
+              text: "Chained Upstream Proxy",
+              link: "/guides/egress-upstream-proxy",
+            },
             { text: "Secure Access", link: "/guides/secure-access" },
             { text: "Secure Container", link: "/guides/secure-container" },
             { text: "Multi-Tenancy", link: "/guides/multi-tenancy" },
             { text: "Isolation Sessions", link: "/guides/isolation-sessions" },
             { text: "Pause & Resume", link: "/guides/pause-resume" },
+            {
+              text: "Kubernetes Resume Benchmark",
+              link: "/guides/kubernetes-resume-benchmark",
+            },
+            { text: "Pod Provision Failure Recovery", link: "/guides/pod-recovery" },
             {
               text: "QEMU VMState Snapshots",
               link: "/guides/qemu-vmstate-snapshots",
@@ -216,6 +237,10 @@ export default defineConfig({
             },
             { text: "Lifecycle Hooks", link: "/guides/lifecycle-hooks" },
             { text: "Windows Sandbox", link: "/guides/windows-sandbox" },
+            {
+              text: "Node Agent Configuration",
+              link: "/guides/node-agent",
+            },
           ],
         },
       ],
@@ -225,7 +250,10 @@ export default defineConfig({
       "/api/": [
         {
           text: "API Reference",
-          items: [{ text: "OpenAPI Specs", link: "/api/" }],
+          items: [
+            { text: "OpenAPI Specs", link: "/api/" },
+            { text: "Implementation Compatibility", link: "/api/implementation-compatibility" },
+          ],
         },
       ],
 
@@ -243,13 +271,14 @@ export default defineConfig({
             { text: "Claude Code", link: "/examples/claude-code" },
             { text: "Gemini CLI", link: "/examples/gemini-cli" },
             { text: "Codex CLI", link: "/examples/codex-cli" },
+            { text: "Apply Model Patches", link: "/examples/apply-patch" },
             { text: "OpenCode", link: "/examples/opencode" },
             { text: "Qwen Code", link: "/examples/qwen-code" },
             { text: "Kimi CLI", link: "/examples/kimi-cli" },
             { text: "LangGraph", link: "/examples/langgraph" },
             { text: "Google ADK", link: "/examples/google-adk" },
             { text: "OpenClaw", link: "/examples/openclaw" },
-            { text: "NullClaw", link: "/examples/nullclaw" },
+            { text: "DeerFlow", link: "/examples/deer-flow" },
           ],
         },
         {
@@ -267,6 +296,7 @@ export default defineConfig({
           collapsed: false,
           items: [
             { text: "Code Interpreter", link: "/examples/code-interpreter" },
+            { text: "Scheduled Client Pool", link: "/examples/client-pool-schedule" },
             { text: "AIO Sandbox", link: "/examples/aio-sandbox" },
             { text: "Agent Sandbox", link: "/examples/agent-sandbox" },
             { text: "Windows", link: "/examples/windows" },
@@ -289,6 +319,10 @@ export default defineConfig({
             {
               text: "Docker OSSFS Volume",
               link: "/examples/docker-ossfs-volume-mount",
+            },
+            {
+              text: "rclone Volume Mount",
+              link: "/examples/rclone-volume-mount",
             },
             {
               text: "Kubernetes PVC",

@@ -27,7 +27,7 @@ Egress is how a sandbox gets a network policy instead of open internet access. I
 
 **Layer 2 — Network (`dns+nft` mode).** nftables drops everything not explicitly allowed. Allowed traffic passes by static rule or by DNS-learned address sets: a resolved IP receives a bounded lease (with a grace window for active TCP connections), so "allowed" never silently becomes "allowed forever". UDP and QUIC flows rely on DNS lease timing alone.
 
-**Precedence.** First matching rule wins, in this order: platform `deny.always`, platform `allow.always`, then your policy — so the platform's deny always beats your allow. The overlays live in files inside the sidecar image and hot-reload every minute; your policy is set per sandbox and can be mutated at runtime (add, replace, remove by target) through the API the SDKs expose.
+**Precedence.** First matching rule wins, in this order: platform `deny.always`, platform `allow.always`, then your policy — so the platform's deny always beats your allow. The overlays live in files inside the sidecar image and hot-reload every minute. A reload publishes the parsed pair only after the corresponding nftables static policy is accepted; parse or apply failures keep the active in-memory rules. Failures remain eligible for retry unless the experimental revision runtime requires recovery, as described below. Your policy is set per sandbox and can be mutated at runtime (add, replace, remove by target) through the API the SDKs expose.
 
 ## Design decisions
 
@@ -47,6 +47,106 @@ Layers 1 and 2 decide *whether* a connection may happen; the transparent MITM la
 
 Status: **experimental but production-usable**. The interception, credential-injection, and CA-delivery mechanism is complete and runs in production settings; what remains experimental is the configuration surface — extra ports and diagnostic switches may still change between releases.
 
+::: warning Internal OSEP-0023 bootstrap gate
+`OPENSANDBOX_EGRESS_EXPERIMENTAL_REVISION_RUNTIME=true` is a development-only,
+sidecar-profile gate for the OSEP-0023 revision protocol. Each mitmdump launch
+or restart receives a fresh authenticated process session and must acknowledge
+the current in-memory Vault snapshot (or the authoritative initial empty state)
+before health becomes ready. The default is off.
+
+The authenticated IPC backend jointly installs the immutable snapshot and its
+credential-free TLS selector view. Its connection and request admission remain
+disabled for the process lifetime, so install acknowledgements and active-revision
+readback confirm coherent state only. They do not report transport drain or
+completion of a public Vault mutation. Shutdown fences both views together.
+
+This gate does **not** enable credential-bound TLS selection. Existing traffic
+still uses intercept-all behavior and the conditional active-Vault lookup;
+connection fencing, Fast Sandbox, and the public `interceptionMode` contract are
+not wired to the revision protocol yet. To prevent the acknowledged bootstrap
+snapshot from diverging from the in-memory Vault, `POST`, `PATCH`, and `DELETE`
+on `/credential-vault` return `503` while this internal gate is enabled. An
+internal Go transaction owner now coordinates candidate installation and local
+Vault finalization, including fail-closed cleanup of the exact process generation
+on unresolved outcomes. It is not connected to these HTTP handlers and does not
+change the gate or provide transport-drain acknowledgement.
+
+The experimental lifecycle also keeps an authoritative policy base and a
+private bootstrap ticket under the shared policy/Vault barrier. Initial startup
+and automatic child restart use the same final check: the captured policy base,
+Store and Vault mutation identity must still be current, the exact child/session
+must still belong to the pending attempt, and recovery must not be required.
+Snapshot installation or listener availability alone cannot make health ready.
+Policy or always-rule publication, including replacement with identical rules,
+and Vault changes invalidate an older capture. A rejected attempt stops and reaps
+only its own child before closing its session; a clean restart can capture fresh
+state and recover. Initial startup also retries a stale publication with a fresh
+capture, up to three total launch attempts, so an immediate always-rule reload
+can settle without forcing the sidecar to exit. Redirect and CA preparation run
+once. Other startup errors, cancellation, shutdown, and recovery-required state
+stop startup; exhausting the stale-attempt limit leaves health not-ready.
+
+If experimental policy processing attempts a policy-file or nft update and then
+fails with an uncertain outcome, or session cleanup cannot be confirmed, the Go
+owner latches `recovery-required`. Health stays not-ready, and internal candidate
+preparation, Vault mutation ownership and new bootstrap publication are blocked.
+Parsing or validation errors before external effects, and ordinary clean child
+crashes, do not set this latch. Shutdown and teardown remain available. The first
+recovery reason remains sticky for that Go process incarnation; successful
+readback, listener checks and ordinary child restarts cannot clear it. There is
+no reset API in this increment.
+
+In the ordinary sidecar's experimental revision runtime, entering recovery also
+synchronously freezes runtime writes in the same nft Manager. A terminal static
+apply error freezes that Manager before releasing its lock, starting with the
+first startup apply; a successful missing-table fallback remains a success and
+does not freeze it. Policy-file persistence and session-cleanup failures freeze
+it through the recovery owner. The owner publishes the health and bootstrap
+restrictions before waiting for an already admitted nft writer, so `/healthz`
+can return 503 while that writer drains. The write-admission boundary is the
+atomic closure of admission, before waiting for the Manager lock. Queued and
+new writers check that gate after acquiring the lock and cannot enter while
+recovery waits. An operation admitted before the gate closes may finish its nft
+update and associated state publication; the freeze call returns only after
+that operation has drained.
+
+The freeze covers six runtime paths: static policy replacement (`ApplyStatic`),
+direct dynamic IP additions (`AddResolvedIPs`), DNS answer
+publication (`AddResolvedDomain`), late domain-refresh results
+(`applyDomainRefresh`), active TCP lease renewal, and upstream proxy address
+updates (`AddUpstreamProxyIPs`). DNS queries already in flight may complete,
+but their results cannot write rules or republish old authorization state.
+Stopping lease renewal can reduce workload availability; DNS-learned upstream
+proxy addresses can expire and cause later proxy connections to fail. Existing
+connections are not necessarily disconnected by the freeze.
+
+There is no unfreeze operation. Explicit shutdown `RemoveEnforcement` can still
+delete the nft table, whether cleanup succeeds or fails, and never clears the
+Manager's frozen state. This does not provide a packet fence: existing rules,
+leased addresses and established connections may still allow traffic, and
+teardown may remove enforcement. The freeze does not survive process restart,
+roll back unknown external effects, or add a hard shutdown deadline. Legacy
+sidecar and Fast Sandbox behavior are unchanged; dns-only recovery keeps its
+existing readiness behavior without requiring an nft Manager.
+
+Kernel write-admission validation uses
+`TestNftQuiescenceAfterCommittedStaticError` in a separate Linux network
+namespace. It commits a new ruleset through the real nft runner before injecting
+an error, then checks that all six runtime paths leave the new static policy and
+empty dynamic/upstream sets unchanged. It requires `nft`, `unshare`, and
+permissions to create a network namespace and operate nftables. The privileged
+egress CI explicitly selects it alongside `TestDynamicElementRenewal` with
+`OPENSANDBOX_NFT_TEST=1`; missing prerequisites fail the enabled tests. Ordinary
+Go tests skip kernel validation when that variable is unset, so their success
+does not establish kernel behavior or packet isolation.
+
+This state is in memory only. Readiness is not a network-traffic fence, and this
+increment provides no atomic policy-file/nft rollback, dynamic DNS-state recovery
+or whole-process crash durability. Restarting the entire sidecar loses the latch
+and is not a verified safe recovery procedure. Active policy epochs remain zero;
+legacy policy success responses are not revision transaction acknowledgements.
+:::
+
 **Trust is delivered, not disabled.** The sidecar exports its CA, and the sandbox bootstrap installs it into the system, NSS, and JDK trust stores on a best-effort basis — clients keep certificate verification on (`curl` without `-k`), and traffic stays encrypted end-to-end from the sandbox's point of view. Images that run Chromium-family browsers should ship the native `certutil` package so the per-user NSS store can be updated.
 
 **What it enables:**
@@ -55,6 +155,10 @@ Status: **experimental but production-usable**. The interception, credential-inj
 - **TLS-level observability** — optional request-level outcome metrics (decrypt / passthrough) for targeted diagnostic windows.
 
 **Extendable at L7: custom mitmproxy addons.** The interception layer is not closed. The sidecar always loads its bundled system addon first, then any additional mitmproxy addons listed — comma-separated — in `OPENSANDBOX_EGRESS_MITMPROXY_SCRIPT`, in the order given. Addons are standard mitmproxy scripts with access to the full L7 hook surface: hostname, HTTP method, URI path, headers, and bodies of every intercepted request and response. Operators can therefore build a custom egress image that adds arbitrary L7 policies on top of the built-in FQDN and credential machinery — fine-grained hostname, method, URI, or header filtering, custom header injection, request rewriting — as ordinary Python addons. The system addon keeps its position ahead of user addons, so the built-in behavior is fully in place before any custom logic runs.
+
+**Chained upstream proxy.** Setting `OPENSANDBOX_EGRESS_UPSTREAM_PROXY` to `http://host[:port]` or `https://host[:port]` on the egress container chains all mitmproxy-handled egress through that proxy via `CONNECT`, optionally with `OPENSANDBOX_EGRESS_UPSTREAM_PROXY_AUTH` (a complete `Proxy-Authorization` header value). The endpoint accepts only a host and optional port (or a single `/` path); credentials, query, fragment, and other paths are rejected, and validation errors do not include the supplied URL. The host must be a literal IP or a dotted domain name — a dotless name expands differently through the pod resolver's DNS search list than through the egress's direct query, so the containment sets could miss the address actually dialed. The `CONNECT` authority is the SNI/Host-derived FQDN when known. This is fail closed: pass-through flows that cannot be chained (no-SNI, `ignore_hosts`/`tcp_hosts`/`udp_hosts` matches, UDP) are refused rather than sent direct. Chaining requires transparent MITM; outside the fast-sandbox profile it also requires `dns+nft` enforcement, and invalid combinations fail startup before the proxy hostname is registered for infrastructure DNS. Under `dns+nft`, the proxy endpoint is reachable only from the mitmproxy process (UID-, IP-, and port-scoped nft rules), never through the sandbox allow sets; hostname endpoints resolve through an infrastructure DNS path that bypasses sandbox policy evaluation. Literal proxy IPs remain permanently seeded in those scoped sets; DNS-learned addresses use explicit bounded TTLs. On Docker and Kubernetes, administrators configure it via the server's `[egress.upstream_proxy]` section — see [server configuration](https://github.com/opensandbox-group/OpenSandbox/blob/main/server/configuration.md#egress). The same section can deliver an extra CA bundle (a Docker host PEM path or a Kubernetes Secret mounted read-only into the egress sidecar only) that mitmproxy trusts in addition to — never instead of — the system roots, for every upstream TLS verification. For configuration, runtime, rotation, and troubleshooting procedures, see [Chained Upstream Proxy Operations](/guides/egress-upstream-proxy).
+
+Under the fast-sandbox profile the same chaining applies to the shared mitmproxy, with containment adapted to the source-IP enforcement model: the proxy endpoint is dropped profile-wide in the shared dispatch chain (forward and input paths, ahead of the per-subject rules), so no subject policy — default-allow included — can CONNECT the proxy directly, while the locally generated mitmproxy dial is unaffected. A hostname endpoint is registered as an infrastructure domain on the shared DNS proxy so its answers never feed the dynamic allow sets; the shared mitmdump resolves the name through the fastlet pod's own resolver, so it must be resolvable via cluster DNS. Because the shared DNS proxy's forward upstreams and the pod resolver can return different address sets (split-horizon or operator-configured DNS), the egress queries both authorities concurrently and seeds the containment drop sets with the union. Drop elements are permanent (no kernel timeout): containment persists through egress downtime. An address is pruned only after it is absent from two successful refreshes of both authorities; a sandbox DNS lookup renews its retention. Partial resolver failures are logged and any returned addresses are added without pruning existing elements. Startup resolves and seeds the in-memory addresses with bounded retries **before resetting the nft table**. Both authorities must complete successfully and their union must be nonempty; otherwise startup fails and the previous kernel table is left intact. The reset installs the seeded addresses atomically, and nft updates have a separate timeout from DNS resolution. On Docker and Kubernetes sidecar deployments administrators configure the server's `[egress.upstream_proxy]` section; fast-sandbox deployments set the two environment variables on the fastlet pod's egress container directly.
 
 **Scope notes:**
 
@@ -86,7 +190,7 @@ Both layers rewrite outbound traffic in the same namespace, so per-sandbox polic
 
 ## Shutdown
 
-On shutdown, the sidecar keeps DNS and network rules working while in-flight deliveries finish (a bounded window), then removes its network rules and flushes telemetry. Delivery is best effort — forced termination can drop events. Under Docker, deletion gives the sidecar a 9-second stop budget before forced termination; see [Docker deletion](/architecture/control-plane/server#docker-deletion). A lightweight supervisor restarts the sidecar on crash with exponential backoff and a crash-loop breaker, and cleans stale redirect state before a fresh start.
+On shutdown, the sidecar keeps DNS and network rules working while in-flight deliveries finish (a bounded window), then removes its network rules and flushes telemetry. Delivery is best effort — forced termination can drop events. Under Docker, deletion gives the sidecar a 9-second stop budget before forced termination. A lightweight supervisor restarts the sidecar on crash with exponential backoff and a crash-loop breaker, and cleans stale redirect state before a fresh start.
 
 ## Observability (OpenTelemetry)
 

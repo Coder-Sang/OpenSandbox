@@ -110,6 +110,7 @@ from opensandbox_server.services.helpers import (
     matches_filter,
     parse_timestamp,
     split_egress_env,
+    validate_upstream_proxy_request,
 )
 from opensandbox_server.services.docker.ossfs_mixin import OSSFSMixin
 from opensandbox_server.services.sandbox_service import SandboxService
@@ -651,8 +652,8 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
                 },
             ) from e
 
-        pvc_inspect_cache, auto_created_volumes = self._validate_volumes(request)
         sandbox_id, created_at, expires_at = self._prepare_creation_context(request)
+        pvc_inspect_cache, auto_created_volumes = self._validate_volumes(request)
         loop = asyncio.get_running_loop()
         future: asyncio.Future[CreateSandboxResponse] = loop.create_future()
 
@@ -665,6 +666,18 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
                 )
                 loop.call_soon_threadsafe(future.set_result, result)
             except BaseException as exc:
+                # _provision_sandbox only removes these when it fails inside its
+                # main try block. Earlier failures (the image pull, request
+                # checks) would leak them, and delete_sandbox never runs for a
+                # sandbox that was never created. Removal is idempotent, and a
+                # cleanup error must not keep exc from reaching the caller.
+                try:
+                    self._cleanup_managed_volumes(sandbox_id, auto_created_volumes)
+                except Exception as cleanup_exc:  # noqa: BLE001
+                    logger.warning(
+                        f"sandbox={sandbox_id} | failed to clean up volumes "
+                        f"after create failure: {cleanup_exc}"
+                    )
                 try:
                     loop.call_soon_threadsafe(future.set_exception, exc)
                 except RuntimeError:
@@ -726,6 +739,12 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
             raise ValueError(
                 f"'{OPENSANDBOX_EGRESS_MITMPROXY_SSL_INSECURE}' cannot be set when credential proxy is enabled"
             )
+        validate_upstream_proxy_request(
+            self.app_config.egress,
+            has_network_policy=bool(request.network_policy),
+            credential_proxy_enabled=credential_proxy_enabled,
+            egress_env=egress_env or {},
+        )
 
         if egress_env and not request.network_policy:
             dropped_keys = sorted(egress_env.keys())
@@ -798,7 +817,12 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
 
                 egress_token = generate_egress_token()
                 labels[SANDBOX_EGRESS_AUTH_TOKEN_METADATA_KEY] = egress_token
-                sidecar_port_bindings = allocate_port_bindings([*exposed_ports, "18080"], min_port=self.app_config.docker.port_range_min, max_port=self.app_config.docker.port_range_max)
+                sidecar_port_bindings = allocate_port_bindings(
+                    [*exposed_ports, "18080"],
+                    min_port=self.app_config.docker.port_range_min,
+                    max_port=self.app_config.docker.port_range_max,
+                    publish_host=self.app_config.docker.publish_host,
+                )
                 reserved_port_bindings = sidecar_port_bindings
                 host_execd_port = sidecar_port_bindings["44772"][1]
                 host_http_port = sidecar_port_bindings["8080"][1]
@@ -842,7 +866,12 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
                     gpu_count=effective_gpu_count,
                 )
                 if self.network_mode != HOST_NETWORK_MODE:
-                    port_bindings = allocate_port_bindings(exposed_ports, min_port=self.app_config.docker.port_range_min, max_port=self.app_config.docker.port_range_max)
+                    port_bindings = allocate_port_bindings(
+                        exposed_ports,
+                        min_port=self.app_config.docker.port_range_min,
+                        max_port=self.app_config.docker.port_range_max,
+                        publish_host=self.app_config.docker.publish_host,
+                    )
                     reserved_port_bindings = port_bindings
                     host_execd_port = port_bindings["44772"][1]
                     host_http_port = port_bindings["8080"][1]
@@ -879,10 +908,14 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
                 )
                 environment = inject_windows_user_ports(environment, exposed_ports)
 
-            # Inject CAP_SYS_ADMIN + unconfined AppArmor when bwrap isolation is requested.
-            # bwrap needs pivot_root/mount which require CAP_SYS_ADMIN and are blocked
-            # by Docker's default AppArmor profile.
-            if (request.extensions or {}).get(BOOTSTRAP_EXECD_ISOLATION_KEY) == "enable":
+            # Inject the container permissions required by bwrap isolation.
+            # bwrap needs pivot_root/mount, including a fresh procfs, which are blocked
+            # by Docker's default AppArmor, seccomp, and protected-system-path settings.
+            isolation_requested = (
+                (request.extensions or {}).get(BOOTSTRAP_EXECD_ISOLATION_KEY)
+                == "enable"
+            )
+            if isolation_requested:
                 cap_add = set(host_config_kwargs.get("cap_add") or [])
                 cap_add.add("SYS_ADMIN")
                 host_config_kwargs["cap_add"] = sorted(cap_add)
@@ -896,7 +929,7 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
                 host_config_kwargs["tmpfs"] = tmpfs
                 logger.warning(
                     f"sandbox {sandbox_id}: granting CAP_SYS_ADMIN + "
-                    "apparmor/seccomp=unconfined + tmpfs for bwrap isolation "
+                    "apparmor/seccomp/system paths unconfined + tmpfs for bwrap isolation "
                     "(bootstrap.execd.isolation=enable)"
                 )
 
@@ -912,6 +945,7 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
                             host_config_kwargs,
                             container_exposed_ports,
                             request.platform,
+                            unconfine_system_paths=isolation_requested,
                         )
                         break
                     except Exception as exc:
@@ -932,6 +966,7 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
                                 exposed_ports,
                                 min_port=self.app_config.docker.port_range_min,
                                 max_port=self.app_config.docker.port_range_max,
+                                publish_host=self.app_config.docker.publish_host,
                             )
                             reserved_port_bindings = port_bindings
                             host_execd_port = port_bindings["44772"][1]
@@ -951,6 +986,7 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
                     host_config_kwargs,
                     container_exposed_ports,
                     request.platform,
+                    unconfine_system_paths=isolation_requested,
                 )
         except Exception:
             if sidecar_container is not None:
@@ -1118,7 +1154,7 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
     def pause_sandbox(self, sandbox_id: str) -> None:
         container = self._get_container_by_sandbox_id(sandbox_id)
         state = container.attrs.get("State", {})
-        if not state.get("Running", False):
+        if not state.get("Running", False) or state.get("Paused", False):
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail={

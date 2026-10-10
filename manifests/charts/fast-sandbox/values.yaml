@@ -27,8 +27,12 @@
 # component RBAC (ServiceAccounts fast-sandbox-controller/fastpath/janitor),
 # created in the same namespaces configured below.
 #
-# The default image tags (`dev`) refer to images built from the source pinned
-# in manifests/third-party/fast-sandbox.commit by manifests/release/build-fast-sandbox.sh.
+# The default image tags are empty and resolve to the `release-<appVersion>`
+# companion image tags built from the source pinned in
+# manifests/third-party/fast-sandbox.commit by
+# manifests/release/build-fast-sandbox.sh. The fastlet-proxy sidecar value is
+# a single image string, so it pins the released companion image explicitly
+# instead of using the empty-tag fallback.
 
 # -- Override the name of the chart
 nameOverride: ""
@@ -56,15 +60,16 @@ controller:
   image:
     # -- Controller image repository (built by manifests/release/build-fast-sandbox.sh)
     repository: opensandbox/fsb-controller
-    # -- Image tag
-    tag: release-1.1.0
+    # -- Image tag. Empty uses the release-<appVersion> companion image tag.
+    tag: ""
     # -- Image pull policy
     pullPolicy: IfNotPresent
   # -- Number of controller replicas (no leader election; keep 1)
   replicaCount: 1
   # -- Image that executes SandboxTemplate golden-image builds (builder Pods
-  # are created by the controller; build it with manifests/release/build-fast-sandbox.sh)
-  sandboxtemplateBuilderImage: opensandbox/fsb-sandboxtemplate-builder:release-1.1.0
+  # are created by the controller; build it with manifests/release/build-fast-sandbox.sh).
+  # Empty uses the release-<appVersion> companion image tag.
+  sandboxtemplateBuilderImage: ""
   # -- Resource requests and limits for the controller
   resources:
     limits:
@@ -73,6 +78,19 @@ controller:
     requests:
       cpu: 100m
       memory: 128Mi
+  # -- Raw PodSpec fragment (YAML) merged into every SandboxTemplate build
+  # Pod by the controller: whitelisted scheduling fields only (tolerations
+  # appended; affinity and topologySpreadConstraints replaced). Rendered as
+  # the fast-sandbox-builder-pod-template ConfigMap; editing the live
+  # ConfigMap applies to the next build without a rollout.
+  sandboxtemplateBuilderPodSpec: ""
+  # -- Tolerations for the controller pod
+  tolerations: []
+  # -- Image injected as the platform-owned Fastlet Proxy sidecar into
+  # fastlet Pods. Defaults to the released companion image published by the
+  # umbrella release (build-fast-sandbox.sh); override for clusters that
+  # cannot pull from docker.io.
+  fastletProxyImage: opensandbox/fsb-fastlet-proxy:release-1.1.1
 
 # Artifact store shared by the controller, the runtime-agent and golden-image
 # builds. Rendered into the fast-sandbox-artifact-store ConfigMap.
@@ -133,7 +151,9 @@ runtimeEnvironments: |-
           firecracker:
             binaryPath: /opt/fast-sandbox/firecracker/firecracker
             jailerPath: /opt/fast-sandbox/firecracker/jailer
-            kernelPath: /opt/fast-sandbox/firecracker/vmlinux.bin
+            # No kernelPath: restore never boots a kernel (the bundled
+            # vmlinux.bin was dropped upstream); direct-boot operators
+            # pin one here explicitly.
             rootfsPath: /var/lib/fast-sandbox/firecracker/rootfs
             stateRoot: /var/lib/fast-sandbox/firecracker
 
@@ -146,8 +166,8 @@ janitor:
   image:
     # -- Janitor image repository (built by manifests/release/build-fast-sandbox.sh)
     repository: opensandbox/fsb-janitor
-    # -- Image tag
-    tag: release-1.1.0
+    # -- Image tag. Empty uses the release-<appVersion> companion image tag.
+    tag: ""
     # -- Image pull policy
     pullPolicy: IfNotPresent
   # -- Orphan scan interval
@@ -170,8 +190,8 @@ runtime:
   image:
     # -- Runtime image repository (built by manifests/release/build-fast-sandbox.sh)
     repository: opensandbox/fsb-firecracker-runtime
-    # -- Image tag
-    tag: release-1.1.0
+    # -- Image tag. Empty uses the release-<appVersion> companion image tag.
+    tag: ""
     # -- Image pull policy
     pullPolicy: IfNotPresent
   # -- Node selector. Empty by default: the runtime applies the firecracker
@@ -179,10 +199,24 @@ runtime:
   # it with your own coarse selector only if the cluster hosts unrelated
   # node pools.
   nodeSelector: {}
+  # -- Container resources for the DaemonSet. Setting requests matters more
+  # than limits here: without them the pod is BestEffort and is evicted
+  # first under node pressure, taking down the management API for every
+  # fastlet on the node. Limits stay off by default so artifact pulls and
+  # the readiness loop are not throttled or OOM-killed at their spikes.
+  resources:
+    # -- Resources for the firecracker-runtime agent container.
+    agent: {}
+    # -- Resources for the janitor sidecar container.
+    janitor: {}
   # -- Secret carrying the compiled agent registry configuration
   # (registry.json key with artifact-store pull credentials); must be
   # provisioned by the operator.
   registrySecret: fast-sandbox-agent-registry
+  # -- Additional tolerations for the firecracker-runtime DaemonSet pod,
+  # appended to the built-in control-plane toleration. Needed when target
+  # nodes carry infra taints (e.g. sigma.ali resource-pool taints).
+  tolerations: []
   # -- Node hostPath holding per-node Firecracker state (rootfs,
   # snapshots). Each node needs its own directory; do not share across
   # nodes.
@@ -193,7 +227,7 @@ runtime:
   dartPeerPort: 9000
   # -- Agent config (agent.yaml). Empty = the chart default (upstream
   # config/dev/agent-config.yaml with the dart discover URL pointing at
-  # this chart's namespace). socket/stateRoot/registryConfig/dart are
-  # startup-only; the nodeReadiness section (fcVersion, kernelURL,
-  # interval, minFree, minMemory) hot-reloads on every readiness pass.
+  # this chart's namespace). socket/stateRoot/registryConfig/p2p are
+  # startup-only; the nodeReadiness section (fcVersion, interval,
+  # minFree, minMemory) hot-reloads on every readiness pass.
   config: ""

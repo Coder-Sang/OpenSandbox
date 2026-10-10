@@ -81,7 +81,7 @@ test("Sandbox.create aborts the in-flight Lifecycle API request", async () => {
   assert.equal(calls[0].signal.aborted, true);
 });
 
-test("Sandbox.connect aborts the in-flight endpoint request", async () => {
+test("Sandbox.connect abort fails the caller without poisoning the shared fetch", async () => {
   const { calls, connectionConfig, started } = createPendingConnectionConfig();
   const controller = new AbortController();
 
@@ -97,7 +97,11 @@ test("Sandbox.connect aborts the in-flight endpoint request", async () => {
 
   await assert.rejects(connecting, assertAbortError);
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].signal.aborted, true);
+  // The deduped fetch carries no caller signal (only the SDK's timeout
+  // signal): an abort fails only this waiter, not the shared request.
+  assert.notEqual(calls[0].signal, controller.signal);
+  assert.equal(calls[0].signal.aborted, false);
+  await connectionConfig.closeTransport();
 });
 
 test("Sandbox.create rejects a pre-aborted signal before issuing a request", async () => {

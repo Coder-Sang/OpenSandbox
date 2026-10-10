@@ -12,12 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import pytest
 from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 from typing import cast
 from unittest.mock import MagicMock, patch
 from fastapi import HTTPException
+from pydantic import SecretStr
 
 from opensandbox_server.services.k8s.kubernetes_service import KubernetesSandboxService
 from opensandbox_server.services.constants import (
@@ -41,6 +43,7 @@ from opensandbox_server.config import (
     EGRESS_MODE_DNS,
     EGRESS_MODE_DNS_NFT,
     EgressConfig,
+    EgressUpstreamProxyConfig,
     GatewayConfig,
     GatewayRouteModeConfig,
     IngressConfig,
@@ -392,6 +395,126 @@ class TestKubernetesSandboxServiceCreate:
         assert kwargs["env"] == {"SANDBOX_ENV": "value"}
         assert "network_policy" not in kwargs
         assert kwargs["annotations"][SANDBOX_EGRESS_AUTH_TOKEN_METADATA_KEY] == "egress-token"
+
+    def _configure_upstream_proxy(self, k8s_service) -> EgressUpstreamProxyConfig:
+        upstream_proxy = EgressUpstreamProxyConfig(
+            url="http://proxy.local:3128",
+            authorization=SecretStr("Basic dGVzdDp0ZXN0"),
+        )
+        k8s_service.app_config.egress = EgressConfig(
+            image="opensandbox/egress:v1.1.7",
+            mode=EGRESS_MODE_DNS_NFT,
+            upstream_proxy=upstream_proxy,
+        )
+        return upstream_proxy
+
+    async def _create_with_egress(self, k8s_service, create_sandbox_request):
+        k8s_service.workload_provider.create_workload.return_value = {
+            "name": "test-id", "uid": "uid-1"
+        }
+        k8s_service.workload_provider.get_workload.return_value = MagicMock()
+        k8s_service.workload_provider.get_status.return_value = {
+            "state": "Running", "reason": "", "message": "",
+            "last_transition_at": datetime.now(timezone.utc),
+        }
+        with patch(
+            "opensandbox_server.services.k8s.kubernetes_service.generate_egress_token",
+            return_value="egress-token",
+        ):
+            await k8s_service.create_sandbox(create_sandbox_request)
+
+    @pytest.mark.asyncio
+    async def test_create_sandbox_upstream_proxy_with_credential_proxy_succeeds(
+        self, k8s_service, create_sandbox_request
+    ):
+        upstream_proxy = self._configure_upstream_proxy(k8s_service)
+        create_sandbox_request.network_policy = NetworkPolicy(default_action="deny", egress=[])
+        create_sandbox_request.credential_proxy = CredentialProxyConfig(enabled=True)
+
+        await self._create_with_egress(k8s_service, create_sandbox_request)
+
+        _, kwargs = k8s_service.workload_provider.create_workload.call_args
+        assert kwargs["egress_settings"].upstream_proxy is upstream_proxy
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("transparent", ["true", "yes"])
+    async def test_create_sandbox_upstream_proxy_with_transparent_env_succeeds(
+        self, k8s_service, create_sandbox_request, transparent
+    ):
+        self._configure_upstream_proxy(k8s_service)
+        create_sandbox_request.network_policy = NetworkPolicy(default_action="deny", egress=[])
+        create_sandbox_request.env = {
+            "OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT": transparent
+        }
+
+        await self._create_with_egress(k8s_service, create_sandbox_request)
+
+        _, kwargs = k8s_service.workload_provider.create_workload.call_args
+        assert kwargs["egress_settings"].upstream_proxy is not None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("env", [{}, {"OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT": "false"}])
+    async def test_create_sandbox_upstream_proxy_requires_transparent_mitm(
+        self, k8s_service, create_sandbox_request, env
+    ):
+        self._configure_upstream_proxy(k8s_service)
+        create_sandbox_request.network_policy = NetworkPolicy(default_action="deny", egress=[])
+        create_sandbox_request.env = env
+
+        with pytest.raises(HTTPException) as exc_info:
+            await k8s_service.create_sandbox(create_sandbox_request)
+
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.detail["code"] == SandboxErrorCodes.INVALID_PARAMETER
+        assert "credentialProxy.enabled" in exc_info.value.detail["message"]
+        assert "OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT" in exc_info.value.detail["message"]
+        k8s_service.workload_provider.create_workload.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_create_sandbox_upstream_proxy_ignores_ssl_insecure_false(
+        self, k8s_service, create_sandbox_request
+    ):
+        upstream_proxy = self._configure_upstream_proxy(k8s_service)
+        create_sandbox_request.network_policy = NetworkPolicy(default_action="deny", egress=[])
+        create_sandbox_request.env = {
+            "OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT": "true",
+            "OPENSANDBOX_EGRESS_MITMPROXY_SSL_INSECURE": "false",
+        }
+
+        await self._create_with_egress(k8s_service, create_sandbox_request)
+
+        _, kwargs = k8s_service.workload_provider.create_workload.call_args
+        assert kwargs["egress_settings"].upstream_proxy is upstream_proxy
+
+    @pytest.mark.asyncio
+    async def test_create_sandbox_upstream_proxy_without_network_policy_succeeds(
+        self, k8s_service, create_sandbox_request
+    ):
+        self._configure_upstream_proxy(k8s_service)
+
+        await self._create_with_egress(k8s_service, create_sandbox_request)
+
+        _, kwargs = k8s_service.workload_provider.create_workload.call_args
+        assert kwargs["egress_settings"] is None
+
+    @pytest.mark.asyncio
+    async def test_create_sandbox_upstream_proxy_rejects_ssl_insecure(
+        self, k8s_service, create_sandbox_request
+    ):
+        self._configure_upstream_proxy(k8s_service)
+        create_sandbox_request.network_policy = NetworkPolicy(default_action="deny", egress=[])
+        create_sandbox_request.env = {
+            "OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT": "true",
+            "OPENSANDBOX_EGRESS_MITMPROXY_SSL_INSECURE": "true",
+        }
+
+        with pytest.raises(HTTPException) as exc_info:
+            await k8s_service.create_sandbox(create_sandbox_request)
+
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.detail["code"] == SandboxErrorCodes.INVALID_PARAMETER
+        assert "OPENSANDBOX_EGRESS_MITMPROXY_SSL_INSECURE" in exc_info.value.detail["message"]
+        k8s_service.workload_provider.create_workload.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_create_sandbox_with_secure_access_passes_annotations(
@@ -936,6 +1059,7 @@ class TestWaitForSandboxReady:
 
     @pytest.mark.asyncio
     async def test_wait_fails_immediately_for_terminal_pod(self, k8s_service, mock_workload):
+        k8s_service.workload_provider.subscribe_workload.return_value = None
         clock = SimpleNamespace(now=0.0)
 
         async def advance_clock(seconds: float) -> None:
@@ -954,7 +1078,7 @@ class TestWaitForSandboxReady:
 
         with (
             patch(
-                "opensandbox_server.services.k8s.kubernetes_service.time.time",
+                "opensandbox_server.services.k8s.kubernetes_service.time.monotonic",
                 side_effect=lambda: clock.now,
             ),
             patch(
@@ -1077,6 +1201,7 @@ class TestWaitForSandboxReady:
     async def test_wait_accumulates_pool_capacity_across_transient_recovery(
         self, k8s_service, mock_workload
     ):
+        k8s_service.workload_provider.subscribe_workload.return_value = None
         clock = SimpleNamespace(now=0.0)
 
         async def advance_clock(seconds: float) -> None:
@@ -1104,7 +1229,7 @@ class TestWaitForSandboxReady:
 
         with (
             patch(
-                "opensandbox_server.services.k8s.kubernetes_service.time.time",
+                "opensandbox_server.services.k8s.kubernetes_service.time.monotonic",
                 side_effect=lambda: clock.now,
             ),
             patch(
@@ -2235,6 +2360,34 @@ class TestAttachPvcOwnerReferences:
 
 
 class TestListSandboxes:
+    def test_deleting_batchsandbox_status_in_list_and_get(self, k8s_service, mock_workload):
+        from opensandbox_server.api.schema import PaginationRequest, SandboxFilter
+        from opensandbox_server.services.k8s.batchsandbox_provider import BatchSandboxProvider
+
+        deletion_timestamp = datetime(2026, 10, 8, 10, tzinfo=timezone.utc)
+        mock_workload["metadata"]["deletionTimestamp"] = deletion_timestamp.isoformat()
+        mock_workload["status"] = {"phase": "Pending", "ready": 0}
+        provider = k8s_service.workload_provider
+        provider.list_workloads.return_value = [mock_workload]
+        provider.get_workload.return_value = mock_workload
+        provider.get_status.side_effect = BatchSandboxProvider(MagicMock()).get_status
+        provider.get_expiration.return_value = datetime.now(timezone.utc) + timedelta(hours=1)
+
+        request = ListSandboxesRequest(
+            filter=SandboxFilter(state=["Stopping"]), pagination=PaginationRequest(page=1, page_size=20)
+        )
+        response = k8s_service.list_sandboxes(request)
+        assert response.pagination.total_items == 1
+        assert len(response.items) == 1
+        sandbox = k8s_service.get_sandbox("test-sandbox-123")
+        for result in (response.items[0], sandbox):
+            assert result.status.state == "Stopping"
+            assert result.status.reason == "DELETING"
+            assert result.status.last_transition_at == deletion_timestamp
+
+        request.filter.state = ["Pending"]
+        assert not k8s_service.list_sandboxes(request).items
+
     
     def test_list_all_sandboxes_succeeds(self, k8s_service, mock_workload):
         k8s_service.workload_provider.list_workloads.return_value = [mock_workload]
@@ -2383,6 +2536,33 @@ class TestListSandboxes:
         assert response.items[0].platform is None
 
 class TestRenewExpiration:
+
+    @pytest.mark.parametrize(
+        "delta_seconds",
+        [-600, 0, 600, 7200],
+        ids=["shorten", "unchanged", "extend", "above-create-limit"],
+    )
+    def test_renew_sets_future_timestamp_without_create_limit(
+        self, k8s_service, mock_workload, delta_seconds
+    ):
+        from opensandbox_server.api.schema import RenewSandboxExpirationRequest
+
+        k8s_service.app_config.server.max_sandbox_timeout_seconds = 3600
+        current_expiration = datetime.now(timezone.utc) + timedelta(minutes=30)
+        new_expiration = current_expiration + timedelta(seconds=delta_seconds)
+        k8s_service.workload_provider.get_workload.return_value = mock_workload
+        k8s_service.workload_provider.get_expiration.return_value = current_expiration
+
+        response = k8s_service.renew_expiration(
+            "test-sandbox-id", RenewSandboxExpirationRequest(expiresAt=new_expiration)
+        )
+
+        assert response.expires_at == new_expiration
+        k8s_service.workload_provider.update_expiration.assert_called_once_with(
+            sandbox_id="test-sandbox-id",
+            namespace=k8s_service.namespace,
+            expires_at=new_expiration,
+        )
     
     def test_renew_expiration_succeeds(self, k8s_service, mock_workload):
         new_expiration = datetime.now(timezone.utc) + timedelta(hours=2)
@@ -2668,3 +2848,287 @@ class TestPatchSandboxMetadata:
         assert sandbox.metadata == {"env": "stage"}
         # Pre-patch read only; no second get_workload after patch_labels.
         assert k8s_service.workload_provider.get_workload.call_count == 1
+
+
+class TestSharedNamespaceTenantIsolation:
+    """Same-namespace tenants must only see sandboxes stamped with their name."""
+
+    def _as_tenant(self, name: str):
+        from opensandbox_server.tenants.context import get_current_tenant, set_current_tenant
+        from opensandbox_server.tenants.models import TenantEntry
+
+        previous = get_current_tenant()
+        set_current_tenant(TenantEntry(name=name, namespace="opensandbox-system", api_keys=("k",)))
+        return previous
+
+    def _clear_tenant(self, previous) -> None:
+        from opensandbox_server.tenants.context import set_current_tenant
+
+        set_current_tenant(previous)
+
+    def _labeled_workload(self, mock_workload, sandbox_id: str, tenant: str | None):
+        from copy import deepcopy
+
+        workload = deepcopy(mock_workload)
+        workload["metadata"]["name"] = sandbox_id
+        workload["metadata"]["labels"] = {"opensandbox.io/id": sandbox_id}
+        if tenant is not None:
+            workload["metadata"]["labels"]["opensandbox.io/tenant"] = tenant
+        return workload
+
+    def _stub_list_status(self, k8s_service) -> None:
+        k8s_service.workload_provider.get_status.return_value = {
+            "state": "Running",
+            "reason": "",
+            "message": "Running",
+            "last_transition_at": datetime.now(timezone.utc),
+        }
+        k8s_service.workload_provider.get_endpoint_info.return_value = "10.0.0.1:8080"
+        k8s_service.workload_provider.get_expiration.return_value = datetime.now(timezone.utc) + timedelta(hours=1)
+
+    @pytest.mark.asyncio
+    async def test_create_stamps_tenant_label(
+        self, k8s_service, create_sandbox_request, mock_workload
+    ):
+        previous = self._as_tenant("gdds")
+        try:
+            k8s_service.workload_provider.create_workload.return_value = {
+                "name": "test-sandbox-123",
+                "uid": "abc-123",
+            }
+            k8s_service.workload_provider.get_workload.return_value = mock_workload
+            self._stub_list_status(k8s_service)
+
+            await k8s_service.create_sandbox(create_sandbox_request)
+
+            labels = k8s_service.workload_provider.create_workload.call_args.kwargs["labels"]
+            assert labels["opensandbox.io/tenant"] == "gdds"
+        finally:
+            self._clear_tenant(previous)
+
+    def test_list_hides_other_tenant_keeps_own_and_legacy(
+        self, k8s_service, mock_workload
+    ):
+        own = self._labeled_workload(mock_workload, "own-id", "gdds")
+        other = self._labeled_workload(mock_workload, "other-id", "geip")
+        legacy = self._labeled_workload(mock_workload, "legacy-id", None)
+        k8s_service.workload_provider.list_workloads.return_value = [own, other, legacy]
+        self._stub_list_status(k8s_service)
+
+        previous = self._as_tenant("gdds")
+        try:
+            from opensandbox_server.api.schema import PaginationRequest
+
+            response = k8s_service.list_sandboxes(
+                ListSandboxesRequest(pagination=PaginationRequest(page=1, page_size=20))
+            )
+            assert {item.id for item in response.items} == {"own-id", "legacy-id"}
+        finally:
+            self._clear_tenant(previous)
+
+    def test_get_other_tenant_returns_404(self, k8s_service, mock_workload):
+        other = self._labeled_workload(mock_workload, "other-id", "geip")
+        k8s_service.workload_provider.get_workload.return_value = other
+        self._stub_list_status(k8s_service)
+
+        previous = self._as_tenant("gdds")
+        try:
+            with pytest.raises(HTTPException) as exc_info:
+                k8s_service.get_sandbox("other-id")
+            assert exc_info.value.status_code == 404
+        finally:
+            self._clear_tenant(previous)
+
+    def test_get_own_tenant_succeeds(self, k8s_service, mock_workload):
+        own = self._labeled_workload(mock_workload, "own-id", "gdds")
+        k8s_service.workload_provider.get_workload.return_value = own
+        self._stub_list_status(k8s_service)
+
+        previous = self._as_tenant("gdds")
+        try:
+            sandbox = k8s_service.get_sandbox("own-id")
+            assert sandbox.id == "own-id"
+        finally:
+            self._clear_tenant(previous)
+
+    def test_delete_other_tenant_returns_404(self, k8s_service, mock_workload):
+        other = self._labeled_workload(mock_workload, "other-id", "geip")
+        k8s_service.workload_provider.get_workload.return_value = other
+
+        previous = self._as_tenant("gdds")
+        try:
+            with patch.object(k8s_service, "_cleanup_managed_pvcs") as mock_cleanup:
+                with pytest.raises(HTTPException) as exc_info:
+                    k8s_service.delete_sandbox("other-id")
+            assert exc_info.value.status_code == 404
+            k8s_service.workload_provider.delete_workload.assert_not_called()
+            mock_cleanup.assert_not_called()
+        finally:
+            self._clear_tenant(previous)
+
+    def test_pause_other_tenant_returns_404(self, k8s_service, mock_workload):
+        other = self._labeled_workload(mock_workload, "other-id", "geip")
+        k8s_service.workload_provider.get_workload.return_value = other
+
+        previous = self._as_tenant("gdds")
+        try:
+            with pytest.raises(HTTPException) as exc_info:
+                k8s_service.pause_sandbox("other-id")
+            assert exc_info.value.status_code == 404
+            k8s_service.workload_provider.pause_sandbox.assert_not_called()
+        finally:
+            self._clear_tenant(previous)
+
+    def test_resume_other_tenant_returns_404(self, k8s_service, mock_workload):
+        other = self._labeled_workload(mock_workload, "other-id", "geip")
+        k8s_service.workload_provider.get_workload.return_value = other
+
+        previous = self._as_tenant("gdds")
+        try:
+            with pytest.raises(HTTPException) as exc_info:
+                k8s_service.resume_sandbox("other-id")
+            assert exc_info.value.status_code == 404
+            k8s_service.workload_provider.resume_sandbox.assert_not_called()
+        finally:
+            self._clear_tenant(previous)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("notification", [
+    "MODIFIED", "ADDED", "SYNC", "during_read", "DELETED", "replaced",
+    "missing_version", "deleting", "burst",
+])
+async def test_create_wait_uses_event_object(k8s_service, notification):
+    provider = k8s_service.workload_provider
+    pending_seen = asyncio.Event()
+    unsubscribe = MagicMock()
+    callback = None
+    pending = {
+        "metadata": {"name": "test-sandbox-id", "uid": "uid-1", "resourceVersion": "one"},
+        "status": {"state": "Pending", "reason": "", "message": "pending"},
+    }
+    ready = {
+        "metadata": {**pending["metadata"], "resourceVersion": "two"},
+        "status": {"state": "Running", "reason": "", "message": "ready"},
+    }
+    event = {**ready, "metadata": dict(ready["metadata"])}
+    if notification == "replaced":
+        event["metadata"]["uid"] = "different"
+    elif notification == "missing_version":
+        event["metadata"].pop("resourceVersion")
+    elif notification == "deleting":
+        event["metadata"]["deletionTimestamp"] = "2026-09-23T00:00:00Z"
+
+    def subscribe(sandbox_id, namespace, notify):
+        nonlocal callback
+        callback = notify
+        return unsubscribe
+
+    provider.subscribe_workload.side_effect = subscribe
+    reads = 0
+
+    def read(**kwargs):
+        nonlocal reads
+        reads += 1
+        assert callback is not None
+        if reads == 1:
+            if notification == "during_read":
+                callback("MODIFIED", event)
+            return pending
+        return ready
+
+    provider.get_workload.side_effect = read
+
+    def status(workload):
+        pending_seen.set()
+        return workload["status"]
+
+    provider.get_status.side_effect = status
+    task = asyncio.create_task(k8s_service._wait_for_sandbox_ready(
+        "test-sandbox-id", timeout_seconds=60, poll_interval_seconds=1,
+    ))
+    try:
+        await asyncio.wait_for(pending_seen.wait(), timeout=1)
+        assert callback is not None
+        if notification != "during_read":
+            def dispatch():
+                if notification == "burst":
+                    callback("MODIFIED", pending)
+                callback(notification if notification in ("ADDED", "SYNC", "DELETED") else "MODIFIED", event)
+            await asyncio.to_thread(dispatch)
+        result = await asyncio.wait_for(task, timeout=0.5)
+        direct_event = notification in ("MODIFIED", "ADDED", "SYNC", "burst")
+        assert result is (event if direct_event else ready)
+        assert provider.get_workload.call_count == (1 if direct_event else 2)
+        unsubscribe.assert_called_once_with()
+        callback("MODIFIED", event)  # Late delivery after cleanup is harmless.
+        await asyncio.sleep(0)
+        assert provider.get_workload.call_count == (1 if direct_event else 2)
+    finally:
+        if not task.done():
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("subscription", ["supported", "unsupported", "failed"])
+async def test_create_wait_falls_back_without_notifications(k8s_service, mock_workload, subscription):
+    provider = k8s_service.workload_provider
+    unsubscribe = MagicMock()
+    provider.subscribe_workload.return_value = unsubscribe if subscription == "supported" else None
+    if subscription == "failed":
+        provider.subscribe_workload.side_effect = RuntimeError("watch unavailable")
+    provider.get_workload.return_value = mock_workload
+    provider.get_status.side_effect = [
+        {"state": "Pending", "reason": "", "message": "pending"},
+        {"state": "Running", "reason": "", "message": "ready"},
+    ]
+    result = await asyncio.wait_for(k8s_service._wait_for_sandbox_ready(
+        "test-sandbox-id", timeout_seconds=10, poll_interval_seconds=0.01,
+    ), timeout=1)
+    assert result == mock_workload
+    if subscription == "supported":
+        unsubscribe.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["ready", "failed", "timeout", "pool_timeout", "cancelled"])
+async def test_create_wait_cleans_up_and_honors_deadlines(k8s_service, mock_workload, outcome):
+    provider = k8s_service.workload_provider
+    unsubscribe = MagicMock()
+    provider.subscribe_workload.return_value = unsubscribe
+    provider.get_workload.return_value = mock_workload
+    observed = asyncio.Event()
+
+    def status(workload):
+        observed.set()
+        return {
+            "state": {"ready": "Running", "failed": "Failed"}.get(outcome, "Pending"),
+            "reason": "POOL_CAPACITY_EXHAUSTED" if outcome == "pool_timeout" else "",
+            "message": "test",
+        }
+
+    provider.get_status.side_effect = status
+    task = asyncio.create_task(k8s_service._wait_for_sandbox_ready(
+        "test-sandbox-id", timeout_seconds=1 if outcome == "timeout" else 60,
+        poll_interval_seconds=30, pool_acquisition_timeout_seconds=0.02,
+    ))
+    try:
+        await asyncio.wait_for(observed.wait(), timeout=1)
+        if outcome == "cancelled":
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        elif outcome == "ready":
+            assert await asyncio.wait_for(task, timeout=1) == mock_workload
+        else:
+            with pytest.raises(HTTPException) as exc_info:
+                await asyncio.wait_for(task, timeout=2)
+            assert exc_info.value.status_code == {"failed": 500, "timeout": 504, "pool_timeout": 429}[outcome]
+        unsubscribe.assert_called_once_with()
+    finally:
+        if not task.done():
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task

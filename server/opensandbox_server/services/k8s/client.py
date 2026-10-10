@@ -20,7 +20,7 @@ operations. All API access goes through this class.
 import logging
 import threading
 from functools import partial
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Callable, Any, Dict, List, Optional, Tuple
 
 from kubernetes import client, config
 from kubernetes.client import ApiException, CoreV1Api, CustomObjectsApi, NodeV1Api, V1APIResourceList
@@ -75,6 +75,14 @@ class K8sClient:
                 config.load_kube_config(config_file=self.config.kubeconfig_path)
             else:
                 config.load_incluster_config()
+            if self.config.insecure_skip_tls_verify:
+                logger.warning(
+                    "kubernetes.insecure_skip_tls_verify is enabled; TLS certificate "
+                    "verification for the Kubernetes API server is disabled"
+                )
+                cfg = client.Configuration.get_default_copy()
+                cfg.verify_ssl = False
+                client.Configuration.set_default(cfg)
         except Exception as e:
             raise Exception(f"Failed to load Kubernetes configuration: {e}") from e
 
@@ -159,6 +167,21 @@ class K8sClient:
         """
         return self._get_informer(group, version, plural, namespace, event_handler)
 
+
+    def subscribe_custom_objects(
+        self,
+        group: str,
+        version: str,
+        namespace: str,
+        plural: str,
+        names: List[str],
+        callback: Callable[[str, Dict[str, Any]], None],
+    ) -> Optional[Callable[[], None]]:
+        """Reuse the shared informer to notify a waiter about named resources."""
+        informer = self._get_informer(group, version, plural, namespace)
+        if informer is None:
+            return None
+        return informer.subscribe(names, callback)
 
     def create_custom_object(
         self,
@@ -294,6 +317,34 @@ class K8sClient:
             for informer in self._informers.values():
                 informer.stop()
             self._informers.clear()
+
+    def list_custom_objects_all_namespaces(
+        self,
+        group: str,
+        version: str,
+        plural: str,
+        label_selector: str = "",
+    ) -> List[Dict[str, Any]]:
+        """List custom resources across all namespaces, returning the items list.
+
+        Direct API call only (cluster-scoped informers are not maintained).
+        Used as a fallback to locate a sandbox when no namespace is known.
+        """
+        if self._read_limiter:
+            self._read_limiter.acquire()
+        try:
+            resp = self.get_custom_objects_api().list_cluster_custom_object(
+                group=group,
+                version=version,
+                plural=plural,
+                label_selector=label_selector,
+                _request_timeout=(10, 30),
+            )
+            return resp.get("items", [])
+        except ApiException as e:
+            if e.status == 404:
+                return []
+            raise
 
     def delete_custom_object(
         self,

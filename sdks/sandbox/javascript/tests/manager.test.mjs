@@ -65,15 +65,14 @@ function createSandboxesStub() {
 
 test("SandboxManager delegates lifecycle operations and closes its transport", async () => {
   const { sandboxes, calls } = createSandboxesStub();
-  const connectionConfig = new ConnectionConfig({ domain: "http://127.0.0.1:8080" });
+  const originalClose = ConnectionConfig.prototype.closeTransport;
   let closeCalls = 0;
-  connectionConfig.closeTransport = async () => {
+  // The manager owns the transport it initialized from an uninitialized config.
+  ConnectionConfig.prototype.closeTransport = async function () {
     closeCalls += 1;
   };
-  connectionConfig.withTransportIfMissing = () => connectionConfig;
 
   const manager = SandboxManager.create({
-    connectionConfig,
     adapterFactory: {
       createLifecycleStack() {
         return { sandboxes };
@@ -150,4 +149,31 @@ test("SandboxManager delegates lifecycle operations and closes its transport", a
   assert.equal(calls[9].args[0], "snap-1");
   assert.equal(calls[10].args[0], "snap-1");
   assert.equal(closeCalls, 1);
+  ConnectionConfig.prototype.closeTransport = originalClose;
+});
+
+test("SandboxManager.close leaves caller-initialized transports open", async () => {
+  const { sandboxes } = createSandboxesStub();
+  // Caller-initialized configs may back other SDK resources.
+  const connectionConfig = new ConnectionConfig({
+    domain: "http://127.0.0.1:8080",
+  }).withTransportIfMissing();
+  let closeCalls = 0;
+  connectionConfig.closeTransport = async () => {
+    closeCalls += 1;
+  };
+
+  const manager = SandboxManager.create({
+    connectionConfig,
+    adapterFactory: {
+      createLifecycleStack() {
+        return { sandboxes };
+      },
+    },
+  });
+  await manager.close();
+
+  assert.equal(closeCalls, 0);
+  // Cleanup for the test itself: the caller owns this transport.
+  await connectionConfig.closeTransport();
 });

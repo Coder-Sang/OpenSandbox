@@ -62,6 +62,7 @@ test("createTemplate maps the create request body and parses timestamps", async 
     publish: "s3://bucket/publish",
     resourceLimits: { cpu: "2", memory: "1Gi", disk: "4Gi" },
     entrypoint: ["python", "app.py"],
+    env: { LOG_LEVEL: "info" },
     metadata: { team: "apollo" },
     readiness: { probe: "tcp://127.0.0.1:44772", warmupSeconds: 30 },
     format: "native",
@@ -72,6 +73,7 @@ test("createTemplate maps the create request body and parses timestamps", async 
     publish: "s3://bucket/publish",
     resourceLimits: { cpu: "2", memory: "1Gi", disk: "4Gi" },
     entrypoint: ["python", "app.py"],
+    env: { LOG_LEVEL: "info" },
     metadata: { team: "apollo" },
     readiness: { probe: "tcp://127.0.0.1:44772", warmupSeconds: 30 },
     format: "native",
@@ -90,6 +92,7 @@ test("getTemplate returns the template with its build status", async () => {
       return {
         data: templateResponse({
           status: { phase: "Succeeded", manifestRef: "s3://bucket/publish/manifest" },
+          env: { LOG_LEVEL: "info" },
         }),
         response: new Response(null, { status: 200 }),
       };
@@ -101,6 +104,7 @@ test("getTemplate returns the template with its build status", async () => {
   assert.deepEqual(paths[0], ["/templates/{templateId}", { templateId: "tpl_123" }]);
   assert.equal(info.status.phase, "Succeeded");
   assert.equal(info.status.manifestRef, "s3://bucket/publish/manifest");
+  assert.deepEqual(info.env, { LOG_LEVEL: "info" });
 });
 
 test("listTemplates forwards pagination and metadata filters", async () => {

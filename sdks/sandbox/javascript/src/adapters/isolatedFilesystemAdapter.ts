@@ -40,6 +40,7 @@ import type {
   WriteEntry,
 } from "../models/filesystem.js";
 import { SandboxApiException, SandboxError } from "../core/exceptions.js";
+import { iterateBodyStream } from "../core/streams.js";
 
 function joinUrl(baseUrl: string, pathname: string): string {
   const base = baseUrl.endsWith("/") ? baseUrl.slice(0, -1) : baseUrl;
@@ -427,12 +428,7 @@ export class IsolatedFilesystemAdapter implements SandboxFiles {
     }
     const body = res.body as ReadableStream<Uint8Array> | null;
     if (!body) return;
-    const reader = body.getReader();
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) return;
-      if (value) yield value;
-    }
+    yield* iterateBodyStream(body);
   }
 
   async readFile(

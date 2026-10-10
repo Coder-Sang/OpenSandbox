@@ -85,6 +85,7 @@ func startFastSandboxMitmproxyIfEnabled() (*mitmTransparent, error) {
 		nextGen:    initialGen,
 		restartCh:  restartCh,
 		shutdownCh: shutdownCh,
+		watchDone:  make(chan struct{}),
 	}, nil
 }
 

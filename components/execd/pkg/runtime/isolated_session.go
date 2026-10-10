@@ -33,11 +33,23 @@ import (
 	"github.com/alibaba/opensandbox/execd/pkg/sessionresource"
 )
 
+// IsolatedOverlayOptions describes one overlay mount requested for a
+// session. Mode defaults to overlay; Persist (overlay mode only) defaults
+// to true.
+type IsolatedOverlayOptions struct {
+	Path    string
+	Mode    string // "" (default overlay) | "rw" | "overlay" | "ro"
+	Persist *bool  // overlay mode only; nil defaults to true
+}
+
 // IsolatedSessionOptions bundles the parameters for creating an isolated session.
 type IsolatedSessionOptions struct {
-	Profile            string
+	Profile string
+	// Legacy single-workspace sugar, merged into Overlays by
+	// normalizeIsolatedOptions.
 	WorkspacePath      string
 	WorkspaceMode      string
+	Overlays           []IsolatedOverlayOptions
 	ExtraWritable      []string
 	Binds              []isolation.BindMount
 	ShareNet           *bool
@@ -47,6 +59,41 @@ type IsolatedSessionOptions struct {
 	Gid                *uint32
 	UidMode            string // "setpriv" (default) or "userns"
 	IdleTimeoutSeconds int
+}
+
+// sessionOverlay is one resolved overlay mount of a live session. For
+// overlay-mode mounts persist reports whether a host upper directory was
+// requested; upperDir/workDir are otherwise empty.
+type sessionOverlay struct {
+	path     string
+	mode     isolation.WorkspaceMode
+	persist  bool
+	upperDir string
+	workDir  string
+}
+
+// resolveSessionOverlays merges the legacy workspace fields into Overlays
+// and applies the same defaults as normalizeIsolatedOptions.
+func resolveSessionOverlays(opts *IsolatedSessionOptions) []sessionOverlay {
+	raw := make([]IsolatedOverlayOptions, 0, len(opts.Overlays)+1)
+	if opts.WorkspacePath != "" {
+		raw = append(raw, IsolatedOverlayOptions{Path: opts.WorkspacePath, Mode: opts.WorkspaceMode})
+	}
+	raw = append(raw, opts.Overlays...)
+
+	overlays := make([]sessionOverlay, 0, len(raw))
+	for _, ov := range raw {
+		mode := isolation.WorkspaceOverlay
+		switch isolation.WorkspaceMode(ov.Mode) {
+		case isolation.WorkspaceRW:
+			mode = isolation.WorkspaceRW
+		case isolation.WorkspaceRO:
+			mode = isolation.WorkspaceRO
+		}
+		persist := mode == isolation.WorkspaceOverlay && (ov.Persist == nil || *ov.Persist)
+		overlays = append(overlays, sessionOverlay{path: ov.Path, mode: mode, persist: persist})
+	}
+	return overlays
 }
 
 type sessionNamespacePins interface {
@@ -82,8 +129,7 @@ type isolatedSession struct {
 	doneCh               chan struct{} // closed after process wait and lifecycle drain
 	lifecycleMonitorDone chan struct{} // closed after drain-failure monitor exits
 	upperID              string        // key in UpperManager, used for Release/Remove
-	upperDir             string
-	workDir              string
+	overlays             []sessionOverlay
 	createdAt            time.Time
 	lastRunAt            time.Time
 	isolator             isolation.Isolator
@@ -115,6 +161,7 @@ func newIsolatedSession(
 	return &isolatedSession{
 		id:              id,
 		opts:            opts,
+		overlays:        resolveSessionOverlays(opts),
 		isolator:        iso,
 		namespacePinner: namespacePinner,
 		processWaited:   make(chan struct{}),
@@ -146,14 +193,15 @@ func (s *isolatedSession) start() error {
 		return fmt.Errorf("unknown isolation profile %q", s.opts.Profile)
 	}
 
-	wrapOpts.Workspace.Path = s.opts.WorkspacePath
-	switch isolation.WorkspaceMode(s.opts.WorkspaceMode) {
-	case isolation.WorkspaceRW:
-		wrapOpts.Workspace.Mode = isolation.WorkspaceRW
-	case isolation.WorkspaceRO:
-		wrapOpts.Workspace.Mode = isolation.WorkspaceRO
-	default:
-		wrapOpts.Workspace.Mode = isolation.WorkspaceOverlay
+	// One mount segment per resolved overlay.
+	wrapOpts.Overlays = make([]isolation.OverlaySpec, 0, len(s.overlays))
+	for _, ov := range s.overlays {
+		wrapOpts.Overlays = append(wrapOpts.Overlays, isolation.OverlaySpec{
+			Path:     ov.path,
+			Mode:     ov.mode,
+			UpperDir: ov.upperDir,
+			WorkDir:  ov.workDir,
+		})
 	}
 
 	if s.opts.ShareNet != nil {
@@ -170,8 +218,6 @@ func (s *isolatedSession) start() error {
 	if s.opts.UidMode != "" {
 		wrapOpts.UidMode = isolation.UidMode(s.opts.UidMode)
 	}
-	wrapOpts.UpperDir = s.upperDir
-	wrapOpts.WorkDir = s.workDir
 
 	lifecycleIsolator, ok := s.isolator.(isolation.LifecycleIsolator)
 	if !ok {

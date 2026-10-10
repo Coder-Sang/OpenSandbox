@@ -26,6 +26,7 @@ import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.HardeningLay
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.HardeningStatus
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedBackgroundRun
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedCapabilities
+import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedOverlaySpec
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedRunLogs
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedRunOpts
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedRunRequest
@@ -39,7 +40,6 @@ import com.alibaba.opensandbox.sandbox.domain.services.Filesystem
 import com.alibaba.opensandbox.sandbox.domain.services.IsolationService
 import com.alibaba.opensandbox.sandbox.domain.services.IsolationSession
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.ExecutionEventDispatcher
-import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.jsonParser
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.toSandboxApiException
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.toSandboxException
 import kotlinx.serialization.Serializable
@@ -56,7 +56,8 @@ import java.time.format.DateTimeFormatter
 
 @Serializable
 private data class IsolatedCreateBody(
-    val workspace: IsolatedWorkspaceBody,
+    val workspace: IsolatedWorkspaceBody? = null,
+    val overlays: List<IsolatedOverlayBody>? = null,
     val profile: String? = null,
     val extra_writable: List<String>? = null,
     val binds: List<BindMountBody>? = null,
@@ -70,6 +71,13 @@ private data class IsolatedCreateBody(
 
 @Serializable
 private data class IsolatedWorkspaceBody(val path: String, val mode: String? = null)
+
+@Serializable
+private data class IsolatedOverlayBody(
+    val path: String,
+    val mode: String? = null,
+    val persist: Boolean? = null,
+)
 
 @Serializable
 private data class BindMountBody(
@@ -122,6 +130,7 @@ private data class IsolatedSessionStateResponse(
     // Creation-parameter echo fields. Older execd builds omit them.
     val profile: String? = null,
     val workspace: IsolatedWorkspaceBody? = null,
+    val overlays: List<IsolatedOverlayBody>? = null,
     val extra_writable: List<String>? = null,
     val binds: List<BindMountBody>? = null,
     val share_net: Boolean? = null,
@@ -131,6 +140,8 @@ private data class IsolatedSessionStateResponse(
     val uid_mode: String? = null,
     val idle_timeout_seconds: Int? = null,
 )
+
+private fun IsolatedOverlayBody.toDomain(): IsolatedOverlaySpec = IsolatedOverlaySpec(path = path, mode = mode, persist = persist)
 
 @Serializable
 private data class IsolatedSessionSummaryResponse(
@@ -219,11 +230,22 @@ internal class IsolatedSessionsAdapter(
         "${httpClientProvider.config.protocol}://${execdEndpoint.endpoint}"
 
     override fun create(request: CreateIsolatedSessionRequest): IsolationSession {
+        require(request.workspace != null || !request.overlays.isNullOrEmpty()) {
+            "workspace or overlays is required"
+        }
         try {
             val body =
                 IsolatedCreateBody(
+                    // The legacy workspace field is prepended to overlays,
+                    // mirroring the request-level sugar semantics.
                     workspace =
-                        IsolatedWorkspaceBody(request.workspace.path, request.workspace.mode),
+                        request.workspace?.let {
+                            IsolatedWorkspaceBody(it.path, it.mode)
+                        },
+                    overlays =
+                        request.overlays?.map {
+                            IsolatedOverlayBody(it.path, it.mode, it.persist)
+                        },
                     profile = request.profile,
                     extra_writable = request.extraWritable,
                     binds =
@@ -292,6 +314,7 @@ internal class IsolatedSessionsAdapter(
                             resp.workspace?.let {
                                 IsolatedWorkspaceSpec(path = it.path, mode = it.mode)
                             },
+                        overlays = resp.overlays?.map { it.toDomain() },
                         extraWritable = resp.extra_writable,
                         binds =
                             resp.binds?.map { BindMount(it.source, it.dest, it.readonly) },
@@ -342,6 +365,7 @@ internal class IsolatedSessionsAdapter(
                         resp.workspace?.let {
                             IsolatedWorkspaceSpec(path = it.path, mode = it.mode)
                         },
+                    overlays = resp.overlays?.map { it.toDomain() },
                     extraWritable = resp.extra_writable,
                     binds =
                         resp.binds?.map { BindMount(it.source, it.dest, it.readonly) },
@@ -635,33 +659,14 @@ internal class IsolatedSessionsAdapter(
         }
     }
 
-    private fun decodeEventLine(line: String): EventNode? {
-        if (line.isBlank()) return null
-        val payload =
-            when {
-                line.startsWith(":") -> return null
-                line.startsWith("event:") -> return null
-                line.startsWith("id:") -> return null
-                line.startsWith("retry:") -> return null
-                line.startsWith("data:") -> line.drop(5).trim()
-                else -> line
-            }
-        if (payload.isEmpty()) return null
-        return try {
-            jsonParser.decodeFromString(EventNode.serializer(), payload)
-        } catch (e: Exception) {
-            logger.error("Failed to parse SSE line: {}", line, e)
-            null
+    // Delegates to the shared helpers so all execd consumers parse SSE lines
+    // and infer exit codes identically.
+    private fun decodeEventLine(line: String): EventNode? =
+        ExecdEventSupport.decodeEventLine(line) { failingLine, error ->
+            logger.error("Failed to parse SSE line: {}", failingLine, error)
         }
-    }
 
-    private fun inferExitCode(execution: Execution): Int? {
-        if (execution.error != null) {
-            return execution.error?.value?.trim()?.toIntOrNull()
-        }
-        if (execution.complete != null) return 0
-        return null
-    }
+    private fun inferExitCode(execution: Execution): Int? = ExecdEventSupport.inferForegroundExitCode(execution)
 
     private fun parseDateTime(value: String): OffsetDateTime? {
         return try {

@@ -25,6 +25,7 @@ from ..models.create_fsb_template_request_format import CreateFsbTemplateRequest
 from ..types import UNSET, Unset
 
 if TYPE_CHECKING:
+    from ..models.create_fsb_template_request_env import CreateFsbTemplateRequestEnv
     from ..models.create_fsb_template_request_metadata import CreateFsbTemplateRequestMetadata
     from ..models.fsb_template_readiness import FsbTemplateReadiness
     from ..models.resource_limits import ResourceLimits
@@ -56,6 +57,13 @@ class CreateFsbTemplateRequest:
                  Example: {'cpu': '500m', 'memory': '512Mi', 'gpu': '1'}.
             entrypoint (list[str] | Unset): Guest business command (argv); empty defaults to
                 `["tail", "-f", "/dev/null"]`.
+            env (CreateFsbTemplateRequestEnv | Unset): Environment variables baked into the golden image (injected as
+                `/etc/sandbox-init.env` in the guest; literal values only). The
+                source image's own OCI `Config.Env` is inherited like a container
+                runtime would; an env with the same name here overrides the
+                inherited value. Names must be valid shell variable names
+                (`[A-Za-z_][A-Za-z0-9_]*`).
+                 Example: {'LOG_LEVEL': 'info'}.
             metadata (CreateFsbTemplateRequestMetadata | Unset): Custom key-value metadata for management, filtering, and
                 tagging.
             readiness (FsbTemplateReadiness | Unset): Build-side readiness gate for a fsb template.
@@ -67,6 +75,7 @@ class CreateFsbTemplateRequest:
     publish: str
     resource_limits: ResourceLimits | Unset = UNSET
     entrypoint: list[str] | Unset = UNSET
+    env: CreateFsbTemplateRequestEnv | Unset = UNSET
     metadata: CreateFsbTemplateRequestMetadata | Unset = UNSET
     readiness: FsbTemplateReadiness | Unset = UNSET
     format_: CreateFsbTemplateRequestFormat | Unset = CreateFsbTemplateRequestFormat.OVERLAYBD
@@ -83,6 +92,10 @@ class CreateFsbTemplateRequest:
         entrypoint: list[str] | Unset = UNSET
         if not isinstance(self.entrypoint, Unset):
             entrypoint = self.entrypoint
+
+        env: dict[str, Any] | Unset = UNSET
+        if not isinstance(self.env, Unset):
+            env = self.env.to_dict()
 
         metadata: dict[str, Any] | Unset = UNSET
         if not isinstance(self.metadata, Unset):
@@ -108,6 +121,8 @@ class CreateFsbTemplateRequest:
             field_dict["resourceLimits"] = resource_limits
         if entrypoint is not UNSET:
             field_dict["entrypoint"] = entrypoint
+        if env is not UNSET:
+            field_dict["env"] = env
         if metadata is not UNSET:
             field_dict["metadata"] = metadata
         if readiness is not UNSET:
@@ -119,6 +134,7 @@ class CreateFsbTemplateRequest:
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
+        from ..models.create_fsb_template_request_env import CreateFsbTemplateRequestEnv
         from ..models.create_fsb_template_request_metadata import CreateFsbTemplateRequestMetadata
         from ..models.fsb_template_readiness import FsbTemplateReadiness
         from ..models.resource_limits import ResourceLimits
@@ -136,6 +152,13 @@ class CreateFsbTemplateRequest:
             resource_limits = ResourceLimits.from_dict(_resource_limits)
 
         entrypoint = cast(list[str], d.pop("entrypoint", UNSET))
+
+        _env = d.pop("env", UNSET)
+        env: CreateFsbTemplateRequestEnv | Unset
+        if isinstance(_env, Unset):
+            env = UNSET
+        else:
+            env = CreateFsbTemplateRequestEnv.from_dict(_env)
 
         _metadata = d.pop("metadata", UNSET)
         metadata: CreateFsbTemplateRequestMetadata | Unset
@@ -163,6 +186,7 @@ class CreateFsbTemplateRequest:
             publish=publish,
             resource_limits=resource_limits,
             entrypoint=entrypoint,
+            env=env,
             metadata=metadata,
             readiness=readiness,
             format_=format_,

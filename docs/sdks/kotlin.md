@@ -314,6 +314,22 @@ try {
 }
 ```
 
+#### Persistent environment variables
+
+Set environment variables that the runtime injects into every subsequent command
+and session — without hand-writing shell escaping against the sandbox env file.
+
+```java
+sandbox.commands().setEnv("MY_TOKEN", "it's a safe value");
+```
+
+Keys must match `[A-Za-z_][A-Za-z0-9_]*`. Values without a single quote are
+stored verbatim; values containing a single quote use the env file's
+double-quoted form, in which shell-style `$NAME` sequences may be expanded
+when the runtime loads the file. The env file is append-only: the
+last write for a key wins. Throws `SandboxException` if the sandbox fails to
+persist the variable.
+
 For filesystem/process isolation within a sandbox, see
 [Isolation Sessions](/guides/isolation-sessions). These are separate from Bash sessions.
 
@@ -350,6 +366,26 @@ files.forEach(f -> System.out.println("Found: " + f.getPath()));
 // 4. Delete file
 sandbox.files().deleteFiles(List.of("/tmp/hello.txt"));
 ```
+
+#### File operations with an explicit identity
+
+Bind a filesystem client to a Linux UID and GID:
+
+```kotlin
+val files = sandbox.filesWithIdentity(1001, 2000)
+```
+
+The bound client exposes the usual file operations and shares the sandbox
+connection, authentication, and endpoint routing headers. The existing file
+client retains its default identity. Select the UID/GID separately for command
+execution.
+
+This requires Linux and an Execd version that supports filesystem execution
+identity. Unsupported servers return an error; requests never fall back to the
+default filesystem routes. Keep sandbox credentials and identity selection in
+the trusted backend. Linux filesystem permissions apply; this feature does not
+create a tenant isolation boundary. See [Execd](/architecture/data-plane/execd)
+for permission and workspace provisioning details.
 
 ### 5. Sandbox Management (Admin)
 

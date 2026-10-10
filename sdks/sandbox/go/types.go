@@ -403,6 +403,11 @@ type CreateTemplateRequest struct {
 	// Entrypoint is the guest business command (argv); empty defaults to
 	// ["tail", "-f", "/dev/null"].
 	Entrypoint []string `json:"entrypoint,omitempty"`
+	// Env is the environment variables baked into the golden image (injected
+	// as /etc/sandbox-init.env in the guest; literal values only). The source
+	// image's own OCI Config.Env is inherited; an env with the same name
+	// overrides the inherited value. Names must be valid shell variable names.
+	Env map[string]string `json:"env,omitempty"`
 	// Metadata is custom key-value metadata for management, filtering, and
 	// tagging.
 	Metadata map[string]string `json:"metadata,omitempty"`
@@ -426,6 +431,7 @@ type TemplateInfo struct {
 
 	ResourceLimits ResourceLimits     `json:"resourceLimits,omitempty"`
 	Entrypoint     []string           `json:"entrypoint,omitempty"`
+	Env            map[string]string  `json:"env,omitempty"`
 	Metadata       map[string]string  `json:"metadata,omitempty"`
 	Readiness      *TemplateReadiness `json:"readiness,omitempty"`
 }
@@ -705,20 +711,26 @@ type RunCommandRequest struct {
 	Command string `json:"command,omitempty"`
 	// Argv must contain a non-empty executable at index 0; no element may contain NUL.
 	// These constraints are validated by the server.
-	Argv       []string          `json:"argv,omitempty"`
-	Cwd        string            `json:"cwd,omitempty"`
-	Background bool              `json:"background,omitempty"`
-	Timeout    int64             `json:"timeout,omitempty"`
-	UID        *int32            `json:"uid,omitempty"`
-	GID        *int32            `json:"gid,omitempty"`
-	Envs       map[string]string `json:"envs,omitempty"`
+	Argv []string `json:"argv,omitempty"`
+	Cwd  string   `json:"cwd,omitempty"`
+	// Background runs the command asynchronously when true.
+	Background bool `json:"background,omitempty"`
+	// Timeout is the maximum command duration in milliseconds. Zero omits the
+	// field and the server enforces no timeout (see execd-api.yaml). Note this
+	// differs from the second-based TimeoutSeconds fields elsewhere in the SDK.
+	Timeout int64             `json:"timeout,omitempty"`
+	UID     *int32            `json:"uid,omitempty"`
+	GID     *int32            `json:"gid,omitempty"`
+	Envs    map[string]string `json:"envs,omitempty"`
 }
 
 // RunInSessionRequest is the request body for running a command in an existing bash session.
 type RunInSessionRequest struct {
 	Command string `json:"command"`
 	Cwd     string `json:"cwd,omitempty"`
-	Timeout int64  `json:"timeout,omitempty"`
+	// Timeout is the maximum command duration in milliseconds. Zero omits the
+	// field and the server may not enforce any timeout (see execd-api.yaml).
+	Timeout int64 `json:"timeout,omitempty"`
 }
 
 // CommandStatusResponse contains the status of a command execution.

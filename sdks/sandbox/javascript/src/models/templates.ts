@@ -81,6 +81,13 @@ export interface CreateTemplateRequest extends Record<string, unknown> {
    */
   entrypoint?: string[];
   /**
+   * Environment variables baked into the golden image (injected as
+   * `/etc/sandbox-init.env` in the guest; literal values only). The source
+   * image's own OCI `Config.Env` is inherited; an env with the same name
+   * overrides the inherited value. Names must be valid shell variable names.
+   */
+  env?: Record<string, string>;
+  /**
    * Custom key-value metadata for management, filtering, and tagging.
    */
   metadata?: Record<string, string>;
@@ -131,6 +138,10 @@ export interface TemplateInfo extends Record<string, unknown> {
    * Guest business command (argv).
    */
   entrypoint?: string[];
+  /**
+   * Environment variables baked into the golden image.
+   */
+  env?: Record<string, string>;
   /**
    * Custom metadata from the creation request.
    */

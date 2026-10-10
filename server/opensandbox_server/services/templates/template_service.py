@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
@@ -71,6 +72,10 @@ DEFAULT_ENTRYPOINT = ["tail", "-f", "/dev/null"]
 # Template resourceLimits only accept these keys; anything else would be
 # silently dropped by the CRD mapping.
 TEMPLATE_RESOURCE_KEYS = frozenset({"cpu", "memory", "disk"})
+
+# Same shape the SandboxTemplate builder enforces at build time; validating
+# here turns a would-be failed build into a 400 at template creation.
+_VALID_ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 _TEMPLATE_NOT_FOUND = {
     "code": SandboxErrorCodes.FSB_TEMPLATE_NOT_FOUND,
@@ -197,6 +202,22 @@ class FastSandboxTemplateService:
                         ),
                     },
                 )
+        if request.env:
+            invalid_env_names = [
+                name for name in request.env if not _VALID_ENV_NAME.match(name)
+            ]
+            if invalid_env_names:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "code": SandboxErrorCodes.INVALID_PARAMETER,
+                        "message": (
+                            f"Invalid env names for templates: "
+                            f"{', '.join(sorted(invalid_env_names))}; names must "
+                            f"match [A-Za-z_][A-Za-z0-9_]*."
+                        ),
+                    },
+                )
         namespace = self._resolve_namespace()
         template_id = f"tpl-{uuid.uuid4()}"
         now = datetime.now(timezone.utc)
@@ -206,6 +227,7 @@ class FastSandboxTemplateService:
                 request.resource_limits.root if request.resource_limits is not None else None
             ),
             "entrypoint": list(request.entrypoint) if request.entrypoint else None,
+            "env": dict(request.env) if request.env else None,
             "readiness": (
                 request.readiness.model_dump(exclude_none=True, by_alias=True)
                 if request.readiness is not None
@@ -372,6 +394,9 @@ class FastSandboxTemplateService:
                 "publishSecretRef": {"name": self._k8s_config.template_s3_publish_secret},
             },
         }
+        env = record.spec.get("env") or {}
+        if env:
+            spec["envs"] = [{"name": name, "value": value} for name, value in env.items()]
         # The CRD requires the readiness object itself (structural
         # defaulting fills warmupSeconds=60); always emit it, empty when the
         # request carried no readiness gate.
@@ -512,6 +537,7 @@ def template_to_response(record: FastSandboxTemplateRecord) -> FsbTemplate:
         image=record.source_image,
         resourceLimits=limits,  # type: ignore[arg-type]
         entrypoint=record.spec.get("entrypoint"),
+        env=record.spec.get("env"),
         metadata=record.metadata or None,
         readiness=readiness,  # type: ignore[arg-type]
         publish=record.publish,

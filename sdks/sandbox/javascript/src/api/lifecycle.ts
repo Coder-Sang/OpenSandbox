@@ -740,7 +740,10 @@ export interface paths {
         put?: never;
         /**
          * Renew sandbox expiration
-         * @description Renew the absolute expiration time of a sandbox.
+         * @description Set the absolute expiration time of a sandbox to the supplied future timestamp.
+         *     This may shorten, preserve, or extend the current expiration.
+         *     The server configuration `server.max_sandbox_timeout_seconds` applies only
+         *     to `timeout` on creation and does not limit this operation.
          */
         post: {
             parameters: {
@@ -1499,7 +1502,8 @@ export interface components {
             /**
              * Format: date-time
              * @description New absolute expiration time in UTC (RFC 3339 format).
-             *     Must be in the future and after the current expiresAt time.
+             *     Must be in the future. May be earlier than, equal to, or later than the current expiresAt.
+             *     The creation-time limit `server.max_sandbox_timeout_seconds` does not apply.
              *
              *     Example: "2025-11-16T14:30:45Z"
              */
@@ -1767,6 +1771,20 @@ export interface components {
              *     `["tail", "-f", "/dev/null"]`.
              */
             entrypoint?: string[];
+            /**
+             * @description Environment variables baked into the golden image (injected as
+             *     `/etc/sandbox-init.env` in the guest; literal values only). The
+             *     source image's own OCI `Config.Env` is inherited like a container
+             *     runtime would; an env with the same name here overrides the
+             *     inherited value. Names must be valid shell variable names
+             *     (`[A-Za-z_][A-Za-z0-9_]*`).
+             * @example {
+             *       "LOG_LEVEL": "info"
+             *     }
+             */
+            env?: {
+                [key: string]: string;
+            };
             /** @description Custom key-value metadata for management, filtering, and tagging. */
             metadata?: {
                 [key: string]: string;
@@ -1811,6 +1829,10 @@ export interface components {
             resourceLimits?: components["schemas"]["ResourceLimits"];
             /** @description Guest business command (argv). */
             entrypoint?: string[];
+            /** @description Environment variables baked into the golden image. */
+            env?: {
+                [key: string]: string;
+            };
             /** @description Custom metadata from the creation request. */
             metadata?: {
                 [key: string]: string;

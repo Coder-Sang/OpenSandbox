@@ -129,6 +129,15 @@ public class CreateTemplateRequest
     public IReadOnlyList<string>? Entrypoint { get; set; }
 
     /// <summary>
+    /// Gets or sets environment variables baked into the golden image (injected
+    /// as /etc/sandbox-init.env in the guest; literal values only). The source
+    /// image's own OCI Config.Env is inherited; an env with the same name
+    /// overrides the inherited value. Names must be valid shell variable names.
+    /// </summary>
+    [JsonPropertyName("env")]
+    public IReadOnlyDictionary<string, string>? Env { get; set; }
+
+    /// <summary>
     /// Gets or sets custom key-value metadata for management, filtering, and tagging.
     /// </summary>
     [JsonPropertyName("metadata")]
@@ -206,6 +215,12 @@ public class TemplateInfo
     /// </summary>
     [JsonPropertyName("entrypoint")]
     public IReadOnlyList<string>? Entrypoint { get; set; }
+
+    /// <summary>
+    /// Gets or sets the environment variables baked into the golden image.
+    /// </summary>
+    [JsonPropertyName("env")]
+    public IReadOnlyDictionary<string, string>? Env { get; set; }
 
     /// <summary>
     /// Gets or sets the custom metadata from the creation request.

@@ -3,7 +3,7 @@ title: Credential-Bound TLS Interception
 authors:
   - "@hpliStartAgain"
 creation-date: 2026-09-04
-last-updated: 2026-09-09
+last-updated: 2026-10-09
 status: implementing
 ---
 
@@ -827,9 +827,14 @@ acknowledgements. The always-loaded system addon now owns that endpoint only
 when the Go launcher supplies a complete internal per-process session bundle;
 missing configuration keeps it disabled, partial configuration fails startup,
 and addon shutdown fences the receiver and removes its owned socket. The Go
-launcher strips inherited bundle values and can hand off a validated bundle,
-but the current sidecar and fast-sandbox assembly still pass none. An unused Go
-process-session owner now creates a private per-process receiver directory,
+launcher strips inherited bundle values and can hand off a validated bundle.
+Behind an internal development-only gate, the sidecar assembly now gives every
+initial or restarted mitmdump process a fresh session bundle and keeps health
+not-ready until the current in-memory Vault snapshot, or the authoritative
+initial empty state, is exactly acknowledged. Fast Sandbox still passes no
+bundle, and the gate defaults off. Public Vault writes are rejected while the
+internal gate is enabled until mutation acknowledgement is wired. The Go
+process-session owner creates a private per-process receiver directory,
 high-entropy control generation and token, matching launcher bundle, Unix
 transport, and coordinator. It accepts readiness only from an authenticated
 fresh receiver with no active revision. Directory operations stay anchored to a
@@ -842,16 +847,70 @@ prepare/commit transaction, and returns only after the coordinator confirms the
 exact identity. It can also reconcile an indeterminate bootstrap through
 metadata-only readback and exact commit/abort retries: a confirmed identity
 completes bootstrap, while a confirmed non-activation returns to an idle state
-that permits a new candidate. Live launch/restart invocation, connection
-teardown, and the public Vault mutation path remain unwired. Startup/recovery
-and atomic public-store finalization under the shared mutation barrier remain
-integration work.
+that permits a new candidate. When a candidate allocated by `Apply` has an
+indeterminate prepare/abort or commit outcome, the call returns that exact
+attempt identity with `ErrIndeterminate`; that identity is not proof of
+activation, and the caller must compare it exactly with a later reconciliation
+result before publishing. Attempt identity is now also retained by the private
+ProcessSession API, but public mutation and atomic public-store finalization,
+along with connection fencing, remain unwired. Durable recovery intent after a
+complete sidecar replacement remains integration work.
+
+ProcessSession now also exposes an internal post-bootstrap `Update` primitive
+and exact-attempt `ReconcileUpdate`. A future caller must keep its Vault
+candidate unpublished while holding the shared mutation barrier. A successful
+`Update` confirms its exact identity and permits finalization. After an
+indeterminate update, the session retains the exact attempt and the exact
+previous confirmed identity. `ReconcileUpdate` accepts only that outstanding
+attempt: it permits finalization only when it confirms that attempt active, and
+permits discarding only when it confirms the frozen previous identity remains
+active. Other attempts are rejected without transport activity; reconciliation
+errors retain the attempt, and a concurrent update remains blocked without
+transport activity.
+
+The sidecar now has an internal generation-pinned callback that holds the live
+process/session lifecycle read lock for the callback's full duration. This is
+only an ownership primitive: public mutation handlers, Vault Store candidate
+finalization, and connection fences are still not connected to it, so no
+public mutation acknowledgement is live. The callback accepts only the narrow
+update/reconcile session interface and requires a bounded context with a
+deadline canceled when sidecar shutdown begins. Callbacks must pass that same
+context to session operations and return promptly on cancellation; shutdown
+waits for a running callback to release the lifecycle read lock, and the helper
+cannot terminate a callback that ignores cancellation.
+
+`ErrClosed` and `ErrTransportUnavailable`, including a local parent-path fence
+failure after the receiver committed, are terminal session failures rather
+than reconcilable mutation outcomes. They return no attempt identity and never
+authorize candidate finalization. The future owner must stop the exact child,
+close the session, discard the unpublished candidate, and start a fresh session
+from the prior public state. This primitive does not connect public mutation
+handlers, finalize the Vault store, or install connection fences; selective
+TLS decisions remain disabled.
+
+The Go Vault store can now prepare unpublished create, patch, and delete
+candidates. A candidate freezes its rendered `ActiveSnapshot` before commit,
+publishes at most once, and uses a private mutation tag to reject concurrent
+changes and delete/recreate ABA even when the public Vault revision repeats.
+This is only the store-side prerequisite: the public handlers still return
+`503` under the internal gate, and ProcessSession update acknowledgement and
+connection fencing remain unwired. The sidecar's existing policy mutex now
+serializes effective-policy reads plus Vault create/patch/delete with `/policy`
+updates. Periodic `deny.always` / `allow.always` reload now uses this same
+barrier: it parses a candidate pair and, when an nft applier is configured,
+applies the corresponding static policy before publishing the loader and proxy
+rules. An `ApplyStatic` error preserves the active in-memory rules and leaves
+the candidate eligible for a later retry; parse errors do the same. This is a
+scoped nft-first staging boundary, not a revision transaction, and it makes no
+claim that an external nft apply error has no side effects. Vault binding
+revalidation, ProcessSession update acknowledgement, and connection fencing
+remain unconnected; no selective TLS decision is enabled by this change.
 
 The proxy-side transaction receiver validates
 generation/epoch/digest identities, stages immutable bytes, and implements
 commit, abort, and metadata-only readback. Its authenticated IPC endpoint is
-conditionally attached to the live addon as described above, but no running
-egress profile supplies a session yet. An unused Go builder now emits
+conditionally attached to the live addon as described above; only the gated
+sidecar startup/restart path supplies a session. The Go builder emits
 the versioned canonical decision payload from a rendered Vault snapshot and
 policy epoch. It derives and sorts HTTPS selectors from the same canonical
 bindings, preserves redaction order, and rejects non-canonical revisions,
@@ -859,10 +918,10 @@ selectors, or rendered credential/redaction coverage. A matching unused Python
 validator now strictly decodes those exact bytes, checks envelope vault/policy
 agreement, recomputes active state and HTTPS selectors from the full bindings,
 and rejects incomplete redaction coverage with a fixed sanitized error. The
-next integration must consume, bootstrap, and reconcile a fresh process session
-during launch/restart before readiness, then add connection fences before
-acknowledging public Vault mutations. Existing request processing continues to
-use the conditional ETag lookup until that integration is ready.
+next integration must place public policy/Vault mutations and revision
+installation under the shared mutation barrier, then add connection fences
+before acknowledging those mutations. Existing request processing continues to
+use the conditional ETag lookup, and no selective TLS decision is enabled yet.
 
 Implementation has started with the internal host-selector algebra and shared
 Go/Python conformance vectors. The control plane owns non-transitional UTS #46
@@ -872,6 +931,328 @@ lookup to project host coverage and exports a separate request-sample counter.
 It performs no ClientHello lookup and does not enable selective interception;
 opaque connections and failed handshakes are outside its observation set. The
 public interception mode remains unavailable until the later phases pass.
+
+The Python side now also has a pure ClientHello decision foundation. It builds
+an immutable TLS selector view only after strict validation of a real canonical
+revision snapshot, retaining revision metadata and parsed host selectors while
+discarding payload and credential-bearing bindings. Classification follows the
+early identity, ECH, no-SNI, invalid-SNI, static-ignore, snapshot-generation,
+and binding-host order, and reports only closed action/reason values. A bound
+host returns `needs_registry`; this is not a decrypt instruction. This step
+fails malformed ECH/static-selector arguments closed with `reason=invalid_input`
+while preserving early identity, ECH, and no-SNI ordering. It does not connect
+the classifier to the system addon or receiver commit path,
+and does not change Go, public configuration, or live traffic. Selective TLS
+remains disabled.
+
+An unused sidecar-only connection-registry foundation now consumes the pure
+classification result under one lock with bounded admission. It records only
+bound, admitted connections with their generation and decision epoch; capacity
+exhaustion denies new bound admission rather than making it opaque, while
+unbound pass-through consumes no entry. One Registry instance accepts only one
+sidecar generation; a replacement process creates a fresh instance. Deactivation
+denies later non-exempt SNI-bearing decisions and returns existing memberships
+for the future owner to close, but does not close transports itself. The
+joint-publication owner described below remains separate from mitmproxy hooks,
+fast-sandbox budgets, and live traffic.
+
+The unused sidecar registry now also reports which still-tracked decrypted
+connections become newly uncovered when a validated decision snapshot is
+activated. It compares the old and new selector coverage of each admitted SNI
+under the same lock as new TLS admissions, so overlapping wildcard and exact
+selectors are evaluated semantically rather than by raw set subtraction.
+Already-uncovered entries are not reported again on consecutive uncovered
+views, but remain tracked until released. Remove/readd/remove can report the
+same token again; a future transport owner must not reset its first retirement
+deadline on repeated notifications.
+
+The unused registry now permanently fences those tokens from its internal
+request-admission primitive. A Registry may bind one Receiver at construction;
+request admission without one denies. Under the Registry lock, `acquire_request`
+checks exact live token ownership, generation, and the monotonic connection
+fence, then acquires the Receiver snapshot and compares the complete revision.
+Only a coherent immutable Snapshot is returned. The sole nested lock order is
+Registry -> Receiver; successful admission linearizes when Receiver.acquire
+pins that snapshot. Neither later publication nor teardown revokes an already
+admitted request's bytes. Credential or request-selector updates retain the
+connection token, but new requests use the new snapshot once both views agree.
+Removed/readded hosts require a new connection; releasing a connection removes
+its fence without reusing its serial or accumulating tombstones.
+
+Standalone Receiver/Registry publication remains independent: either order
+fails closed while revisions disagree, with no old credential fallback. The
+internal joint-publication owner below removes that mismatch window for its
+owned pair. Live hooks and public mutation ACKs still require integration with
+the public mutation barrier and transport owner. Request admission is not full
+binding or destination authorization. No live HTTP request/stream uses this primitive yet; transport
+closure, HTTP/2 GOAWAY and request drain, including credential-only rotation
+drain, remain unimplemented. Holders must retain one snapshot through response
+redaction; this primitive provides neither live deadline enforcement nor zeroization.
+
+Successful internal request admission now also registers an exact, immutable
+request handle before returning, with the same pinned Snapshot as the result.
+Request records have a separate global capacity; the compatibility default is
+the connection capacity, not a production HTTP/2 sizing recommendation. An
+adapter must choose its budget explicitly. Exhaustion denies without waiting,
+eviction or pass-through, and one connection can consume the entire request
+budget; this is not per-connection fairness or tenant isolation.
+
+The future adapter must call `finish_request` on completion, cancellation and
+error paths. Exact terminal connection `release` also removes that connection's
+request records; copied tokens cannot release a real connection or its requests.
+Release is only for confirmed transport termination, not the start of drain.
+Host removal and Registry deactivation retain admitted requests for completion
+or terminal cleanup, and Receiver close does not revoke their immutable bytes.
+Empty connection indexes are removed and serials are never reused. Registration
+failures roll back partial indexes and expose only a fixed error.
+
+`pending_requests` exposes bounded, serial-ordered metadata pages containing
+only request serial, connection serial and complete revision, with optional
+exact-connection and revision filters. It exposes no Snapshot or finish handle.
+Each page is lock-consistent, but completion and new admission can change later
+pages; there is no frozen query view or high-watermark drain protocol. An empty
+page and `request_count` describe only Registry bookkeeping, not network drain,
+mutation ACK readiness, external Snapshot references or credential zeroization.
+The unused registry now records monotonic retirement deadlines at activation
+under its admission lock. Newly uncovered connections receive a deadline even
+when idle; unfinished requests pinned to older revisions receive independent
+deadlines, including on credential-only, request-scope or policy updates. The
+internal constructor accepts an integer timeout of `1..300` seconds, default
+`30`; the operator environment setting remains unwired. Repeated publication,
+further rotations and remove/readd/remove never extend the first deadline.
+Exact request completion removes its deadline; exact terminal connection
+release removes all corresponding deadlines. Deactivation preserves existing
+deadlines and returns all transports for shutdown without starting a new grace
+period.
+
+`expired_connections` returns bounded, serial-ordered pages of exact live
+connection tokens whose connection deadline or at least one unfinished retired
+request deadline has expired. Multiple expired requests yield one target. A
+completed old request no longer causes expiry on a still-covered connection;
+newer requests alone do not retire that connection. Pages are observations,
+not closure commands: completion or release may invalidate a returned target,
+and each new scan must restart at zero because lower serials can expire later.
+Expiry neither releases bookkeeping nor cancels work, revokes external
+Snapshots, fences new requests on still-covered connections, or proves ACK
+readiness. A future transport owner must inspect promptly and close expired
+targets, potentially interrupting newer requests sharing the same transport.
+There is still no live timer, transport closure or HTTP/2 GOAWAY owner, or
+public mutation ACK integration.
+
+An internal `RevisionPublisher` now exclusively owns a fresh Receiver
+and TLS Registry for one generation. Prepare validates the bounded immutable
+bytes and compiles their credential-free selector view outside both state locks,
+then stages both under the existing Registry -> Receiver lock order. Concurrent
+abort, close or another receiver transition invalidates delayed preparation;
+exact active/pending retries preserve newer prepared work. The Receiver's
+lifetime abort budget and historical exact-abort retries remain unchanged.
+
+Commit rechecks the exact prepared revision while holding both locks. It plans
+coverage changes, permanent request fences and retirement deadlines against the
+connections and requests present at commit, including those admitted after
+prepare. All fallible planning completes before either active view changes;
+failed planning preserves active state and the candidate for retry. Both views
+and all retirement bookkeeping are then published before either lock is released.
+Connection/request admissions therefore observe the old or new coherent state,
+without the standalone publication mismatch window. Credential-only rotation
+keeps old request bytes and deadlines while later requests pin the new snapshot.
+Exact active commit retries return no newly uncovered transports, do not extend
+deadlines, and do not discard a newer prepared candidate.
+
+The owner's close fences both components together, clears prepared state, and
+retains memberships, pinned handles and existing deadlines for terminal cleanup.
+Independent Receiver mutations and Registry activation/deactivation are rejected
+for this owned pair; standalone instances keep their existing APIs. Readback
+remains metadata-only, and commit returns newly uncovered connection tokens for
+a future drain owner, not a public mutation ACK. `RevisionPublisher` is not a
+Receiver and is not accepted directly by the exact-type IPC server.
+
+An internal `InstallationReceiver` now adapts a fresh Publisher to the existing
+authenticated IPC and experimental sidecar addon lifecycle. It exposes only the
+Receiver-shaped install/readback API and permanently disables connection
+admission before the owner escapes construction. No connection memberships or
+request handles can be created through this owner, so commit and close have no
+transport obligations to discard. Standalone Receiver and Publisher APIs remain
+available with their existing behavior. Commit returns the exact requested
+revision metadata, even if another commit installs a successor before the reply;
+active readback resolves a lost acknowledgement. Both active views are fenced
+on startup failure or addon shutdown.
+
+This backend confirms coherent installation only, never transport drain or a
+public mutation ACK. It adds no TLS/request hooks, live timer, transport closure,
+HTTP/2 GOAWAY, public configuration or selective TLS activation. The experimental
+gate still blocks public Vault writes; a future transport-aware owner must
+consume Publisher obligations before enabling live admissions.
+
+An internal Go Vault mutation owner now composes candidate preparation/rendering,
+exact process-session Update/Reconcile, and local Store finalization under the
+shared policy/Vault barrier and an exclusive live-generation lease. It requires
+a deadline context that its future caller must cancel on sidecar shutdown. The
+owner sends each candidate once, reconciles only the exact attempt, and checks
+the complete returned identity against the pinned generation, rendered digest,
+Vault revision and bootstrap-reserved policy epoch zero before finalization.
+Confirmed success finalizes even if cancellation arrives with the confirmation;
+an exact confirmed abort discards without replacing the live generation.
+
+An unresolved deadline, terminal session failure, inconsistent acknowledgement
+or failed local finalization after acknowledgement fences readiness and detaches
+the exact child/session. Both locks remain held while that child is stopped and
+reaped, the session is closed, and the unpublished candidate is discarded. This
+prevents shutdown from claiming the same child twice and prevents the existing
+restart path from reading recovery state before cleanup. Session-close failure
+never reports success or restores readiness. IPC reconciliation is bounded by
+the context; existing process stop/reap does not promise a hard cleanup deadline.
+
+The owner integration tests run the real Go Store, ProcessSession, coordinator
+and Unix client against a Python subprocess using the production authenticated
+IPC endpoint and installation-only publisher. Response-boundary faults cover
+lost prepare/commit replies, withheld then failed readback, deadline cleanup,
+and stale local finalization, followed by fresh-session bootstrap from public
+Store state. The test child is actually signaled and reaped through the owner's
+stop seam; this does not exercise the production mitmdump launcher,
+`GracefulShutdown`, restart watcher, TLS hooks, or transport draining. These tests
+require Python 3 and permission to create Unix sockets; Egress CI supplies
+Python before running Go tests. Socket setup failures fail rather than skip.
+
+This owner is not wired into public HTTP handlers. Public Vault writes remain
+blocked by the experimental gate, policy mutations do not yet participate in
+revision installation, and installation confirmation is not transport drain or
+public mutation completion. Selective TLS, live admissions and request hooks
+remain disabled for the installation-only backend.
+
+An internal, HTTP-unwired effective-policy candidate now freezes explicit user,
+ordered always-deny/allow, and resolved telemetry rules without loader callbacks.
+The independent immutable policy-base handle and authoritative Store must both
+be supplied when validating a candidate under the shared mutation barrier.
+Replacing the base handle invalidates older candidates even if policy content
+and epoch repeat; the Store's private mutation identity rejects Vault changes,
+including absent/create/delete and delete/recreate public-revision ABA.
+The experimental sidecar now tracks the live current base through a shared
+recovery/readiness owner, described below. Active policy epochs remain zero;
+policy-only candidate installation does not publish an active policy epoch.
+
+The recovery/readiness owner holds the authoritative immutable effective-policy
+base, Store identity, a private non-reusable bootstrap invalidation identity and
+a sticky recovery reason under the shared policy/Vault barrier. Capturing a
+bootstrap ticket freezes the already-rendered Vault snapshot without resolving
+credential sources again. The ticket is private, is not sent over IPC, and does
+not use the decision digest as proof of complete policy identity. Replacing the
+base invalidates prior candidates and bootstraps even if rules and epoch repeat;
+Vault mutation identity also rejects public-revision ABA.
+
+Initial startup and automatic child restart share one protected publication
+step, taking the policy barrier before the process-lifecycle lock. Slow launch,
+bootstrap IPC and listener checks run outside these locks. The final step checks
+the exact ticket, current base/Store/Vault identity, recovery state, caller
+cancellation, shutdown and exact pending child/session generation before
+transferring ownership and setting health ready. Successful installation and
+listener availability alone do not permit publication. Rejected attempts retain
+their own resources for exact child stop/reap followed by session close; an old
+exit notification cannot detach a newer generation. A clean child crash still
+allows a fresh capture and automatic restart.
+
+Experimental policy and always-rule paths invalidate in-flight bootstrap tickets
+before attempting external effects, then replace the authoritative base on
+successful legacy publication. They use explicitly frozen loader/telemetry
+inputs and do not turn policy success responses into revision transaction ACKs.
+An uncertain failure after an attempted policy-file or nft effect, or an
+unconfirmed session cleanup, latches `recovery-required`. Pure parse/validation
+failures before effects do not. Once latched, health remains not-ready, internal
+policy candidate preparation and Vault mutation ownership reject work, and
+ordinary child restart or successful IPC readback cannot clear it. Shutdown and
+teardown remain available. There is no reset API; the first recovery reason is
+sticky only within the same Go process incarnation.
+
+For the ordinary sidecar's experimental revision runtime, recovery also
+synchronously quiesces the same nft Manager. Its terminal static-apply error
+sets a one-way frozen state under the Manager lock before returning, including
+the first startup apply; successful missing-table fallback does not freeze it.
+The option is set by the existing experimental switch at Manager construction,
+before startup enforcement. The recovery owner requires `Quiesce()` on its
+internal nft interface and calls it for policy persistence, nft apply and
+session-cleanup failures after publishing ticket invalidation and the sticky
+health restriction. Health probes do not acquire the policy or Manager lock,
+so they can return 503 while an admitted writer finishes. Lock order remains
+policy/Vault barrier, any already-held process-lifecycle lock, then Manager lock;
+the Manager does not call back into the owner.
+
+The atomic write-admission gate covers static replacement, `AddResolvedIPs`,
+`AddResolvedDomain`, late `applyDomainRefresh` results, active TCP lease renewal,
+and `AddUpstreamProxyIPs`. Quiescence closes this gate before waiting for the
+Manager lock; queued and new writers check it after acquiring the lock. A writer
+that passed the gate before it closed may complete its nft update and associated
+state publication. Quiescence returns only after that admitted operation drains.
+An in-flight DNS query may return later, but
+cannot write nft or republish old authorization tracking. Upstream proxy lease
+renewal also stops: DNS-learned addresses may expire and later proxy connections
+may fail. Existing traffic and established connections can still be permitted.
+Stale bootstrap tickets, clean child crashes and successful policy publication
+do not freeze the Manager. Legacy sidecar, Fast Sandbox and dns-only behavior
+keep their existing boundaries.
+
+Explicit shutdown `RemoveEnforcement` remains a table-deletion exception and
+does not unfreeze the Manager, even after failed cleanup. There is no reset or
+unfreeze API, packet fence, durable frozen state, rollback of unknown effects,
+or new hard shutdown deadline. Deterministic owner tests use real Manager write
+admission and injected effect failures to cover recovery sources and health
+while an admitted writer drains; these tests do not establish kernel behavior.
+
+`TestNftQuiescenceAfterCommittedStaticError` uses a separate Linux network
+namespace and the real nft runner. After seeding old dynamic and upstream
+addresses, it commits a new static ruleset and injects a result error only after
+nft succeeds. All six subsequent runtime paths must leave the committed policy
+and empty dynamic/upstream sets unchanged. The privileged egress CI explicitly
+selects this test and `TestDynamicElementRenewal` with
+`OPENSANDBOX_NFT_TEST=1`. Linux, nftables, `unshare`, and namespace/nft permissions
+are required; missing prerequisites fail enabled runs. Ordinary Go suite runs
+skip this kernel validation when it is not enabled. Neither a skip nor a setup
+failure establishes kernel behavior, and the test does not prove a packet fence.
+
+Deterministic lifecycle tests cover both readiness entry points, staged recovery
+transitions, exact cleanup and publication races. A real Go→Unix→Python test uses
+the production authenticated IPC endpoint and installation-only receiver to
+pause after installation and reject publication after a policy-base change,
+Vault ABA or recovery latch, with clean recapture and sticky-state controls. That
+test requires permission to create Unix sockets: a setup failure is a test
+failure, not evidence that stale-publication assertions ran. The child stop seam
+signals and reaps a real subprocess; it does not exercise the production
+mitmdump launcher, listener, `GracefulShutdown`, TLS or transport drain.
+
+The latch is neither a network fence nor durable recovery intent. This increment
+does not provide atomic policy-file/nft rollback, restore dynamic DNS state, or
+survive a whole Go/sidecar crash. Restarting the entire sidecar loses the latch
+and is not a proven safe recovery procedure. External effects transactions,
+durable intent, active policy epochs, public mutation ACKs, selective TLS,
+request hooks, live admissions and Fast Sandbox integration remain future work.
+
+Preparation revalidates every Vault binding, including HTTP-only bindings, and
+adds a conservative ordered whole-selector coverage proof for wildcard hosts.
+An exact or nested wildcard deny is rejected unless an earlier allow covers
+its overlap; nameserver nft allowances cannot authorize credential bindings.
+The helper preserves first-match policy semantics and does not alter legacy
+public Vault validation. Coverage is fail-closed: it does not prove that a union
+of narrower selectors exhausts a maximum-length wildcard's finite DNS names.
+
+The Store captures its existing pinned rendered snapshot under the same lock as
+binding validation and mutation identity. Bound Vaults created by legacy
+Create/Patch without a committed rendered candidate are rejected rather than
+re-resolving credentials. An empty Vault preserves its positive revision and
+exists state; an absent Vault remains absent. Policy-only preparation changes
+neither public Vault revision nor rendered credential bytes. Canonical decision
+bytes and digest use prospective policy epoch `base + 1`, including identical
+inputs; repeated preparation does not consume epochs. No-op selection remains
+the future publication owner's responsibility. The digest authenticates the
+decision payload (Vault and epoch), not the frozen policy inputs; different
+candidates from the same base can share it. The future effect owner must bind
+external effects to the exact candidate, not infer policy identity from digest.
+
+The candidate integration test reuses the real Go-to-Python IPC fixture to
+check prospective epoch/digest installation with admissions disabled and
+unchanged control-plane base/Vault state. It requires Unix socket permission
+and fails on setup errors. This slice supplies no disk/nft effects, live policy
+publication, rollback/crash durability, public mutation acknowledgement, or
+TLS/request/fast-sandbox activation. A later effect owner must establish those
+boundaries before wiring the candidate into public mutations.
 
 1. **Decision telemetry and red tests**
    - Add fail-closed tests that distinguish authoritative empty from lookup

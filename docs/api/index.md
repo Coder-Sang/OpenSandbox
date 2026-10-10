@@ -9,6 +9,10 @@ This section contains the OpenAPI specification documents for the OpenSandbox pr
 
 ## Specification Files
 
+Implementing an alternative backend or integrating a workload's own API? Read
+[Implementation compatibility](/api/implementation-compatibility) for the boundary
+between these contracts, the reference daemons, and current SDK expectations.
+
 ### 1. sandbox-lifecycle.yml
 
 [OpenAPI source](https://github.com/opensandbox-group/OpenSandbox/blob/main/specs/sandbox-lifecycle.yml)
@@ -37,9 +41,9 @@ Defines the complete lifecycle interfaces for creating, managing, and destroying
 - `GET /snapshots` - List snapshots with optional source sandbox, exact name, and state filtering plus pagination
 - `GET /snapshots/{snapshotId}` - Get snapshot state and metadata
 - `DELETE /snapshots/{snapshotId}` - Delete a snapshot
-- `POST /sandboxes/{sandboxId}/pause` - Pause a sandbox (asynchronous)
+- `POST /sandboxes/{sandboxId}/pause` - Pause a sandbox (asynchronous); returns `409 Conflict` if it is already paused
 - `POST /sandboxes/{sandboxId}/resume` - Resume a paused sandbox
-- `POST /sandboxes/{sandboxId}/renew-expiration` - Renew sandbox expiration (TTL)
+- `POST /sandboxes/{sandboxId}/renew-expiration` - Set the absolute sandbox expiration time
 - `PATCH /sandboxes/{sandboxId}/metadata` - Patch sandbox metadata (JSON Merge Patch, RFC 7396)
 - `GET /sandboxes/{sandboxId}/endpoints/{port}` - Get an access endpoint and required headers; supports `use_server_proxy` and signed-endpoint `expires` parameters
 - `GET/PUT/PATCH/DELETE /sandboxes/{sandboxId}/networkpolicy` - Inspect and manage the sandbox egress network policy (Fsb persists intent on the Sandbox CR; other backends proxy the sandbox-side egress service)
@@ -47,6 +51,12 @@ Defines the complete lifecycle interfaces for creating, managing, and destroying
 - `GET /templates` - List templates with metadata filters and pagination
 - `GET /templates/{templateId}` - Get template status and artifact references
 - `DELETE /templates/{templateId}` - Delete a template
+
+**Expiration updates:**
+`renew-expiration` sets `expiresAt` to the supplied future timestamp, which may be
+earlier than, equal to, or later than the current expiration. The configured
+`server.max_sandbox_timeout_seconds` applies only to `timeout` on creation; it
+does not cap expiration updates. See [Sandbox expiration](/getting-started/configuration#sandbox-expiration).
 
 **Optional `Sandbox.allocation` response field:**
 - Returned only when the runtime confirms the sandbox's current concrete Pool allocation.

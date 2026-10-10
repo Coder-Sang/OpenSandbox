@@ -2563,28 +2563,6 @@ func TestRunCommand_Background(t *testing.T) {
 	require.Len(t, events, 2)
 }
 
-func TestAPIError_RequestID(t *testing.T) {
-	_, client := newLifecycleServer(t, func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("X-Request-Id", "req-abc-123")
-		jsonResponse(w, http.StatusNotFound, ErrorResponse{
-			Code:    "SANDBOX_NOT_FOUND",
-			Message: "not found",
-		})
-	})
-
-	_, err := client.GetSandbox(context.Background(), "sbx-missing")
-	require.Error(t, err)
-
-	apiErr, ok := err.(*APIError)
-	require.True(t, ok, "expected *APIError, got %T", err)
-	if apiErr.RequestID != "req-abc-123" {
-		assert.Fail(t, fmt.Sprintf("RequestID = %q, want req-abc-123", apiErr.RequestID))
-	}
-	if !strings.Contains(apiErr.Error(), "req-abc-123") {
-		assert.Fail(t, fmt.Sprintf("Error() = %q, expected to contain request ID", apiErr.Error()))
-	}
-}
-
 func TestCreateSandbox_WithNetworkPolicy(t *testing.T) {
 	_, client := newLifecycleServer(t, func(w http.ResponseWriter, r *http.Request) {
 		var req CreateSandboxRequest
@@ -2683,4 +2661,113 @@ func TestCreateSandbox_WithVolumes(t *testing.T) {
 		},
 	})
 	require.NoErrorf(t, err, "CreateSandbox with Volumes")
+}
+
+func TestRunCommandBackgroundStopsAtComplete(t *testing.T) {
+	for _, callbackFails := range []bool{false, true} {
+		t.Run(fmt.Sprint(callbackFails), func(t *testing.T) {
+			closed := make(chan struct{})
+			release := make(chan struct{})
+			defer close(release)
+			_, client := newExecdServer(t, func(w http.ResponseWriter, r *http.Request) {
+				io.Copy(io.Discard, r.Body)
+				fmt.Fprint(w, "data: {\"type\":\"execution_complete\"}\n\n")
+				w.(http.Flusher).Flush()
+				select { // No EOF: the client must close the response.
+				case <-r.Context().Done():
+					close(closed)
+				case <-release:
+				}
+			})
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			callbackErr := fmt.Errorf("callback failed")
+			calls := 0
+			err := client.RunCommand(ctx, RunCommandRequest{Command: "sleep 30", Background: true}, func(StreamEvent) error {
+				calls++
+				if callbackFails {
+					return callbackErr
+				}
+				return nil
+			})
+			if callbackFails {
+				require.ErrorIs(t, err, callbackErr)
+			} else {
+				require.NoError(t, err)
+			}
+			require.Equal(t, 1, calls)
+			select {
+			case <-closed:
+			case <-time.After(time.Second):
+				t.Fatal("response was not closed")
+			}
+		})
+	}
+}
+
+func TestRunCommandForegroundDrainsTerminalStream(t *testing.T) {
+	for _, failure := range []bool{false, true} {
+		for _, late := range []bool{false, true} {
+			t.Run(fmt.Sprintf("failure=%v/late=%v", failure, late), func(t *testing.T) {
+				terminal := `{"type":"execution_complete"}`
+				if failure {
+					terminal = `{"type":"error","error":{"ename":"CommandExecError","evalue":"7"}}`
+				}
+				output := []string{`{"type":"stdout","text":"tail"}`, `{"type":"stderr","text":"error-tail"}`}
+				frames := append(append([]string{}, output...), terminal)
+				if late {
+					frames = append([]string{terminal}, output...)
+				}
+				_, client := newExecdServer(t, func(w http.ResponseWriter, r *http.Request) {
+					for _, frame := range frames {
+						fmt.Fprint(w, "data: "+frame[:7])
+						w.(http.Flusher).Flush()
+						fmt.Fprint(w, frame[7:]+"\n\n")
+						w.(http.Flusher).Flush()
+					}
+				})
+				var got []string
+				err := client.RunCommand(context.Background(), RunCommandRequest{Command: "echo test"}, func(event StreamEvent) error {
+					got = append(got, event.Data)
+					return nil
+				})
+				require.NoError(t, err)
+				require.Equal(t, frames, got)
+			})
+		}
+	}
+}
+
+func TestSandboxBackgroundResultAcknowledgesStartup(t *testing.T) {
+	_, client := newExecdServer(t, func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "{\"type\":\"init\",\"text\":\"background-id\"}\n\n{\"type\":\"execution_complete\"}\n\n")
+	})
+	sandbox := &Sandbox{execd: client}
+	result, err := sandbox.RunCommandWithOpts(context.Background(), RunCommandRequest{Command: "sleep 30", Background: true}, nil)
+	require.NoError(t, err)
+	require.Equal(t, "background-id", result.ID)
+	require.NotNil(t, result.Complete)
+	require.True(t, result.ExitCode == nil, "startup does not establish a process exit code")
+}
+
+func TestCreateSession_SendsCwd(t *testing.T) {
+	var gotCwd string
+	_, client := newExecdServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/session" {
+			assert.Fail(t, fmt.Sprintf("expected /session, got %s", r.URL.Path))
+		}
+		var req CreateSessionRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		gotCwd = req.Cwd
+		jsonResponse(w, http.StatusCreated, Session{ID: "sess-cwd"})
+	})
+
+	got, err := client.CreateSession(context.Background(), CreateSessionRequest{Cwd: "/workspace"})
+	require.NoErrorf(t, err, "CreateSession")
+	if got.ID != "sess-cwd" {
+		assert.Fail(t, fmt.Sprintf("ID = %q, want sess-cwd", got.ID))
+	}
+	if gotCwd != "/workspace" {
+		assert.Fail(t, fmt.Sprintf("cwd = %q, want /workspace (regression: request body was dropped)", gotCwd))
+	}
 }

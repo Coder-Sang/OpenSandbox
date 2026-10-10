@@ -57,6 +57,17 @@ public sealed class Sandbox : IAsyncDisposable
     public ISandboxFiles Files { get; }
 
     /// <summary>
+    /// Returns an independent filesystem client using explicit Linux credentials.
+    /// Unsupported servers fail without falling back to the default identity.
+    /// </summary>
+    public ISandboxFiles FilesWithIdentity(uint uid, uint gid)
+    {
+        if (Files is not IIdentitySandboxFiles adapter)
+            throw new NotSupportedException("The selected filesystem adapter does not support execution identity.");
+        return adapter.WithIdentity(uid, gid);
+    }
+
+    /// <summary>
     /// Gets the health check service.
     /// </summary>
     public IExecdHealth Health { get; }
@@ -347,12 +358,19 @@ public sealed class Sandbox : IAsyncDisposable
             sandboxId = created.Id;
             logger.LogInformation("Sandbox created: {SandboxId}", sandboxId);
 
-            var endpoint = await sandboxes.GetSandboxEndpointAsync(
+            // Resolve endpoints through a readiness budget like ConnectAsync
+            // (fresh sandboxes may 404 with POD_IP_NOT_AVAILABLE).
+            using var budget = new ReadinessBudget(
+                readyTimeoutSeconds ?? Constants.DefaultReadyTimeoutSeconds,
+                cancellationToken);
+            var interval = healthCheckPollingInterval ?? Constants.DefaultHealthCheckPollingIntervalMillis;
+            var protocol = connectionConfig.Protocol == ConnectionProtocol.Https ? "https" : "http";
+
+            var endpoint = await budget.Endpoint(token => sandboxes.GetSandboxEndpointAsync(
                 sandboxId,
                 Constants.DefaultExecdPort,
                 connectionConfig.UseServerProxy,
-                cancellationToken).ConfigureAwait(false);
-            var protocol = connectionConfig.Protocol == ConnectionProtocol.Https ? "https" : "http";
+                token), interval).ConfigureAwait(false);
             var execdBaseUrl = $"{protocol}://{endpoint.EndpointAddress}";
             var execdHeaders = MergeHeaders(connectionConfig.Headers, endpoint.Headers);
 
@@ -390,11 +408,11 @@ public sealed class Sandbox : IAsyncDisposable
             }
             else
             {
-                var egressEndpoint = await sandboxes.GetSandboxEndpointAsync(
+                var egressEndpoint = await budget.Endpoint(token => sandboxes.GetSandboxEndpointAsync(
                     sandboxId,
                     Constants.DefaultEgressPort,
                     connectionConfig.UseServerProxy,
-                    cancellationToken).ConfigureAwait(false);
+                    token), interval).ConfigureAwait(false);
                 var egressBaseUrl = $"{protocol}://{egressEndpoint.EndpointAddress}";
                 var egressHeaders = MergeHeaders(connectionConfig.Headers, egressEndpoint.Headers);
 
@@ -431,12 +449,10 @@ public sealed class Sandbox : IAsyncDisposable
             if (!skipHealthCheck)
             {
                 logger.LogDebug("Waiting for sandbox readiness: {SandboxId}", sandboxId);
-                await sandbox.WaitUntilReadyAsync(new WaitUntilReadyOptions
-                {
-                    ReadyTimeoutSeconds = readyTimeoutSeconds ?? Constants.DefaultReadyTimeoutSeconds,
-                    PollingIntervalMillis = healthCheckPollingInterval ?? Constants.DefaultHealthCheckPollingIntervalMillis,
-                    HealthCheck = healthCheck
-                }, cancellationToken).ConfigureAwait(false);
+                // Reuse the endpoint budget so the ready timeout covers
+                // publication + health check once, mirroring ConnectAsync
+                // (WaitUntilReadyAsync would stack a second fresh budget).
+                await sandbox.CheckReadinessAsync(budget, interval, healthCheck).ConfigureAwait(false);
             }
 
             LifecycleMetricsReporter.ReportSandboxCreate(
@@ -457,9 +473,12 @@ public sealed class Sandbox : IAsyncDisposable
                 {
                     await sandboxes.DeleteSandboxAsync(sandboxId, CancellationToken.None).ConfigureAwait(false);
                 }
-                catch
+                catch (Exception cleanupEx)
                 {
-                    }
+                    // Best-effort zombie cleanup; never mask the create error,
+                    // but make the failure diagnosable.
+                    logger.LogError(cleanupEx, "Failed to clean up sandbox {SandboxId} after creation failure", sandboxId);
+                }
             }
 
             LifecycleMetricsReporter.ReportSandboxCreate(
@@ -763,7 +782,9 @@ public sealed class Sandbox : IAsyncDisposable
     }
 
     /// <summary>
-    /// Renews the sandbox expiration time.
+    /// Sets the sandbox expiration to the current time plus timeoutSeconds.
+    /// This may shorten or extend the remaining lifetime. The creation-time
+    /// server timeout limit does not apply.
     /// </summary>
     /// <param name="timeoutSeconds">The new timeout in seconds from now.</param>
     /// <param name="cancellationToken">Cancellation token.</param>

@@ -113,17 +113,17 @@ data:
     stateRoot: {{ .Values.runtime.stateRoot }}
     registryConfig: /etc/fast-sandbox/agent/registry.json
     hostnameFile: /etc/hostname
-    dart:
-      addr: http://127.0.0.1:8145
-      bin: dart
-      admin: 127.0.0.1:8147
-      cacheSize: 8GiB
-      discover: {{ $dartDiscover }}
+    p2p:
+      dart:
+        addr: http://127.0.0.1:8145
+        bin: dart
+        admin: 127.0.0.1:8147
+        cacheSize: 8GiB
+        discover: {{ $dartDiscover }}
     nodeReadiness:
       enabled: true
       assetsDir: /opt/fast-sandbox/firecracker
       fcVersion: v1.16.1
-      kernelURL: ""
       interval: 5m
       minFree: 10GiB
       minMemory: 2GiB
@@ -168,6 +168,9 @@ spec:
       - key: node-role.kubernetes.io/control-plane
         operator: Exists
         effect: NoSchedule
+      {{- with .Values.runtime.tolerations }}
+      {{- toYaml . | nindent 6 }}
+      {{- end }}
       {{- with .Values.runtime.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
@@ -177,7 +180,7 @@ spec:
       # and a regular Pod identity for the stable HRW node hostname file.
       containers:
       - name: firecracker-agent
-        image: {{ include "fast-sandbox.image" .Values.runtime.image }}
+        image: {{ include "fast-sandbox.image" (dict "repository" .Values.runtime.image.repository "tag" .Values.runtime.image.tag "appVersion" .Chart.AppVersion) }}
         imagePullPolicy: {{ .Values.runtime.image.pullPolicy }}
         # Only Downward API identities live in env; all tunables come from
         # the mounted agent config (nodeReadiness hot-reloads per pass).
@@ -218,6 +221,10 @@ spec:
         - name: peer
           containerPort: {{ .Values.runtime.dartPeerPort }}
           protocol: TCP
+        {{- with .Values.runtime.resources.agent }}
+        resources:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
         volumeMounts:
         - name: agent-socket
           mountPath: {{ .Values.runtime.socketDir }}
@@ -244,7 +251,7 @@ spec:
       # this pod targets the firecracker runtime; the standalone janitor
       # DaemonSet keeps covering the containerd-based runtimes.
       - name: janitor
-        image: {{ include "fast-sandbox.image" .Values.janitor.image }}
+        image: {{ include "fast-sandbox.image" (dict "repository" .Values.janitor.image.repository "tag" .Values.janitor.image.tag "appVersion" .Chart.AppVersion) }}
         imagePullPolicy: {{ .Values.janitor.image.pullPolicy }}
         command: ["/workspace/janitor"]
         args: ["--scan-interval={{ .Values.janitor.scanInterval }}", "--orphan-timeout={{ .Values.janitor.orphanTimeout }}", "--containerd-socket="]
@@ -258,6 +265,10 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: spec.nodeName
+        {{- with .Values.runtime.resources.janitor }}
+        resources:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
         volumeMounts:
         - name: network-state
           mountPath: /run/fast-sandbox/network

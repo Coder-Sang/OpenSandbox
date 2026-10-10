@@ -34,6 +34,12 @@ helm install opensandbox-controller manifests/charts/controller \
 
 The command deploys OpenSandbox Controller on the Kubernetes cluster with default configuration. The [Parameters](#parameters) section lists the parameters that can be configured during installation.
 
+> **Fixed resource names**: resource names in this chart are fixed
+> (`opensandbox-controller-manager` Deployment/ServiceAccount,
+> `opensandbox-manager-role` / `opensandbox-leader-election-role` RBAC).
+> `nameOverride` / `fullnameOverride` affect label values only, and installing
+> more than one release of this chart into a single cluster is not supported.
+
 ## Uninstalling the Chart
 
 To uninstall/delete the `opensandbox-controller` deployment:
@@ -69,7 +75,7 @@ The following table lists the configurable parameters of the chart and their def
 | controller.kubeClient.burst | int | `200` | Burst for Kubernetes client rate limiter. |
 | controller.kubeClient.qps | int | `100` | QPS for Kubernetes client rate limiter. |
 | controller.leaderElection | object | `{"enabled":true}` | Enable leader election for controller manager |
-| controller.livenessProbe | object | `{"enabled":true,"failureThreshold":3,"httpGet":{"path":"/healthz","port":8081},"initialDelaySeconds":15,"periodSeconds":20,"successThreshold":1,"timeoutSeconds":1}` | Liveness probe configuration |
+| controller.livenessProbe | object | `{"enabled":true,"failureThreshold":3,"httpGet":{"path":"/healthz","port":8081},"initialDelaySeconds":15,"periodSeconds":20,"successThreshold":1,"timeoutSeconds":1}` | Liveness probe configuration. The livenessProbe.httpGet.port below also drives --health-probe-bind-address and the health container port. |
 | controller.logLevel | string | `"info"` | Log level for zap logger (debug, info, error) |
 | controller.metrics | object | `{"enabled":false,"port":8080,"secure":false}` | controller-runtime metrics endpoint (Prometheus). Disabled by default to preserve the current behavior (the binary defaults to `--metrics-bind-address=0`). |
 | controller.metrics.enabled | bool | `false` | Expose the controller-runtime /metrics endpoint (sets `--metrics-bind-address`) |
@@ -78,17 +84,22 @@ The following table lists the configurable parameters of the chart and their def
 | controller.nodeSelector | object | `{}` | Node labels for controller pod assignment |
 | controller.podAnnotations | object | `{}` | Additional annotations for controller pods |
 | controller.podLabels | object | `{}` | Additional labels for controller pods |
+| controller.podRecovery | object | `{"admissionReasons":"","maxAttempts":3,"stuckThreshold":"1m"}` | Image pull stuck pod recovery during initial startup (BatchSandbox). Rendered into the `feature-flags` ConfigMap in the controller namespace; the controller hot-reloads it without a restart. |
+| controller.podRecovery.admissionReasons | string | `""` | Comma-separated kubelet admission rejection reasons that pod replacement can recover (`pod-recovery-admission-reasons`). Replaces the built-in set (NodeNotSchedulable, KubeletNotReady, UnexpectedAdmissionError, Evicted; OutOf* reasons always apply). Leave empty to use the built-in defaults. |
+| controller.podRecovery.maxAttempts | int | `3` | Maximum number of stuck-pod replacements per BatchSandbox generation (`pod-recovery-max-attempts`). |
+| controller.podRecovery.stuckThreshold | string | `"1m"` | How long a pod must stay in ImagePullBackOff/ErrImagePull during initial startup before the controller replaces it (`pod-recovery-stuck-threshold`). |
 | controller.podSecurityContext | object | `{"runAsNonRoot":true,"seccompProfile":{"type":"RuntimeDefault"}}` | Pod security context |
 | controller.priorityClassName | string | `""` | Priority class name for controller pods |
-| controller.readinessProbe | object | `{"enabled":true,"failureThreshold":3,"httpGet":{"path":"/readyz","port":8081},"initialDelaySeconds":5,"periodSeconds":10,"successThreshold":1,"timeoutSeconds":1}` | Readiness probe configuration |
+| controller.readinessProbe | object | `{"enabled":true,"failureThreshold":3,"httpGet":{"path":"/readyz","port":8081},"initialDelaySeconds":5,"periodSeconds":10,"successThreshold":1,"timeoutSeconds":1}` | Readiness probe configuration. Shares the health-probe port with livenessProbe. |
 | controller.replicaCount | int | `1` | Number of controller replicas |
 | controller.resources | object | `{"limits":{"cpu":"500m","memory":"128Mi"},"requests":{"cpu":"10m","memory":"64Mi"}}` | Resource requests and limits for the controller |
-| controller.snapshot | object | `{"commitJobTimeout":"10m","containerdSocketPath":"","imageCommitterImage":"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/image-committer:release-1.1.0","imageCommitterPodTemplate":{},"imageCommitterPullSecret":"","registry":"","registryInsecure":false,"resumePullSecret":"","snapshotPushSecret":""}` | Pause/Resume snapshot configuration |
+| controller.snapshot | object | `{"commitJobTimeout":"10m","containerdSocketPath":"","imageCommitterImage":"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/image-committer:release-1.1.1","imageCommitterPodTemplate":{},"imageCommitterPullSecret":"","imageURITemplate":"","registry":"","registryInsecure":false,"resumePullSecret":"","snapshotPushSecret":""}` | Pause/Resume snapshot configuration |
 | controller.snapshot.commitJobTimeout | string | `"10m"` | Timeout duration for commit jobs |
 | controller.snapshot.containerdSocketPath | string | `""` | Containerd socket path of host. Defaults to empty so the controller uses its built-in default (/var/run/containerd/containerd.sock) without passing the `--containerd-socket-path` flag. |
-| controller.snapshot.imageCommitterImage | string | `"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/image-committer:release-1.1.0"` | Image used for commit operations. DockerHub: opensandbox/image-committer:release-1.1.0 |
+| controller.snapshot.imageCommitterImage | string | `"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/image-committer:release-1.1.1"` | Image used for commit operations. DockerHub: opensandbox/image-committer:release-1.1.1 |
 | controller.snapshot.imageCommitterPodTemplate | object | `{}` | PodTemplateSpec overlay for image-committer commit Job Pods. |
 | controller.snapshot.imageCommitterPullSecret | string | `""` | Secret name for pulling the image-committer image in commit Jobs. Required when imageCommitterImage is stored in a private registry. |
+| controller.snapshot.imageURITemplate | string | `""` | Go named-field template for snapshot image URIs. Empty preserves default naming. |
 | controller.snapshot.registry | string | `""` | OCI registry prefix used for snapshot images. |
 | controller.snapshot.registryInsecure | bool | `false` | Use insecure registry mode when pushing snapshot images. |
 | controller.snapshot.resumePullSecret | string | `""` | Secret name injected into resumed sandboxes for pulling snapshot images. |
@@ -99,9 +110,9 @@ The following table lists the configurable parameters of the chart and their def
 | extraInitContainers | list | `[]` | Additional init containers |
 | extraVolumeMounts | list | `[]` | Additional volume mounts for the controller |
 | extraVolumes | list | `[]` | Additional volumes for the controller |
-| fullnameOverride | string | `""` | Override the full name of the chart |
+| fullnameOverride | string | `""` | Override the full name of the chart (labels only; resource names are fixed) |
 | imagePullSecrets | list | `[]` | Image pull secrets for private registries |
-| nameOverride | string | `""` | Override the name of the chart |
+| nameOverride | string | `""` | Override the name of the chart (labels only; resource names are fixed) |
 | namespaceOverride | string | `""` | Override the namespace where resources will be created If not set, defaults to "opensandbox-system" |
 | rbac.create | bool | `true` | Specifies whether RBAC resources should be created |
 | serviceAccount.annotations | object | `{}` | Annotations to add to the service account |
@@ -182,6 +193,7 @@ These values render directly to the controller flags:
 - `--image-committer-pod-template-file`
 - `--commit-job-timeout`
 - `--snapshot-registry`
+- `--snapshot-image-uri-template`
 - `--snapshot-registry-insecure`
 - `--snapshot-push-secret`
 - `--image-committer-pull-secret`
@@ -265,7 +277,7 @@ kubectl get crd | grep opensandbox
 ### Verify RBAC permissions
 
 ```bash
-kubectl auth can-i --as=system:serviceaccount:opensandbox-system:opensandbox-controller-controller-manager create pods
+kubectl auth can-i --as=system:serviceaccount:opensandbox-system:opensandbox-controller-manager create pods
 ```
 
 ## Additional Resources

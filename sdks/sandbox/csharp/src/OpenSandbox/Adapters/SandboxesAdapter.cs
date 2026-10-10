@@ -569,6 +569,7 @@ internal sealed class SandboxesAdapter : ISandboxes
             Entrypoint = element.TryGetProperty("entrypoint", out var entrypoint) && entrypoint.ValueKind == JsonValueKind.Array
                 ? entrypoint.EnumerateArray().Select(e => e.GetString() ?? string.Empty).ToList()
                 : null,
+            Env = ParseStringMap(element, "env"),
             Metadata = ParseStringMap(element, "metadata"),
             Readiness = element.TryGetProperty("readiness", out var readiness) && readiness.ValueKind == JsonValueKind.Object
                 ? new TemplateReadiness

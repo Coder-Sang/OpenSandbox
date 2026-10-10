@@ -269,7 +269,7 @@ class SandboxPoolAsync:
                     # direct-create on empty idle we degrade to that fallback so the pool stays
                     # at least as available as raw SDK usage during store outages.
                     if not policy_falls_through_to_direct_create(policy):
-                        self._schedule_kill_discarded_alive(
+                        await self._schedule_kill_discarded_alive(
                             pool_name, tuple(pending_kill), source="acquire"
                         )
                         raise
@@ -300,12 +300,12 @@ class SandboxPoolAsync:
                         skip_health_check=self._config.acquire_skip_health_check,
                     )
                 except (asyncio.CancelledError, AssertionError):
-                    self._schedule_kill_discarded_alive(
+                    await self._schedule_kill_discarded_alive(
                         pool_name, (*pending_kill, sandbox_id), source="acquire"
                     )
                     raise
                 except PoolDestroyedException:
-                    self._schedule_kill_discarded_alive(
+                    await self._schedule_kill_discarded_alive(
                         pool_name, tuple(pending_kill), source="acquire"
                     )
                     raise
@@ -320,7 +320,7 @@ class SandboxPoolAsync:
                     # token failure (direct-mode X-EXECD-ACCESS-TOKEN after execd
                     # restart / snapshot resume) is also cleaned up this way.
                     if is_readiness_auth_error(exc):
-                        self._schedule_kill_discarded_alive(
+                        await self._schedule_kill_discarded_alive(
                             pool_name, (*pending_kill, sandbox_id), source="acquire"
                         )
                         raise
@@ -330,13 +330,13 @@ class SandboxPoolAsync:
                     # block the next retry iteration, then let the loop try the next candidate.
                     last_idle_connect_failure = exc
                     await self._state_store.remove_idle(pool_name, sandbox_id)
-                    self._schedule_kill_discarded_alive(
+                    await self._schedule_kill_discarded_alive(
                         pool_name, (sandbox_id,), source="acquire-stale"
                     )
                     try:
                         await self._ensure_acquire_run_active(operation_generation)
                     except PoolNotRunningException as retired:
-                        self._schedule_kill_discarded_alive(
+                        await self._schedule_kill_discarded_alive(
                             pool_name, tuple(pending_kill), source="acquire"
                         )
                         raise retired from exc
@@ -351,11 +351,11 @@ class SandboxPoolAsync:
                         sandbox, sandbox_timeout, operation_generation
                     )
                 finally:
-                    self._schedule_kill_discarded_alive(
+                    await self._schedule_kill_discarded_alive(
                         pool_name, tuple(pending_kill), source="acquire"
                     )
 
-            self._schedule_kill_discarded_alive(
+            await self._schedule_kill_discarded_alive(
                 pool_name, tuple(pending_kill), source="acquire"
             )
 
@@ -545,6 +545,7 @@ class SandboxPoolAsync:
             ):
                 self._lifecycle_state = PoolLifecycleState.STOPPED
                 return
+            run_generation = self._run_generation
             if not graceful:
                 self._accept_warmup_commits = False
                 await self._stop_reconcile(wait_for_warmup=False)
@@ -559,8 +560,14 @@ class SandboxPoolAsync:
                 f"Async pool graceful shutdown timed out waiting in-flight operations: pool_name={self._config.pool_name} in_flight={self._in_flight} timeout_ms={int(self._config.drain_timeout.total_seconds() * 1000)}"
             )
         async with self._lifecycle_lock:
+            if self._run_generation != run_generation:
+                # A start() installed a newer run while this shutdown was
+                # draining; the new run owns the tasks and the terminal state.
+                return
             self._accept_warmup_commits = False
-            await self._stop_reconcile(wait_for_warmup=False)
+            await self._stop_reconcile(
+                wait_for_warmup=False, run_generation=run_generation
+            )
             self._lifecycle_state = PoolLifecycleState.STOPPED
             await self._close_provider()
 
@@ -1209,14 +1216,14 @@ class SandboxPoolAsync:
             )
             return False
 
-    def _schedule_kill_discarded_alive(
+    async def _schedule_kill_discarded_alive(
         self,
         pool_name: str,
         sandbox_ids: tuple[str, ...],
         source: str,
     ) -> None:
         """Fire-and-forget the kill cleanup as a background task so the caller's ``acquire``
-        is not blocked on N kill RPCs. The task is added to ``_warmup_tasks`` so shutdown can
+        is not blocked on N kill RPCs. The task is added to ``_cleanup_tasks`` so shutdown can
         wait on it just like other background work; rejected scheduling falls back to inline.
         """
         if not sandbox_ids:
@@ -1227,14 +1234,12 @@ class SandboxPoolAsync:
             )
         except RuntimeError as exc:
             # No running loop / loop is closed — fall back to inline cleanup so the work is
-            # not silently dropped. The await here is safe because we are inside `acquire()`.
+            # not silently dropped (better to slow the caller than to drop it, matching the
+            # sync pool's contract).
             logger.debug(
                 f"Discarded-alive kill scheduling failed, running inline: pool_name={pool_name} count={len(sandbox_ids)} error={exc}"
             )
-            # Caller is in an async function, so this is awaited via the original
-            # `_kill_discarded_alive` directly by the caller. Since `_schedule_kill_discarded_alive`
-            # is sync, the safest fallback is a fire-and-forget through a fresh task; if that
-            # also fails the runtime is clearly mid-shutdown and the cleanup is not critical.
+            await self._kill_discarded_alive(pool_name, sandbox_ids, source)
             return
         self._cleanup_tasks.add(task)
         task.add_done_callback(self._cleanup_tasks.discard)
@@ -1291,7 +1296,12 @@ class SandboxPoolAsync:
         *,
         wait_for_warmup: bool,
         join_scheduler: bool = True,
+        run_generation: int | None = None,
     ) -> None:
+        # run_generation=None tears down unconditionally; an int skips teardown
+        # when a newer start() run already owns the tasks.
+        if run_generation is not None and self._run_generation != run_generation:
+            return
         self._stop_event.set()
         task = self._scheduler_task
         current = asyncio.current_task()
