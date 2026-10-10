@@ -9,6 +9,13 @@ The `opensandbox` crate is an async Rust SDK built on Tokio and reqwest. It live
 in `sdks/sandbox/rust` as an independent crate, outside the JavaScript workspace.
 It uses Rust 2021 and requires Rust 1.85 or later.
 
+The branch is based on the official OpenSandbox `release-1.1.1` tag. Generated
+`api` models include that release's identity-scoped filesystem operations,
+isolated-session overlays and template environment fields. These wire models do
+not imply equivalent handwritten service coverage: the isolated-session facade
+still uses its legacy workspace options, and the template facade does not yet
+expose template environment variables. Crate versions remain `1.1.0`.
+
 ::: warning Source installation only
 The first version is not published on crates.io. Use a local path or a Git
 revision, not `cargo add opensandbox` from the registry. Pin a reviewed Git

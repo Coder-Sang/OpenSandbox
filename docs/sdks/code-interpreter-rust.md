@@ -26,9 +26,11 @@ For the default readiness probe, keep `JUPYTER_PORT` aligned with that server's
 port. If sandbox creation overrides the image entrypoint, explicitly start
 Jupyter there rather than relying on the image's `CMD`.
 
-Some execd versions skip the stock `python3` kernelspec when selecting a Python
-kernel. Those versions require a matching spec registered under another name,
-such as `python`. This SDK does not change execd's kernel selection. A successful
+The official OpenSandbox 1.1.1 execd skips the stock `python3` kernelspec when
+selecting a Python kernel. In the dedicated Rust acceptance test, a stock-only
+image timed out during context creation. That runtime requires a matching spec
+registered under another name, such as `python`. This SDK does not change execd's
+kernel selection. A successful
 readiness probe does not verify kernelspec availability or a complete execution
 stream.
 
@@ -104,7 +106,8 @@ keys appropriate for your renderer rather than treating every result as plain te
 
 - `create_context(language)` creates a persistent kernel context. Use
   `create_context_with_options(language, CreateContextOptions { cwd: Some(path) })`
-  to set its initial working directory. The directory must exist in the sandbox.
+  to set its initial working directory. The runtime must be able to create or
+  access that directory in the sandbox.
 - `get_context(id)` and `list_contexts(Some(language))` inspect contexts. Use `None`
   to list without a language filter.
 - `delete_context(id)` deletes one context; `delete_contexts(language)` deletes all
@@ -144,6 +147,21 @@ can fail the full interpreter acceptance scenario even if readiness and context
 creation succeed. Validate persistent state, rich results, kernel errors,
 interruption, and immediate context reuse against the deployed runtime.
 SDK unit tests passing does not establish live-runtime acceptance.
+
+With the official 1.1.1 release BOM images, the direct compatibility-kernel
+scenario passed context creation, stdout and persistent-state checks, then failed
+its strict HTML-output assertion: the execution returned an empty result list
+with `complete: true`. Later JSON, kernel-error, interruption and immediate-reuse
+checks were not reached. The full interpreter workflow is therefore not accepted
+against that release, and this SDK change does not patch its runtime.
+
+A separate run correcting only the host-run server's proxy endpoint resolution
+also failed. The direct compatibility scenario encountered an event JSON missing
+`type` while initializing persistent state; the proxy scenario failed the state
+check with an empty stdout list and `complete: true`. The missing-field failure's
+precise cause was not established from that run. Stock-only context creation
+timed out in both modes. These observations are retained as failures, not retries
+that establish interpreter acceptance.
 :::
 
 ## Readiness and cleanup

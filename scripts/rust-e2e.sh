@@ -95,6 +95,10 @@ image = {q(os.environ.get("OPENSANDBOX_RUST_EGRESS_IMAGE", "opensandbox/egress:r
 mode = "dns+nft"
 [docker]
 network_mode = "bridge"
+[proxy]
+# The server runs on the host, not inside Docker's bridge network.
+# Use published endpoints, including on macOS where bridge IPs are unreachable.
+resolve_internal = false
 ''')
 PY
 chmod 600 "$SANDBOX_CONFIG_PATH"
