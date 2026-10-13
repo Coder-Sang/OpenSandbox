@@ -4,6 +4,9 @@ on:
   pull_request:
     branches: [ main ]
     paths:
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - ".github/workflows/dependency-stability.yml"
       - "**/go.mod"
       - "**/go.sum"
       - "**/uv.lock"
@@ -20,6 +23,29 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  rust-lockfiles:
+    name: Cargo.lock (${{ matrix.project }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        project: [sdks/sandbox/rust, tests/rust]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Rust
+        run: |
+          rustup toolchain install 1.85.1 --profile minimal
+          rustup default 1.85.1
+
+      - name: Check Cargo.lock is up to date
+        working-directory: ${{ matrix.project }}
+        run: |
+          test -f Cargo.lock
+          cargo metadata --locked --format-version 1 > /dev/null
+          git diff --exit-code -- Cargo.toml Cargo.lock
+
   go-modules:
     name: go.mod tidy (${{ matrix.module }})
     runs-on: ubuntu-latest

@@ -1,0 +1,66 @@
+// Shared execution policy for generated operation clients. Routes, parameters,
+// request and response types are emitted separately from each OpenAPI document.
+use crate::{transport::Transport, Error, Result};
+use reqwest::{RequestBuilder, Response};
+use serde::de::DeserializeOwned;
+use std::marker::PhantomData;
+
+#[derive(Clone, Copy)]
+pub(crate) enum FilesystemScope<'a> {
+    Default,
+    Identity(u32, u32),
+    Isolated(&'a str),
+}
+
+pub(crate) struct Call<T> {
+    request: RequestBuilder,
+    sensitive: Option<(&'static str, &'static str)>,
+    response: PhantomData<T>,
+}
+#[allow(dead_code)]
+impl<T> Call<T> {
+    pub(crate) fn new(request: RequestBuilder) -> Self {
+        Self { request, sensitive: None, response: PhantomData }
+    }
+    pub(crate) fn sensitive(mut self, error: &'static str, decode: &'static str) -> Self {
+        self.sensitive = Some((error, decode));
+        self
+    }
+    pub(crate) fn header(mut self, name: &'static str, value: &'static str) -> Self {
+        self.request = self.request.header(name, value);
+        self
+    }
+    pub(crate) fn multipart(mut self, form: reqwest::multipart::Form) -> Self {
+        self.request = self.request.multipart(form);
+        self
+    }
+    pub(crate) async fn raw(self) -> Result<Response> {
+        let response = self.request.send().await?;
+        if let Some((message, _)) = self.sensitive {
+            if !response.status().is_success() {
+                return Err(Error::Api { status: response.status().as_u16(), code: None,
+                    message: message.into(), request_id: None });
+            }
+            Ok(response)
+        } else {
+            Transport::checked(response).await
+        }
+    }
+    pub(crate) async fn empty(self) -> Result<()> {
+        self.raw().await?.bytes().await?;
+        Ok(())
+    }
+    pub(crate) async fn json(self) -> Result<T> where T: DeserializeOwned {
+        self.json_as().await
+    }
+    pub(crate) async fn json_as<U: DeserializeOwned>(self) -> Result<U> {
+        let sensitive = self.sensitive;
+        let response = self.raw().await?;
+        if let Some((_, message)) = sensitive {
+            let bytes = response.bytes().await.map_err(|error| Error::Transport(error.without_url()))?;
+            serde_json::from_slice(&bytes).map_err(|_| Error::Protocol(message.into()))
+        } else {
+            Ok(response.json().await?)
+        }
+    }
+}

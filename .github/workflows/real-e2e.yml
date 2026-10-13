@@ -679,10 +679,104 @@ jobs:
           docker ps -aq --filter "label=opensandbox.e2e=credential-vault" | xargs -r docker rm -f || true
           docker run --rm -v /tmp:/host_tmp alpine rm -rf /host_tmp/opensandbox-e2e || true
 
+  rust-e2e:
+    name: Rust E2E (docker bridge)
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
+    runs-on: self-hosted
+    env:
+      RUN_CODE_INTERPRETER_E2E: ${{ github.event_name == 'workflow_dispatch' && inputs.run_code_interpreter_e2e == true && 'true' || 'false' }}
+      CARGO_HOME: ${{ runner.temp }}/rust-cargo
+      RUSTUP_HOME: ${{ runner.temp }}/rust-rustup
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Set up Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+          echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
+
+      - name: Check runtime prerequisites and run tests with an isolated server
+        env:
+          JCODE_SCRATCH_DIR: ${{ runner.temp }}
+        run: bash scripts/rust-e2e.sh
+
+      - name: Upload Rust E2E logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: rust-e2e-logs
+          path: |
+            ${{ runner.temp }}/opensandbox-rust-e2e.*/server.log
+            ${{ runner.temp }}/opensandbox-rust-e2e.*/prerequisites-*.txt
+            ${{ runner.temp }}/opensandbox-rust-e2e.*/basic-*.txt
+            ${{ runner.temp }}/opensandbox-rust-e2e.*/expanded-*.txt
+            ${{ runner.temp }}/opensandbox-rust-e2e.*/overlays-*.txt
+            ${{ runner.temp }}/opensandbox-rust-e2e.*/identity-argv-*.txt
+            ${{ runner.temp }}/opensandbox-rust-e2e.*/interpreter-*.txt
+            ${{ runner.temp }}/opensandbox-rust-e2e.*/interpreter/*.json
+            ${{ runner.temp }}/opensandbox-rust-e2e.*/container-*.log
+            ${{ runner.temp }}/opensandbox-rust-e2e.*/runtime.txt
+            ${{ runner.temp }}/opensandbox-rust-e2e.*/identity-argv-selection.txt
+            ${{ runner.temp }}/opensandbox-rust-e2e.*/vault-target.log
+          retention-days: 5
+
+  rust-identity-argv-e2e:
+    name: Rust Native Argv E2E (${{ matrix.toolchain }}, direct and proxy)
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
+    runs-on: self-hosted
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - toolchain: "1.85.1"
+            port: 18089
+          - toolchain: stable
+            port: 18090
+    env:
+      CARGO_HOME: ${{ runner.temp }}/rust-identity-cargo-${{ matrix.toolchain }}
+      RUSTUP_HOME: ${{ runner.temp }}/rust-identity-rustup-${{ matrix.toolchain }}
+      RUSTUP_TOOLCHAIN: ${{ matrix.toolchain }}
+      OPENSANDBOX_RUST_IDENTITY_ARGV_ONLY: "true"
+      OPENSANDBOX_TEST_PORT: ${{ matrix.port }}
+      JCODE_SCRATCH_DIR: ${{ runner.temp }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Set up Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain "${{ matrix.toolchain }}"
+          echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
+
+      - name: Run native argv tests in direct and proxy modes
+        run: bash scripts/rust-e2e.sh
+
+      - name: Upload native argv E2E logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: rust-identity-argv-${{ matrix.toolchain }}-logs
+          path: |
+            ${{ runner.temp }}/opensandbox-rust-e2e.*/server.log
+            ${{ runner.temp }}/opensandbox-rust-e2e.*/identity-argv-*.txt
+            ${{ runner.temp }}/opensandbox-rust-e2e.*/container-*.log
+            ${{ runner.temp }}/opensandbox-rust-e2e.*/runtime.txt
+            ${{ runner.temp }}/opensandbox-rust-e2e.*/identity-argv-selection.txt
+          retention-days: 5
+
   required:
     name: Real E2E CI
     if: ${{ always() && github.event_name == 'pull_request' }}
-    needs: [changes, python-e2e, java-e2e, javascript-e2e, csharp-e2e, go-e2e]
+    needs: [changes, python-e2e, java-e2e, javascript-e2e, csharp-e2e, go-e2e, rust-e2e, rust-identity-argv-e2e]
     runs-on: ubuntu-latest
     steps:
       - name: Verify required jobs
@@ -694,13 +788,15 @@ jobs:
           JAVASCRIPT_RESULT: ${{ needs.javascript-e2e.result }}
           CSHARP_RESULT: ${{ needs.csharp-e2e.result }}
           GO_RESULT: ${{ needs.go-e2e.result }}
+          RUST_RESULT: ${{ needs.rust-e2e.result }}
+          RUST_IDENTITY_RESULT: ${{ needs.rust-identity-argv-e2e.result }}
         run: |
           if [[ "$CHANGES_RESULT" != "success" ]]; then
             echo "Change detection failed: $CHANGES_RESULT"
             exit 1
           fi
           if [[ "$RELEVANT" == "true" ]]; then
-            [[ "$PYTHON_RESULT" == "success" && "$JAVA_RESULT" == "success" && "$JAVASCRIPT_RESULT" == "success" && "$CSHARP_RESULT" == "success" && "$GO_RESULT" == "success" ]]
+            [[ "$PYTHON_RESULT" == "success" && "$JAVA_RESULT" == "success" && "$JAVASCRIPT_RESULT" == "success" && "$CSHARP_RESULT" == "success" && "$GO_RESULT" == "success" && "$RUST_RESULT" == "success" && "$RUST_IDENTITY_RESULT" == "success" ]]
           else
-            [[ "$RELEVANT" == "false" && "$PYTHON_RESULT" == "skipped" && "$JAVA_RESULT" == "skipped" && "$JAVASCRIPT_RESULT" == "skipped" && "$CSHARP_RESULT" == "skipped" && "$GO_RESULT" == "skipped" ]]
+            [[ "$RELEVANT" == "false" && "$PYTHON_RESULT" == "skipped" && "$JAVA_RESULT" == "skipped" && "$JAVASCRIPT_RESULT" == "skipped" && "$CSHARP_RESULT" == "skipped" && "$GO_RESULT" == "skipped" && "$RUST_RESULT" == "skipped" && "$RUST_IDENTITY_RESULT" == "skipped" ]]
           fi

@@ -67,11 +67,21 @@ go get github.com/alibaba/OpenSandbox/sdks/sandbox/go
 dotnet add package Alibaba.OpenSandbox
 ```
 
+```toml [Rust (source)]
+[dependencies]
+opensandbox = { path = "../OpenSandbox/sdks/sandbox/rust" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+```
+
 :::
+
+Rust requires Rust 1.85+ and is not yet published to crates.io. Adjust the path
+relative to your application, or pin a Git revision containing the crate. See
+the [Rust SDK guide](/sdks/rust) for installation and cleanup semantics.
 
 For detailed SDK usage, see the [SDK documentation](/sdks/).
 
-Choose a published SDK version for your application. Replace `{latest_version}` in
+For SDKs distributed through package registries, choose a published version for your application. Replace `{latest_version}` in
 the JVM examples with that version; use the BOM when combining JVM modules such
 as `sandbox` and `sandbox-pool-redis`. See the [release index](https://github.com/opensandbox-group/OpenSandbox/releases).
 

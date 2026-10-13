@@ -62,6 +62,7 @@ Different components have different requirements:
 
 - **Python SDK**: Python 3.10+, uv
 - **Java/Kotlin SDK**: JDK 17+, Gradle
+- **Rust SDK**: Rust 1.85+ (Rust 2021), Cargo
 
 ### Quick Setup
 
@@ -122,6 +123,22 @@ cd sdks/sandbox/kotlin
 ./gradlew build
 ./gradlew test
 ```
+
+**Rust SDK:**
+
+The sandbox SDK is an independent crate, not part of the pnpm workspace:
+
+```bash
+cd sdks/sandbox/rust
+cargo +1.85.1 fmt --all -- --check
+cargo clippy --locked --all-targets --all-features -- -D warnings
+cargo test --locked --all-features
+cargo doc --locked --no-deps --all-features
+cargo package --locked
+```
+
+These are basic local checks. See [sdks/AGENTS.md](sdks/AGENTS.md) for the complete
+MSRV/stable feature matrix, API generation and interpreter packaging requirements.
 
 ## Project Structure
 

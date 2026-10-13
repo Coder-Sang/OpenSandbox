@@ -33,6 +33,7 @@ jobs:
               "**/yarn.lock",
               "**/Cargo.lock",
               "manifests/charts/opensandbox/Chart.lock",
+              "sdks/sandbox/rust/src/api/**",
               "sdks/sandbox/kotlin/sandbox-api/src/main/kotlin/com/alibaba/opensandbox/sandbox/api/openapitools.json",
 
               // Unit / integration / e2e test sources and fixtures. Kept out
@@ -141,10 +142,14 @@ jobs:
               if (dirs.has("kubernetes")) s.push("component/k8s");
               if (dirs.has("server")) s.push("component/server");
 
+              if (dirs.has("tests/rust") || files.some((f) => ["scripts/rust-e2e.sh", "scripts/rust-redis-e2e.sh", "scripts/rust-k8s-e2e.sh"].includes(f.filename))) {
+                s.push("sdk/rust");
+              }
               // SDK — layout: sdks/{sandbox,code-interpreter,mcp}/{go,python,...};
               // Kotlin code-interpreter lives under sdks/sandbox/kotlin/code-interpreter.
               if (dirs.has("sdks")) {
                 const langMap = {
+                  rust: "sdk/rust",
                   go: "sdk/go",
                   kotlin: "sdk/java",
                   python: "sdk/python",

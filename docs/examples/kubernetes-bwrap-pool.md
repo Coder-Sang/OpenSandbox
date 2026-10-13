@@ -151,6 +151,9 @@ advertises support; only an explicit `unsupported` result may degrade.
 
 Create a sandbox by selecting directories, never by sending source paths:
 
+Rust applications can use the [typed bwrap Pool creation API](/sdks/rust#bwrap-pool-allocations)
+with the same root, subPath, target and mode selectors.
+
 ```json
 {
   "extensions": {"poolRef": "bwrap-workspaces"},
