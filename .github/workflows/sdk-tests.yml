@@ -458,7 +458,7 @@ jobs:
         run: cargo package --locked --list
 
   rust-sdk-redis:
-    name: Rust SDK Redis 7 Integration (${{ matrix.toolchain }})
+    name: Rust SDK Redis 7 And TLS Integration (${{ matrix.toolchain }})
     needs: changes
     if: needs.changes.outputs.relevant == 'true'
     runs-on: ubuntu-latest
@@ -466,22 +466,9 @@ jobs:
       fail-fast: false
       matrix:
         toolchain: ["1.85.1", stable]
-    services:
-      redis:
-        image: redis:7-alpine
-        ports:
-          - 6379:6379
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 5s
-          --health-timeout 3s
-          --health-retries 10
-    defaults:
-      run:
-        working-directory: sdks/sandbox/rust
     env:
-      OPENSANDBOX_REDIS_TEST: "1"
-      OPENSANDBOX_REDIS_URL: redis://127.0.0.1:6379/0
+      OPENSANDBOX_RUST_TOOLCHAINS: ${{ matrix.toolchain }}
+      JCODE_SCRATCH_DIR: ${{ runner.temp }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -491,8 +478,24 @@ jobs:
           rustup toolchain install "${{ matrix.toolchain }}" --profile minimal
           rustup default "${{ matrix.toolchain }}"
 
-      - name: Run real Redis pool state tests
-        run: cargo test --locked --features redis --test redis_pool
+      - name: Run dedicated Redis pool and TLS validation tests
+        run: bash scripts/rust-redis-e2e.sh
+
+      - name: Upload Redis and TLS integration logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-redis-tls-${{ matrix.toolchain }}-logs
+          # Only diagnostic logs; never upload fixture keys, certificates or configuration.
+          path: |
+            ${{ runner.temp }}/opensandbox-rust-redis.*/plain-*.txt
+            ${{ runner.temp }}/opensandbox-rust-redis.*/tls-pool-*.txt
+            ${{ runner.temp }}/opensandbox-rust-redis.*/tls-validation-*.txt
+            ${{ runner.temp }}/opensandbox-rust-redis.*/*-plain.log
+            ${{ runner.temp }}/opensandbox-rust-redis.*/*-tls.log
+            ${{ runner.temp }}/opensandbox-rust-redis.*/redis-version.txt
+            ${{ runner.temp }}/opensandbox-rust-redis.*/image.txt
+          retention-days: 5
 
   required:
     name: SDK CI

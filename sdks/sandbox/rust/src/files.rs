@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
+    api::{client::FilesystemScope, execd_client as api},
     commands::nonblank,
     models::execd::{
         DownloadOptions, FileInfo, FileMetadata, Permission, RenameFileItem,
@@ -10,16 +11,18 @@ use crate::{
     transport::Transport,
     Error, Result,
 };
-use reqwest::{
-    multipart::{Form, Part},
-    Method, Url,
-};
+use reqwest::multipart::{Form, Part};
 use std::collections::HashMap;
 
 #[derive(Clone)]
 pub struct Files {
     transport: Transport,
-    scope: Option<Url>,
+    scope: Option<FileScope>,
+}
+#[derive(Clone)]
+enum FileScope {
+    Identity(u32, u32),
+    Isolated(String),
 }
 impl Files {
     pub(crate) fn new(transport: Transport) -> Self {
@@ -29,25 +32,44 @@ impl Files {
         }
     }
     pub(crate) fn scoped(transport: Transport, session_id: &str) -> Result<Self> {
-        let scope = crate::commands::id_url(&transport, "/v1/isolated/session", session_id, None)?;
+        nonblank(session_id, "session_id")?;
+        if matches!(session_id, "." | "..") {
+            return Err(Error::InvalidConfig("Invalid session ID".into()));
+        }
         Ok(Self {
             transport,
-            scope: Some(scope),
+            scope: Some(FileScope::Isolated(session_id.into())),
         })
     }
-    fn url(&self, endpoint: &str) -> Result<Url> {
-        let Some(scope) = &self.scope else {
-            return self.transport.url(endpoint);
-        };
-        let mut url = scope.clone();
-        let mut segments = url
-            .path_segments_mut()
-            .map_err(|_| Error::InvalidConfig("Invalid scoped endpoint".into()))?;
-        for segment in endpoint.trim_start_matches('/').split('/') {
-            segments.push(segment);
+    /// Return a new file handle executing as the selected Linux UID/GID.
+    ///
+    /// IDs must be in `0..u32::MAX`. Owner/group metadata is independent of
+    /// execution identity. Rebinding replaces an existing identity without
+    /// changing the original handle. Isolated-session handles reject rebinding.
+    /// Server errors never fall back to an ordinary filesystem route.
+    pub fn with_identity(&self, uid: u32, gid: u32) -> Result<Self> {
+        if uid == u32::MAX || gid == u32::MAX {
+            return Err(Error::InvalidConfig(
+                "Filesystem UID and GID must be between 0 and 4294967294".into(),
+            ));
         }
-        drop(segments);
-        Ok(url)
+        if matches!(self.scope, Some(FileScope::Isolated(_))) {
+            return Err(Error::InvalidConfig(
+                "Filesystem identity cannot be changed on an isolated-session handle".into(),
+            ));
+        }
+        Ok(Self {
+            transport: self.transport.clone(),
+            scope: Some(FileScope::Identity(uid, gid)),
+        })
+    }
+    fn client(&self) -> api::Client<'_> {
+        let scope = match &self.scope {
+            None => FilesystemScope::Default,
+            Some(FileScope::Identity(uid, gid)) => FilesystemScope::Identity(*uid, *gid),
+            Some(FileScope::Isolated(id)) => FilesystemScope::Isolated(id),
+        };
+        api::Client::filesystem(&self.transport, scope)
     }
     pub async fn upload(&self, path: &str, bytes: Vec<u8>) -> Result<()> {
         self.upload_with_metadata(
@@ -83,17 +105,7 @@ impl Files {
                     .file_name(filename)
                     .mime_str("application/octet-stream")?,
             );
-        Transport::checked(
-            self.transport
-                .request(Method::POST, self.url("/files/upload")?)
-                .multipart(form)
-                .send()
-                .await?,
-        )
-        .await?
-        .bytes()
-        .await?;
-        Ok(())
+        self.client().upload_file()?.multipart(form).empty().await
     }
     pub async fn write_text(&self, path: &str, text: &str) -> Result<()> {
         self.upload(path, text.as_bytes().to_vec()).await
@@ -109,22 +121,15 @@ impl Files {
     ) -> Result<Vec<u8>> {
         nonblank(path, "path")?;
         validate_download(&options)?;
-        let mut url = self.url("/files/download")?;
-        {
-            let mut query = url.query_pairs_mut();
-            query.append_pair("path", path);
-            if let Some(offset) = options.offset {
-                query.append_pair("offset", &offset.to_string());
-            }
-            if let Some(limit) = options.limit {
-                query.append_pair("limit", &limit.to_string());
-            }
-        }
-        let mut request = self.transport.request(Method::GET, url);
-        if let Some(range) = options.range {
-            request = request.header(reqwest::header::RANGE, range);
-        }
-        Ok(Transport::checked(request.send().await?)
+        Ok(self
+            .client()
+            .download_file(api::DownloadFileParams {
+                path,
+                offset: options.offset,
+                limit: options.limit,
+                range: options.range.as_deref(),
+            })?
+            .raw()
             .await?
             .bytes()
             .await?
@@ -134,41 +139,37 @@ impl Files {
         String::from_utf8(self.download(path).await?)
             .map_err(|e| Error::Protocol(format!("File is not UTF-8: {e}")))
     }
-    fn paths_url(&self, endpoint: &str, paths: &[String]) -> Result<Url> {
+    fn validate_paths(&self, paths: &[String]) -> Result<()> {
         if paths.is_empty() {
             return Err(Error::InvalidConfig("At least one path is required".into()));
         }
-        let mut url = self.url(endpoint)?;
         for path in paths {
             nonblank(path, "path")?;
-            url.query_pairs_mut().append_pair("path", path);
         }
-        Ok(url)
+        Ok(())
     }
     pub async fn info(&self, paths: &[String]) -> Result<HashMap<String, FileInfo>> {
-        self.transport
-            .json(
-                Method::GET,
-                self.paths_url("/files/info", paths)?,
-                None::<&()>,
-            )
+        self.validate_paths(paths)?;
+        self.client()
+            .get_files_info(api::GetFilesInfoParams { path: paths })?
+            .json_as()
             .await
     }
     pub async fn search(&self, path: &str, pattern: &str) -> Result<Vec<FileInfo>> {
         nonblank(path, "path")?;
-        let mut url = self.url("/files/search")?;
-        url.query_pairs_mut()
-            .append_pair("path", path)
-            .append_pair("pattern", pattern);
-        self.transport.json(Method::GET, url, None::<&()>).await
+        self.client()
+            .search_files(api::SearchFilesParams {
+                path,
+                pattern: Some(pattern),
+            })?
+            .json()
+            .await
     }
     pub async fn remove(&self, paths: &[String]) -> Result<()> {
-        self.transport
-            .empty(
-                Method::DELETE,
-                self.paths_url("/files", paths)?,
-                None::<&()>,
-            )
+        self.validate_paths(paths)?;
+        self.client()
+            .remove_files(api::RemoveFilesParams { path: paths })?
+            .empty()
             .await
     }
     pub async fn move_files(&self, entries: &[RenameFileItem]) -> Result<()> {
@@ -176,40 +177,40 @@ impl Files {
             nonblank(&entry.src, "src")?;
             nonblank(&entry.dest, "dest")?;
         }
-        self.transport
-            .empty(Method::POST, self.url("/files/mv")?, Some(&entries))
-            .await
+        self.client().rename_files(entries)?.empty().await
     }
     pub async fn set_permissions(&self, entries: &HashMap<String, Permission>) -> Result<()> {
         validate_paths(entries.keys())?;
-        self.transport
-            .empty(Method::POST, self.url("/files/permissions")?, Some(entries))
-            .await
+        let body = entries
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        self.client().chmod_files(&body)?.empty().await
     }
     pub async fn create_directories(&self, entries: &HashMap<String, Permission>) -> Result<()> {
         validate_paths(entries.keys())?;
-        self.transport
-            .empty(Method::POST, self.url("/directories")?, Some(entries))
-            .await
+        let body = entries
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        self.client().make_dirs(&body)?.empty().await
     }
     pub async fn remove_directories(&self, paths: &[String]) -> Result<()> {
-        self.transport
-            .empty(
-                Method::DELETE,
-                self.paths_url("/directories", paths)?,
-                None::<&()>,
-            )
+        self.validate_paths(paths)?;
+        self.client()
+            .remove_dirs(api::RemoveDirsParams { path: paths })?
+            .empty()
             .await
     }
     pub async fn list_directory(&self, path: &str, depth: Option<u32>) -> Result<Vec<FileInfo>> {
         nonblank(path, "path")?;
-        let mut url = self.url("/directories/list")?;
-        url.query_pairs_mut().append_pair("path", path);
-        if let Some(depth) = depth {
-            url.query_pairs_mut()
-                .append_pair("depth", &depth.to_string());
-        }
-        self.transport.json(Method::GET, url, None::<&()>).await
+        self.client()
+            .list_directory(api::ListDirectoryParams {
+                path,
+                depth: depth.map(u64::from),
+            })?
+            .json()
+            .await
     }
     pub async fn replace_contents(
         &self,
@@ -221,11 +222,22 @@ impl Files {
                 "Replacement old text cannot be empty".into(),
             ));
         }
-        let mut url = self.url("/files/replace")?;
-        url.query_pairs_mut().append_pair("verbose", "true");
-        self.transport.json(Method::POST, url, Some(entries)).await
+        let body = entries
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        self.client()
+            .replace_content(
+                api::ReplaceContentParams {
+                    verbose: Some(true),
+                },
+                &body,
+            )?
+            .json_as()
+            .await
     }
 }
+
 fn validate_paths<'a>(paths: impl Iterator<Item = &'a String>) -> Result<()> {
     for path in paths {
         nonblank(path, "path")?;

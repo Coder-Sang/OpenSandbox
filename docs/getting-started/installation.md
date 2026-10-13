@@ -81,7 +81,7 @@ the [Rust SDK guide](/sdks/rust) for installation and cleanup semantics.
 
 For detailed SDK usage, see the [SDK documentation](/sdks/).
 
-Choose a published SDK version for your application. Replace `{latest_version}` in
+For SDKs distributed through package registries, choose a published version for your application. Replace `{latest_version}` in
 the JVM examples with that version; use the BOM when combining JVM modules such
 as `sandbox` and `sandbox-pool-redis`. See the [release index](https://github.com/opensandbox-group/OpenSandbox/releases).
 

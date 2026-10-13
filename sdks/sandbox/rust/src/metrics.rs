@@ -29,9 +29,10 @@ impl Metrics {
             Transport::checked(response).await?,
         ))
     }
+    fn generated_client(&self) -> crate::api::execd_client::Client<'_> {
+        crate::api::execd_client::Client::new(&self.transport)
+    }
     pub async fn get(&self) -> Result<SandboxMetrics> {
-        self.transport
-            .json(Method::GET, self.transport.url("/metrics")?, None::<&()>)
-            .await
+        self.generated_client().get_metrics()?.json_as().await
     }
 }

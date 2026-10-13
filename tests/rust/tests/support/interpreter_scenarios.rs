@@ -315,7 +315,7 @@ async fn interpreter_phase(phase: InterpreterPhase) -> Result {
                     require(reused.complete && reused.error.is_none() && reused.result.iter().any(|r| r.text.as_deref() == Some("42")), "context unusable after interrupt")?;
                 }
                 InterpreterPhase::ImmediateReuse => {
-                    for _ in 0..20 {
+                    for _ in 0..100 {
                         let failure = recorded_run(codes, "answer = 41\nprint('stress-before-error', flush=True)\nraise ValueError('stress-error')", options.clone()).await?;
                         require(failure.error.is_some() && failure.logs.stdout.iter().any(|line| line.text.contains("stress-before-error")), "repeated error execution lost stdout/error")?;
                         let next = recorded_run(codes, "answer + 1", options.clone()).await?;

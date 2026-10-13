@@ -2,12 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    commands::{id_url, nonblank},
+    api::{egress_client as sidecar, lifecycle_client as lifecycle},
+    commands::nonblank,
     models::egress::{NetworkPolicy, NetworkRule, PolicyStatus},
     transport::Transport,
     Error, Result,
 };
-use reqwest::{Method, Url};
 
 #[derive(Clone)]
 pub struct Egress {
@@ -32,12 +32,24 @@ impl Egress {
         &self,
         request: &crate::api::egress::CredentialVaultCreateRequest,
     ) -> Result<crate::api::egress::CredentialVaultState> {
-        self.vault_json(Method::POST, self.vault_url("")?, Some(request))
+        self.vault_client()?
+            .post_credential_vault(request)?
+            .sensitive(
+                "Credential Vault request failed",
+                "Invalid Credential Vault response",
+            )
+            .json()
             .await
     }
     /// Read vault metadata, never credential values.
     pub async fn get(&self) -> Result<crate::api::egress::CredentialVaultState> {
-        self.vault_json(Method::GET, self.vault_url("")?, None::<&()>)
+        self.vault_client()?
+            .get_credential_vault()?
+            .sensitive(
+                "Credential Vault request failed",
+                "Invalid Credential Vault response",
+            )
+            .json()
             .await
     }
     /// Atomically mutate the vault, optionally guarded by expectedRevision.
@@ -45,20 +57,35 @@ impl Egress {
         &self,
         request: &crate::api::egress::CredentialVaultMutationRequest,
     ) -> Result<crate::api::egress::CredentialVaultState> {
-        self.vault_json(Method::PATCH, self.vault_url("")?, Some(request))
+        self.vault_client()?
+            .patch_credential_vault(request)?
+            .sensitive(
+                "Credential Vault request failed",
+                "Invalid Credential Vault response",
+            )
+            .json()
             .await
     }
     /// Delete the vault. Template-backed sandboxes reject this locally.
     pub async fn delete(&self) -> Result<()> {
-        let response = self
-            .vault_response(Method::DELETE, self.vault_url("")?, None::<&()>)
-            .await?;
-        response.bytes().await.map_err(vault_transport_error)?;
-        Ok(())
+        self.vault_client()?
+            .delete_credential_vault()?
+            .sensitive(
+                "Credential Vault request failed",
+                "Invalid Credential Vault response",
+            )
+            .empty()
+            .await
     }
     pub async fn list_credentials(&self) -> Result<Vec<crate::api::egress::CredentialMetadata>> {
-        let response: crate::api::egress::CredentialListResponse = self
-            .vault_json(Method::GET, self.vault_url("/credentials")?, None::<&()>)
+        let response = self
+            .vault_client()?
+            .get_credential_vault_credentials()?
+            .sensitive(
+                "Credential Vault request failed",
+                "Invalid Credential Vault response",
+            )
+            .json()
             .await?;
         Ok(response.credentials)
     }
@@ -66,18 +93,31 @@ impl Egress {
         &self,
         name: &str,
     ) -> Result<crate::api::egress::CredentialMetadata> {
-        self.vault_json(
-            Method::GET,
-            self.vault_id_url("credentials", name)?,
-            None::<&()>,
-        )
-        .await
+        nonblank(name, "name")?;
+        self.vault_client()?
+            .get_credential_vault_credentials_credential_name(
+                sidecar::GetCredentialVaultCredentialsCredentialNameParams {
+                    credential_name: name,
+                },
+            )?
+            .sensitive(
+                "Credential Vault request failed",
+                "Invalid Credential Vault response",
+            )
+            .json()
+            .await
     }
     pub async fn list_bindings(
         &self,
     ) -> Result<Vec<crate::api::egress::CredentialBindingMetadata>> {
-        let response: crate::api::egress::CredentialBindingListResponse = self
-            .vault_json(Method::GET, self.vault_url("/bindings")?, None::<&()>)
+        let response = self
+            .vault_client()?
+            .get_credential_vault_bindings()?
+            .sensitive(
+                "Credential Vault request failed",
+                "Invalid Credential Vault response",
+            )
+            .json()
             .await?;
         Ok(response.bindings)
     }
@@ -85,74 +125,43 @@ impl Egress {
         &self,
         name: &str,
     ) -> Result<crate::api::egress::CredentialBindingMetadata> {
-        self.vault_json(
-            Method::GET,
-            self.vault_id_url("bindings", name)?,
-            None::<&()>,
-        )
-        .await
+        nonblank(name, "name")?;
+        self.vault_client()?
+            .get_credential_vault_bindings_binding_name(
+                sidecar::GetCredentialVaultBindingsBindingNameParams { binding_name: name },
+            )?
+            .sensitive(
+                "Credential Vault request failed",
+                "Invalid Credential Vault response",
+            )
+            .json()
+            .await
     }
-    fn vault_url(&self, suffix: &str) -> Result<Url> {
+    fn vault_client(&self) -> Result<sidecar::Client<'_>> {
         if self.sandbox_id.is_some() {
             return Err(Error::InvalidConfig(
                 "Credential Vault is not supported for template-backed sandboxes".into(),
             ));
         }
-        self.transport.url(&format!("/credential-vault{suffix}"))
-    }
-    fn vault_id_url(&self, collection: &str, name: &str) -> Result<Url> {
-        self.vault_url("")?;
-        id_url(
-            &self.transport,
-            &format!("/credential-vault/{collection}"),
-            name,
-            None,
-        )
-    }
-    async fn vault_response(
-        &self,
-        method: Method,
-        url: Url,
-        body: Option<&impl serde::Serialize>,
-    ) -> Result<reqwest::Response> {
-        let mut request = self.transport.request(method, url);
-        if let Some(body) = body {
-            request = request.json(body);
-        }
-        let response = request.send().await.map_err(vault_transport_error)?;
-        if !response.status().is_success() {
-            // A server can echo inline secrets in any error field. Do not decode
-            // or expose its body, headers, or redirect location for vault calls.
-            return Err(Error::Api {
-                status: response.status().as_u16(),
-                code: None,
-                message: "Credential Vault request failed".into(),
-                request_id: None,
-            });
-        }
-        Ok(response)
-    }
-    async fn vault_json<T: serde::de::DeserializeOwned>(
-        &self,
-        method: Method,
-        url: Url,
-        body: Option<&impl serde::Serialize>,
-    ) -> Result<T> {
-        let response = self.vault_response(method, url, body).await?;
-        let bytes = response.bytes().await.map_err(vault_transport_error)?;
-        serde_json::from_slice(&bytes)
-            .map_err(|_| Error::Protocol("Invalid Credential Vault response".into()))
-    }
-    fn url(&self) -> Result<Url> {
-        match &self.sandbox_id {
-            Some(id) => id_url(&self.transport, "/sandboxes", id, Some("networkpolicy")),
-            None => self.transport.url("/policy"),
-        }
+        Ok(sidecar::Client::new(&self.transport))
     }
     pub async fn get_policy_status(&self) -> Result<PolicyStatus> {
-        self.transport
-            .json(Method::GET, self.url()?, None::<&()>)
-            .await
+        match self.sandbox_id.as_deref() {
+            Some(sandbox_id) => {
+                lifecycle::Client::new(&self.transport)
+                    .get_sandbox_network_policy(lifecycle::GetSandboxNetworkPolicyParams {
+                        sandbox_id,
+                    })?
+                    .json_as()
+                    .await
+            }
+            None => {
+                sidecar::Client::new(&self.transport)
+                    .get_policy()?
+                    .json_as()
+                    .await
+            }
+        }
     }
     pub async fn get_policy(&self) -> Result<NetworkPolicy> {
         self.get_policy_status()
@@ -163,14 +172,18 @@ impl Egress {
     /// Complete replacement is supported by lifecycle policy endpoints only.
     /// Direct sidecars expose rule mutation, not a public PUT contract.
     pub async fn replace_policy(&self, policy: &NetworkPolicy) -> Result<PolicyStatus> {
-        if self.sandbox_id.is_none() {
-            return Err(Error::InvalidConfig(
+        let sandbox_id = self.sandbox_id.as_deref().ok_or_else(|| {
+            Error::InvalidConfig(
                 "Full policy replacement requires a lifecycle policy endpoint".into(),
-            ));
-        }
+            )
+        })?;
         validate_rules(&policy.egress)?;
-        self.transport
-            .json(Method::PUT, self.url()?, Some(policy))
+        lifecycle::Client::new(&self.transport)
+            .replace_sandbox_network_policy(
+                lifecycle::ReplaceSandboxNetworkPolicyParams { sandbox_id },
+                &wire(policy)?,
+            )?
+            .json_as()
             .await
     }
     pub async fn patch_rules(&self, rules: &[NetworkRule]) -> Result<PolicyStatus> {
@@ -178,9 +191,25 @@ impl Egress {
             return Err(Error::InvalidConfig("At least one rule is required".into()));
         }
         validate_rules(rules)?;
-        self.transport
-            .json(Method::PATCH, self.url()?, Some(&rules))
-            .await
+        match self.sandbox_id.as_deref() {
+            Some(sandbox_id) => {
+                let body: Vec<crate::api::lifecycle::NetworkRule> = wire(rules)?;
+                lifecycle::Client::new(&self.transport)
+                    .patch_sandbox_network_policy(
+                        lifecycle::PatchSandboxNetworkPolicyParams { sandbox_id },
+                        &body,
+                    )?
+                    .json_as()
+                    .await
+            }
+            None => {
+                let body: Vec<crate::api::egress::NetworkRule> = wire(rules)?;
+                sidecar::Client::new(&self.transport)
+                    .patch_policy(&body)?
+                    .json_as()
+                    .await
+            }
+        }
     }
     pub async fn delete_rules(&self, targets: &[String]) -> Result<PolicyStatus> {
         if targets.is_empty() {
@@ -191,14 +220,29 @@ impl Egress {
         for target in targets {
             nonblank(target, "target")?;
         }
-        self.transport
-            .json(Method::DELETE, self.url()?, Some(&targets))
-            .await
+        match self.sandbox_id.as_deref() {
+            Some(sandbox_id) => {
+                lifecycle::Client::new(&self.transport)
+                    .delete_sandbox_network_policy_rules(
+                        lifecycle::DeleteSandboxNetworkPolicyRulesParams { sandbox_id },
+                        targets,
+                    )?
+                    .json_as()
+                    .await
+            }
+            None => {
+                sidecar::Client::new(&self.transport)
+                    .delete_policy(targets)?
+                    .json_as()
+                    .await
+            }
+        }
     }
 }
-fn vault_transport_error(error: reqwest::Error) -> Error {
-    Error::Transport(error.without_url())
+fn wire<T: serde::de::DeserializeOwned>(value: &(impl serde::Serialize + ?Sized)) -> Result<T> {
+    Ok(serde_json::from_value(serde_json::to_value(value)?)?)
 }
+
 fn validate_rules(rules: &[NetworkRule]) -> Result<()> {
     for rule in rules {
         nonblank(&rule.target, "target")?;

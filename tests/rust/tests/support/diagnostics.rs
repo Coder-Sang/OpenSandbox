@@ -166,27 +166,44 @@ pub fn sdk_summary(outcome: &opensandbox::Result<Execution>) -> Value {
         Ok(execution) => {
             json!({"source":"sdk_aggregate_no_wire_capture","complete":execution.complete,"kernel_error":execution.error.is_some(),"stdout_count":execution.logs.stdout.len(),"stderr_count":execution.logs.stderr.len(),"result_count":execution.result.len()})
         }
-        Err(error) => {
-            let classification = match error {
-                Error::Json(error) if error.to_string().starts_with("missing field `type`") => {
-                    "missing_type"
-                }
-                Error::Json(_) => "json_decode",
-                Error::Protocol(_) => "protocol",
-                Error::Transport(_) => "transport",
-                Error::Api { .. } => "http_error",
-                Error::InvalidConfig(_) => "invalid_config",
-                Error::SandboxSetup { .. } => "setup",
-                Error::ReadyTimeout { .. } => "ready_timeout",
-            };
-            let mut summary =
-                json!({"source":"sdk_aggregate_no_wire_capture","classification":classification});
-            if let Error::Api { status, .. } = error {
-                summary["http_status"] = json!(status);
-            }
-            summary
-        }
+        Err(error) => error_summary(error),
     }
+}
+
+/// Closed error classifications; never persist arbitrary error messages.
+pub fn error_summary(error: &Error) -> Value {
+    let classification = match error {
+        Error::Json(error) if error.to_string().starts_with("missing field `type`") => {
+            "missing_type"
+        }
+        Error::Json(_) => "json_decode",
+        Error::Protocol(message)
+            if message == "Execution stream ended before execution_complete or error" =>
+        {
+            "stream_ended_without_terminal"
+        }
+        Error::Protocol(message) if message.starts_with("Invalid UTF-8 in execution stream:") => {
+            "stream_invalid_utf8"
+        }
+        Error::Protocol(message) if message == "Execution stream frame exceeds 16 MiB" => {
+            "stream_frame_limit"
+        }
+        Error::Protocol(_) => "protocol",
+        Error::Transport(error) if error.is_timeout() => "transport_timeout",
+        Error::Transport(error) if error.is_connect() => "transport_connect",
+        Error::Transport(error) if error.is_body() => "transport_body",
+        Error::Transport(_) => "transport",
+        Error::Api { .. } => "http_error",
+        Error::InvalidConfig(_) => "invalid_config",
+        Error::SandboxSetup { .. } => "setup",
+        Error::ReadyTimeout { .. } => "ready_timeout",
+    };
+    let mut summary =
+        json!({"source":"sdk_aggregate_no_wire_capture","classification":classification});
+    if let Error::Api { status, .. } = error {
+        summary["http_status"] = json!(status);
+    }
+    summary
 }
 
 pub fn save(label: &str, evidence: &Value) -> std::io::Result<()> {
@@ -315,5 +332,28 @@ mod tests {
         assert!(!summary.contains("secret"));
         assert!(!summary.contains("https"));
         assert_eq!(sdk_summary(&error)["http_status"], 500);
+        assert_eq!(
+            sdk_summary(&Err(Error::Protocol(
+                "Execution stream ended before execution_complete or error".into()
+            )))["classification"],
+            "stream_ended_without_terminal"
+        );
+        for (message, classification) in [
+            (
+                "Invalid UTF-8 in execution stream: secret-message",
+                "stream_invalid_utf8",
+            ),
+            (
+                "Execution stream frame exceeds 16 MiB",
+                "stream_frame_limit",
+            ),
+        ] {
+            let summary = error_summary(&Error::Protocol(message.into()));
+            assert_eq!(summary["classification"], classification);
+            assert!(!summary.to_string().contains("secret-message"));
+        }
+        let private = sdk_summary(&Err(Error::Protocol("secret-message".into())));
+        assert_eq!(private["classification"], "protocol");
+        assert!(!private.to_string().contains("secret"));
     }
 }

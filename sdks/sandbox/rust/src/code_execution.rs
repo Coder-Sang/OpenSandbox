@@ -6,7 +6,8 @@
 pub use crate::api::execd::CodeContext;
 use crate::{
     api::execd::{CodeContextRequest, RunCodeRequest},
-    commands::{consume, id_url, nonblank},
+    api::execd_client as api,
+    commands::{consume, nonblank},
     stream::{self, ExecutionStream},
     transport::Transport,
     Error, Execution, Result,
@@ -73,70 +74,58 @@ impl Codes {
             nonblank(&cwd, "cwd")?;
             body.additional_properties.insert("cwd".into(), cwd.into());
         }
-        let response = self
-            .transport
-            .request(Method::POST, self.transport.url("/code/context")?)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|error| Error::Transport(error.without_url()))?;
-        let response = Transport::checked_sensitive(response).await?;
-        let context = response
+        let context = api::Client::new(&self.transport)
+            .create_code_context(&body)?
+            .sensitive(
+                "Sensitive API request failed",
+                "Invalid code context response",
+            )
             .json()
-            .await
-            .map_err(|_| Error::Protocol("Invalid code context response".into()))?;
+            .await?;
         validate_context(context)
     }
     pub async fn get_context(&self, context_id: &str) -> Result<CodeContext> {
-        let context = self
-            .transport
-            .json(
-                Method::GET,
-                id_url(&self.transport, "/code/contexts", context_id, None)?,
-                None::<&()>,
-            )
+        nonblank(context_id, "context_id")?;
+        let context = api::Client::new(&self.transport)
+            .get_context(api::GetContextParams { context_id })?
+            .json()
             .await?;
         validate_context(context)
     }
     pub async fn list_contexts(&self, language: Option<&str>) -> Result<Vec<CodeContext>> {
-        let contexts: Vec<CodeContext> = self
-            .transport
-            .json(Method::GET, self.contexts_url(language)?, None::<&()>)
+        if let Some(language) = language {
+            nonblank(language, "language")?;
+        }
+        // The spec requires this query parameter; execd treats an empty filter as all runtimes.
+        let contexts = api::Client::new(&self.transport)
+            .list_contexts(api::ListContextsParams {
+                language: language.unwrap_or(""),
+            })?
+            .json()
             .await?;
         contexts.into_iter().map(validate_context).collect()
     }
     pub async fn delete_context(&self, context_id: &str) -> Result<()> {
-        self.transport
-            .empty(
-                Method::DELETE,
-                id_url(&self.transport, "/code/contexts", context_id, None)?,
-                None::<&()>,
-            )
+        nonblank(context_id, "context_id")?;
+        api::Client::new(&self.transport)
+            .delete_context(api::DeleteContextParams { context_id })?
+            .empty()
             .await
     }
     /// Delete all contexts for one runtime. Requires an explicit language.
     pub async fn delete_contexts(&self, language: &str) -> Result<()> {
-        self.transport
-            .empty(
-                Method::DELETE,
-                self.contexts_url(Some(language))?,
-                None::<&()>,
-            )
+        nonblank(language, "language")?;
+        api::Client::new(&self.transport)
+            .delete_contexts_by_language(api::DeleteContextsByLanguageParams { language })?
+            .empty()
             .await
     }
     pub async fn interrupt(&self, context_id: &str) -> Result<()> {
         nonblank(context_id, "context_id")?;
-        let mut url = self.transport.url("/code")?;
-        url.query_pairs_mut().append_pair("id", context_id);
-        self.transport.empty(Method::DELETE, url, None::<&()>).await
-    }
-    fn contexts_url(&self, language: Option<&str>) -> Result<reqwest::Url> {
-        let mut url = self.transport.url("/code/contexts")?;
-        if let Some(language) = language {
-            nonblank(language, "language")?;
-            url.query_pairs_mut().append_pair("language", language);
-        }
-        Ok(url)
+        api::Client::new(&self.transport)
+            .interrupt_code(api::InterruptCodeParams { id: context_id })?
+            .empty()
+            .await
     }
 }
 fn validate_context(context: CodeContext) -> Result<CodeContext> {
@@ -172,6 +161,9 @@ fn code_body(code: &str, options: RunCodeOptions) -> Result<RunCodeRequest> {
         ..Default::default()
     })
 }
+
+#[cfg(test)]
+mod keepalive_tests;
 
 #[cfg(test)]
 mod tests {
@@ -223,6 +215,35 @@ mod tests {
         task.await.unwrap();
     }
     #[tokio::test]
+    async fn chunked_unicode_error_stream_preserves_output_and_terminal() {
+        let body = concat!(
+            "{\"type\":\"stdout\",\"text\":\"你好\"}\r\n\r\n",
+            "data: {\"type\":\"stderr\",\"text\":\"stderr\"}\r\n\r\n",
+            "data: {\"type\":\"error\",\"error\":{\"ename\":\"ValueError\",\"evalue\":\"bad\",\"traceback\":[\"trace\"]}}\r\n\r\n",
+        );
+        for chunk_size in [1, 2, 7, 37, body.len()] {
+            let mut bytes = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n".to_vec();
+            for chunk in body.as_bytes().chunks(chunk_size) {
+                bytes.extend_from_slice(format!("{:x}\r\n", chunk.len()).as_bytes());
+                bytes.extend_from_slice(chunk);
+                bytes.extend_from_slice(b"\r\n");
+            }
+            bytes.extend_from_slice(b"0\r\n\r\n");
+            let (transport, task) = serve_once(bytes).await;
+            let execution = Codes::new(transport)
+                .run("cell", Default::default())
+                .await
+                .unwrap();
+            assert_eq!(execution.logs.stdout[0].text, "你好");
+            assert_eq!(execution.logs.stderr[0].text, "stderr");
+            assert_eq!(execution.error.unwrap().traceback, vec!["trace"]);
+            assert!(!execution.complete);
+            assert_eq!(execution.exit_code, None);
+            task.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
     async fn rich_results_survive_aggregation() {
         let body = "data: {\"type\":\"result\",\"results\":{\"text/plain\":\"42\",\"image/png\":\"abc\",\"application/json\":{\"answer\":42}}}\n\ndata: {\"type\":\"execution_complete\"}\n\n";
         let (transport, task) = serve_once(response("text/event-stream", body)).await;
@@ -237,6 +258,17 @@ mod tests {
         assert!(request.starts_with("POST /prefix/v1/code HTTP/1.1"));
         assert!(request.contains("x-endpoint-token: test-token"));
     }
+    #[tokio::test]
+    async fn unfiltered_context_list_preserves_all_runtime_semantics() {
+        let body = r#"[{"id":"ctx","language":"python"}]"#;
+        let response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+        let (transport, request) = crate::commands::tests::serve_once(response.into_bytes()).await;
+        let contexts = Codes::new(transport).list_contexts(None).await.unwrap();
+        assert_eq!(contexts[0].id.as_deref(), Some("ctx"));
+        let request = String::from_utf8(request.await.unwrap()).unwrap();
+        assert!(request.starts_with("GET /prefix/v1/code/contexts?language= HTTP/1.1"));
+    }
+
     #[tokio::test]
     async fn context_get_delete_filter_and_interrupt() {
         let (transport, task) = serve_once(response(

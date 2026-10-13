@@ -138,9 +138,12 @@ For the independent interpreter, run the same fmt/clippy/test/doc checks from
 `cargo package --locked --list`. The interpreter's full registry package check
 is blocked until its core `opensandbox` dependency is published. Local path
 builds and a package file-list check do not constitute registry package verification.
-Redis integration tests require an explicitly dedicated Redis service:
-`OPENSANDBOX_REDIS_TEST=1 OPENSANDBOX_REDIS_URL=redis://127.0.0.1:6379/0 cargo test --locked --features redis --test redis_pool`.
-Real sandbox workflows are documented in `../tests/rust/README.md`.
+For Redis integration, run `bash scripts/rust-redis-e2e.sh` from the repository
+root with Docker, OpenSSL and both toolchains installed. It provisions dedicated
+plaintext/TLS fixtures and checks certificate and authentication rejection.
+Runtime prerequisites, logs and validation scope are documented in
+[the Rust SDK guide](../docs/sdks/rust.md#live-identity-argv-and-redis-tests);
+[the E2E README](../tests/rust/README.md) indexes all runtime scenarios.
 Neither crate is published on crates.io. Do not add registry installation
 instructions or release automation until publication is configured.
 

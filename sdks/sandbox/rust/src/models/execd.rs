@@ -45,8 +45,16 @@ pub struct ExecutionError {
     pub ename: String,
     #[serde(default, alias = "value")]
     pub evalue: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_traceback")]
     pub traceback: Vec<String>,
+}
+
+// execd's isolated command errors serialize an absent Go slice as JSON null.
+// Keep the public Vec surface and reject malformed non-array traceback values.
+fn deserialize_traceback<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Vec<String>, D::Error> {
+    Ok(Option::<Vec<String>>::deserialize(deserializer)?.unwrap_or_default())
 }
 #[derive(Clone, Debug, Default)]
 pub struct ExecutionLogs {

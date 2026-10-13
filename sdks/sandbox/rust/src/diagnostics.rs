@@ -1,9 +1,12 @@
 // Copyright 2026 The OpenSandbox Authors
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{api::diagnostic as api, lifecycle::SandboxManager, Error, Result};
+use crate::{
+    api::{diagnostic as api, diagnostic_client as client},
+    lifecycle::SandboxManager,
+    Error, Result,
+};
 use chrono::{DateTime, Utc};
-use reqwest::Method;
 use url::Url;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -129,10 +132,31 @@ impl SandboxManager {
                 "diagnostic scope must not be blank".into(),
             ));
         }
-        let mut url = self.path(&["sandboxes", id, "diagnostics", kind])?;
-        url.query_pairs_mut().append_pair("scope", scope);
-        let response: api::DiagnosticContentResponse =
-            self.transport.json(Method::GET, url, None::<&()>).await?;
+        let client = client::Client::new(&self.transport);
+        let response = match kind {
+            "logs" => {
+                client
+                    .get_sandboxes_sandbox_id_diagnostics_logs(
+                        client::GetSandboxesSandboxIdDiagnosticsLogsParams {
+                            sandbox_id: id,
+                            scope,
+                        },
+                    )?
+                    .json()
+                    .await?
+            }
+            _ => {
+                client
+                    .get_sandboxes_sandbox_id_diagnostics_events(
+                        client::GetSandboxesSandboxIdDiagnosticsEventsParams {
+                            sandbox_id: id,
+                            scope,
+                        },
+                    )?
+                    .json()
+                    .await?
+            }
+        };
         response.try_into()
     }
 }

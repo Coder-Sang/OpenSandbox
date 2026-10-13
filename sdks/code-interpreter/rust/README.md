@@ -1,45 +1,33 @@
 # OpenSandbox Code Interpreter Rust SDK
 
-Independent, unpublished Rust 2021 crate, version 1.1.0, MSRV 1.85.
-Use a local path dependency on this package and the sandbox SDK.
+Independent, unpublished Rust 2021 crate, MSRV 1.85. Wraps an existing sandbox
+running an interpreter-enabled image. Install both crates from source; paths
+below are relative to your application's manifest:
 
 ```toml
 [dependencies]
-opensandbox = { path = "sdks/sandbox/rust", version = "1.1.0" }
-opensandbox-code-interpreter = { path = "sdks/code-interpreter/rust", version = "1.1.0" }
+opensandbox = { path = "../OpenSandbox/sdks/sandbox/rust" }
+opensandbox-code-interpreter = { path = "../OpenSandbox/sdks/code-interpreter/rust" }
 ```
 
-Wrap an existing sandbox running a code-interpreter image:
+From this package directory, run the packaged attach example with an existing
+interpreter sandbox:
 
-```rust,no_run
-use opensandbox::Sandbox;
-use opensandbox_code_interpreter::{CodeInterpreter, CodeInterpreterOptions, RunCodeOptions};
-
-async fn execute(sandbox: Sandbox) -> opensandbox::Result<()> {
-    let interpreter = CodeInterpreter::create(sandbox, CodeInterpreterOptions::default()).await?;
-    let context = interpreter.codes().create_context("python").await?;
-    let result = interpreter.codes().run("print(42)", RunCodeOptions {
-        context: Some(context.clone()), ..Default::default()
-    }).await?;
-    for output in result.logs.stdout { print!("{}", output.text); }
-    interpreter.codes().delete_context(context.id.as_deref().expect("context ID")).await?;
-    Ok(())
-}
+```bash
+export OPEN_SANDBOX_DOMAIN=localhost:8080
+export OPEN_SANDBOX_API_KEY=your-api-key
+export SANDBOX_ID=your-interpreter-sandbox-id
+cargo run --locked --example attach
 ```
 
-`codes()` supports aggregated and streaming execution, context create/get/list/delete,
-language-filtered bulk deletion, and interrupt. `create_context_with_options` accepts
-`CreateContextOptions { cwd: Some("/workspace".into()) }` for an initial working directory.
-Rich MIME results remain in
-`ExecutionResult::raw`. Specify either a context or a language, not both.
+The [example](examples/attach.rs) prints execution output and checks kernel
+errors. It leaves the existing sandbox alive. Your application owns context
+cleanup and sandbox destruction; dropping a facade or stream does not delete
+contexts, kill the sandbox or interrupt the kernel.
 
-Creation checks execd and an actual Jupyter TCP connection inside the sandbox.
-The default total readiness budget is 30 seconds, polling every 200 milliseconds.
-Both are native `Duration` values. `skip_health_check` explicitly opts out.
-Timeouts and dropping the facade do not kill the sandbox. Use `sandbox().kill()`
-for explicit remote cleanup. Dropping an execution stream does not interrupt its
-remote kernel, use `codes().interrupt(context_id)` when needed.
-
-See [Rust SDK documentation](../../../docs/sdks/rust.md) for sandbox setup.
-Run `cargo test` and `cargo clippy --all-targets -- -D warnings` in this directory.
-The `attach` example uses an existing code-interpreter sandbox ID.
+See [the Rust SDK interpreter section](../../../docs/sdks/rust.md#code-interpreter)
+for context APIs, streaming, Git installation, runtime readiness and cleanup;
+[recorded interpreter results](../../../docs/sdks/rust.md#interpreter-results)
+describe the tested runtime's limitations.
+For generation, quality checks and registry packaging restrictions, follow
+[the SDK contributor instructions](../../AGENTS.md).

@@ -39,8 +39,8 @@ Component versions needed for the features covered by this guide:
   default writable allowlist (`/workspace`, `/mnt`, `/media`, `/data`)
 - `opensandbox-server` >= 0.2.1 — the server injects `CAP_SYS_ADMIN`,
   unconfined AppArmor, seccomp, and protected-system-path settings, and the
-  tmpfs mount required by `bwrap` when the execd image declares
-  `bootstrap.execd.isolation`
+  tmpfs mount required by `bwrap` when the sandbox creation request sets
+  `extensions["bootstrap.execd.isolation"] = "enable"`
 - Python SDK >= 0.1.14 (`isolation.run_once` / `isolation.session` context
   manager); >= 0.1.13 for the generated isolation client only
 - JavaScript / TypeScript SDK >= 0.1.10 (`isolation.runOnce` /
@@ -540,10 +540,12 @@ run `make build-session-gate` and then `sudo make install-session-gate` from
 Note: `/capabilities` reports `available: false` when the native workload gate
 cannot be opened as a trusted executable or when bwrap itself cannot be
 started (missing binary or missing namespace capabilities). A missing
-`overlayfs` does **not** flip `available` — the overlay probe only influences
-Phase 2 `commit`/`diff` support, and default overlay-mode session creation can
-still fail at runtime on such hosts. If you rely on `workspace.mode:
-"overlay"`, verify `overlayfs` support directly on the host.
+`overlayfs` does **not** flip `available`, and default overlay-mode session
+creation can still fail at runtime on such hosts. The current capabilities
+endpoint always reports Phase 2 `commit_supported` / `diff_supported` as
+false; these fields do not prove whether overlay mounts work. If you rely on
+`workspace.mode: "overlay"`, verify an actual overlay session's execution
+and scoped file operations in the target container.
 
 ---
 

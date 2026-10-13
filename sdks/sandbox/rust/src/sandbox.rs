@@ -11,7 +11,6 @@ use crate::{
     models::lifecycle::*,
     transport::Transport,
 };
-use reqwest::Method;
 use tokio::time::{sleep, timeout};
 
 /// A cloneable handle. Dropping it never deletes the remote sandbox.
@@ -95,8 +94,9 @@ impl Sandbox {
         self.manager.create_snapshot(&self.id, options).await
     }
     pub async fn ping(&self) -> Result<()> {
-        self.transport
-            .empty(Method::GET, self.transport.url("/ping")?, None::<&()>)
+        crate::api::execd_client::Client::new(&self.transport)
+            .ping()?
+            .empty()
             .await
     }
 

@@ -6,7 +6,6 @@ use reqwest::{
     header::{HeaderMap, HeaderName, HeaderValue},
     Client, Method, RequestBuilder, Response,
 };
-use serde::{de::DeserializeOwned, Serialize};
 use std::time::Duration;
 use url::Url;
 
@@ -30,6 +29,11 @@ impl Transport {
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(config.request_timeout)
             .build()?;
+        Self::with_client(config, client)
+    }
+
+    pub(crate) fn with_client(config: &ConnectionConfig, client: Client) -> Result<Self> {
+        config.validate()?;
         Ok(Self {
             client,
             base_url: config.base_url.clone(),
@@ -43,6 +47,25 @@ impl Transport {
 
     pub(crate) fn lifecycle_url(&self, path: &str) -> Result<Url> {
         self.url(path)
+    }
+
+    /// Append already-separated generated path segments without losing a prefix.
+    pub(crate) fn operation_url(&self, parts: &[(&str, bool)]) -> Result<Url> {
+        let mut url = self.url("")?;
+        let mut segments = url
+            .path_segments_mut()
+            .map_err(|_| Error::InvalidConfig("API URL cannot be a base".into()))?;
+        segments.pop_if_empty();
+        for (part, parameter) in parts {
+            if *parameter
+                && (part.trim().is_empty() || matches!(*part, "." | "..") || part.contains('\0'))
+            {
+                return Err(Error::InvalidConfig("Invalid API path parameter".into()));
+            }
+            segments.push(part);
+        }
+        drop(segments);
+        Ok(url)
     }
 
     pub(crate) fn url(&self, path: &str) -> Result<Url> {
@@ -119,45 +142,6 @@ impl Transport {
             .headers(self.headers.clone())
     }
 
-    pub(crate) async fn json<T: DeserializeOwned>(
-        &self,
-        method: Method,
-        url: Url,
-        body: Option<&impl Serialize>,
-    ) -> Result<T> {
-        let mut request = self.request(method, url);
-        if let Some(body) = body {
-            request = request.json(body);
-        }
-        let response = Self::checked(request.send().await?).await?;
-        Ok(response.json().await?)
-    }
-
-    pub(crate) async fn sensitive_json<T: DeserializeOwned>(
-        &self,
-        method: Method,
-        url: Url,
-        body: Option<&impl Serialize>,
-    ) -> Result<T> {
-        let mut request = self.request(method, url);
-        if let Some(body) = body {
-            request = request.json(body);
-        }
-        let response = Self::checked_sensitive(
-            request
-                .send()
-                .await
-                .map_err(|error| Error::Transport(error.without_url()))?,
-        )
-        .await?;
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|error| Error::Transport(error.without_url()))?;
-        serde_json::from_slice(&bytes)
-            .map_err(|_| Error::Protocol("Invalid sensitive API response".into()))
-    }
-
     /// Sensitive request payloads may be echoed by an untrusted server in any
     /// response field. Preserve the HTTP status without decoding error metadata.
     pub(crate) async fn checked_sensitive(response: Response) -> Result<Response> {
@@ -170,34 +154,6 @@ impl Transport {
             message: "Sensitive API request failed".into(),
             request_id: None,
         })
-    }
-
-    pub(crate) async fn empty(
-        &self,
-        method: Method,
-        url: Url,
-        body: Option<&impl Serialize>,
-    ) -> Result<()> {
-        let mut request = self.request(method, url);
-        if let Some(body) = body {
-            request = request.json(body);
-        }
-        let response = Self::checked(request.send().await?).await?;
-        // Consume ordinary responses so pooled connections can be reused.
-        response.bytes().await?;
-        Ok(())
-    }
-
-    pub(crate) async fn endpoint(&self, url: Url) -> Result<Endpoint> {
-        let response = Self::checked(self.request(Method::GET, url).send().await?).await?;
-        let origin = response
-            .headers()
-            .get("open-sandbox-origin")
-            .and_then(|v| v.to_str().ok())
-            .map(str::to_owned);
-        let mut endpoint: Endpoint = response.json().await?;
-        endpoint.origin = origin;
-        Ok(endpoint)
     }
 
     pub(crate) async fn checked(mut response: Response) -> Result<Response> {

@@ -151,6 +151,32 @@ mod tests {
         assert_eq!(events.len(), 2);
     }
     #[test]
+    fn isolated_error_accepts_null_traceback_without_losing_failure() {
+        for traceback in ["null", "[]", "[\"permission denied\"]"] {
+            let frame = format!("data: {{\"type\":\"error\",\"error\":{{\"ename\":\"CommandExecError\",\"evalue\":\"1\",\"traceback\":{traceback}}}}}\n\n");
+            let event = Decoder::<ExecutionEvent>::default()
+                .push(frame.as_bytes(), true)
+                .unwrap()
+                .remove(0);
+            let mut execution = crate::models::execd::Execution::default();
+            execution.apply(event);
+            let error = execution.error.unwrap();
+            assert_eq!(error.ename, "CommandExecError");
+            assert_eq!(error.evalue, "1");
+            assert_eq!(
+                error.traceback.len(),
+                usize::from(traceback.starts_with("[\""))
+            );
+        }
+        let missing: crate::models::execd::ExecutionError =
+            serde_json::from_str(r#"{"ename":"CommandExecError","evalue":"1"}"#).unwrap();
+        assert!(missing.traceback.is_empty());
+        for invalid in ["\"invalid\"", "[1]", "{}"] {
+            let body = format!("{{\"traceback\":{invalid}}}");
+            assert!(serde_json::from_str::<crate::models::execd::ExecutionError>(&body).is_err());
+        }
+    }
+    #[test]
     fn malformed_json_and_utf8_are_errors() {
         assert!(Decoder::<ExecutionEvent>::default()
             .push(b"data: {bad}\n\n", true)

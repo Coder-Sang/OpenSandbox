@@ -30,6 +30,45 @@ fn require(ok: bool, message: &str) -> Result {
     }
 }
 async fn finish(sandbox: &Sandbox, outcome: Result) -> Result {
+    if outcome.is_err() {
+        if let Ok(directory) = env::var("OPENSANDBOX_RUST_ARTIFACT_DIR") {
+            if let Ok(log) = sandbox.files().read_text("/tmp/execd.log").await {
+                // Raw daemon logs stay in the private invocation directory, outside
+                // the redacted interpreter JSON artifacts uploaded by CI.
+                if let Some(parent) = std::path::Path::new(&directory).parent() {
+                    let path = parent.join(format!("execd-failure-{}.log", sandbox.id()));
+                    if let Err(error) = std::fs::write(path, log) {
+                        eprintln!("could not retain private execd failure log: {error}");
+                    }
+                    if env::var("DOCKER_HOST").is_ok_and(|host| host.starts_with("unix://")) {
+                        if let Ok(output) = std::process::Command::new("docker")
+                            .args([
+                                "logs",
+                                "--tail",
+                                "300",
+                                &format!("sandbox-{}", sandbox.id()),
+                            ])
+                            .output()
+                        {
+                            if output.status.success() {
+                                let mut log = output.stdout;
+                                log.extend(output.stderr);
+                                let path = parent.join(format!(
+                                    "private-container-failure-{}.log",
+                                    sandbox.id()
+                                ));
+                                if let Err(error) = std::fs::write(path, log) {
+                                    eprintln!(
+                                        "could not retain private container failure log: {error}"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
     let cleanup = sandbox.kill().await;
     match (outcome, cleanup) {
         (Ok(()), Ok(())) => Ok(()),
@@ -105,7 +144,11 @@ fn dedicated_jupyter_fixture_has_matching_host_token_and_entrypoint() {
 #[tokio::test]
 #[ignore = "real execd isolation runtime required"]
 async fn docker_isolated_foreground_background_scoped_files() -> Result {
-    let sandbox = create(&manager()?, options()?).await?;
+    let mut options = options()?;
+    options
+        .extensions
+        .insert("bootstrap.execd.isolation".into(), "enable".into());
+    let sandbox = create(&manager()?, options).await?;
     let outcome = async {
         sandbox
             .commands()
@@ -305,9 +348,43 @@ fn credential_fixtures_deserialize_before_allocation() {
     let _: NetworkPolicy =
         serde_json::from_value(serde_json::json!({"defaultAction":"allow","egress":[]})).unwrap();
 }
+async fn vault_stage<T>(
+    stage: &str,
+    operation: impl std::future::Future<Output = opensandbox::Result<T>>,
+) -> opensandbox::Result<T> {
+    let started = std::time::Instant::now();
+    let outcome = operation.await;
+    let mut evidence = match &outcome {
+        Ok(_) => serde_json::json!({"classification":"success"}),
+        Err(error) => diagnostics::error_summary(error),
+    };
+    evidence["source"] = serde_json::json!("sdk_request_no_wire_capture");
+    evidence["stage"] = serde_json::json!(stage);
+    evidence["elapsed_ms"] = serde_json::json!(started.elapsed().as_millis());
+    // Diagnostic IO must not turn a successful stale-revision request into an
+    // apparent API rejection. A capture failure fails the test, not the operation.
+    diagnostics::save("vault-stage", &evidence).expect("could not retain Vault stage diagnostics");
+    if outcome.is_err() {
+        eprintln!(
+            "Vault stage {stage} failed ({})",
+            evidence["classification"]
+        );
+    }
+    outcome
+}
+
 #[tokio::test]
 #[ignore = "real credential proxy sidecar and dedicated target required"]
 async fn docker_vault_injection_revision_metadata() -> Result {
+    for round in 0..10 {
+        vault_injection_revision_metadata_round()
+            .await
+            .map_err(|error| format!("Vault round {round}: {error}"))?;
+    }
+    Ok(())
+}
+
+async fn vault_injection_revision_metadata_round() -> Result {
     use serde_json::json;
     let ip = env::var("OPENSANDBOX_RUST_VAULT_TARGET_IP")?;
     require(
@@ -321,24 +398,25 @@ async fn docker_vault_injection_revision_metadata() -> Result {
     )?);
     let sandbox = create(&manager()?, options).await?;
     let outcome = async {
-        let vault = sandbox.egress().await?;
+        let vault = vault_stage("egress_endpoint", sandbox.egress()).await?;
         let request = vault_request();
-        let created = vault.create(&request).await?;
-        let metadata = serde_json::to_string(&vault.get().await?)?;
+        let created = vault_stage("create", vault.create(&request)).await?;
+        let metadata = serde_json::to_string(&vault_stage("get", vault.get()).await?)?;
         require(!metadata.contains("rust-e2e-safe-token"), "vault leaked credential value")?;
-        require(vault.list_credentials().await?.len() == 1 && vault.list_bindings().await?.len() == 1, "vault metadata listing mismatch")?;
-        vault.get_credential("test-token").await?;
-        vault.get_binding("test-binding").await?;
+        require(vault_stage("list_credentials", vault.list_credentials()).await?.len() == 1 && vault_stage("list_bindings", vault.list_bindings()).await?.len() == 1, "vault metadata listing mismatch")?;
+        vault_stage("get_credential", vault.get_credential("test-token")).await?;
+        vault_stage("get_binding", vault.get_binding("test-binding")).await?;
         let command = format!("curl --fail --silent --show-error --max-time 20 --resolve rust-vault.opensandbox.test:80:{ip} http://rust-vault.opensandbox.test/check");
-        let response = sandbox.commands().run(&command, Default::default()).await?;
+        let response = vault_stage("injection", sandbox.commands().run(&command, Default::default())).await?;
         require(response.exit_code == Some(0), "real credential injection rejected upstream")?;
         let body: serde_json::Value = serde_json::from_str(&response.logs.stdout.iter().map(|s| s.text.as_str()).collect::<String>())?;
         require(body["ok"] == true, "credential injection target mismatch")?;
         let mutation = vault_mutation(created.revision);
-        let patched = vault.patch(&mutation).await?;
+        let patched = vault_stage("patch", vault.patch(&mutation)).await?;
         require(patched.revision > created.revision, "vault revision did not advance")?;
-        require(vault.patch(&mutation).await.is_err(), "stale vault revision accepted")?;
-        vault.delete().await?;
+        let stale = vault_stage("stale_patch", vault.patch(&mutation)).await;
+        require(matches!(stale, Err(Error::Api { status: 409, .. })), "stale vault revision did not return HTTP 409")?;
+        vault_stage("delete", vault.delete()).await?;
         Ok(())
     }.await;
     finish(&sandbox, outcome).await
@@ -517,7 +595,7 @@ async fn interpreter_context_rich_errors_interrupt(stock_python3: bool) -> Resul
             let stress_options = run_options.clone();
             let reused = recorded_run(codes, "answer + 1", run_options).await.map_err(|error| format!("post-interrupt execution stream: {error}"))?;
             require(reused.complete && reused.error.is_none() && reused.result.iter().any(|r| r.text.as_deref() == Some("42")), "context state unusable after interrupt")?;
-            for round in 0..20 {
+            for round in 0..100 {
                 let repeated = recorded_run(codes, "print('stress-before-error', flush=True)\nraise ValueError('stress-error')", stress_options.clone()).await.map_err(|error| format!("repeated error execution {round}: {error}"))?;
                 require(repeated.error.is_some() && repeated.logs.stdout.iter().any(|line| line.text.contains("stress-before-error")), "repeated error execution lost stdout/error")?;
                 let next = recorded_run(codes, "answer + 1", stress_options.clone()).await.map_err(|error| format!("repeated post-error execution {round}: {error}"))?;

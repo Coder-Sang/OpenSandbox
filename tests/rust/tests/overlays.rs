@@ -69,6 +69,9 @@ async fn docker_overlays_only_persistent_ephemeral_rw_ro() -> Result {
     let mut options = CreateSandboxOptions::image(env::var("OPENSANDBOX_SANDBOX_DEFAULT_IMAGE")?);
     options.timeout = Some(Duration::from_secs(600));
     options
+        .extensions
+        .insert("bootstrap.execd.isolation".into(), "enable".into());
+    options
         .metadata
         .insert("rust-e2e-run".into(), env::var("OPENSANDBOX_RUST_RUN_ID")?);
     let sandbox = match manager.create(options).await {

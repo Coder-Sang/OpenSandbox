@@ -44,7 +44,7 @@ server runtime and the execd version installed in the sandbox.
 
 - **Rust:** the async Tokio/reqwest crate is installed from source, not crates.io.
   It supports command and isolated sessions, background commands, diagnostics,
-  Credential Vault, and pools. The independent [Code Interpreter crate](/sdks/code-interpreter-rust)
+  Credential Vault, and pools. The independent [Code Interpreter crate](/sdks/rust#code-interpreter)
   is also unpublished. Both use Cargo path/Git dependencies. Dropping a handle
   does not kill its remote sandbox. Public timeouts use `std::time::Duration`.
 
@@ -60,7 +60,7 @@ server runtime and the execd version installed in the sandbox.
   `sandbox.metrics().watch().await?`; other SDKs' stable metrics services provide
   point-in-time reads. The [CLI](/cli/) also has
   a metrics stream via `osb sandbox metrics --watch`.
-- **Timeout units:** use Python `timedelta` and JVM `Duration`; JavaScript and C#
+- **Timeout units:** use Python `timedelta`, JVM `Duration` and Rust `std::time::Duration`; JavaScript and C#
   command timeouts use seconds. Go `RunCommandRequest.Timeout` uses **milliseconds**.
 
 Template-backed sandboxes require an explicit TTL and inherit their workload
@@ -72,7 +72,7 @@ the lifecycle API; they do not have a sandbox-side Credential Vault.
 Code Interpreter SDKs add persistent language contexts and rich code execution
 results to a sandbox running an interpreter-enabled image. Rust provides the
 standalone `opensandbox-code-interpreter` crate alongside `opensandbox`, both
-unpublished. See [Rust Code Interpreter](/sdks/code-interpreter-rust) for path/Git
+unpublished. See [Rust Code Interpreter](/sdks/rust#code-interpreter) for path/Git
 installation and the difference between kernel errors and transport failures.
 
 ## Feature guides

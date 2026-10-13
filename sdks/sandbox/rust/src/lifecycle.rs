@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 use crate::{
-    api::lifecycle as api,
+    api::{lifecycle as api, lifecycle_client as client},
     config::ConnectionConfig,
     error::{Error, Result},
     models::lifecycle::*,
@@ -10,7 +10,6 @@ use crate::{
     transport::Transport,
 };
 use chrono::Utc;
-use reqwest::Method;
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -217,13 +216,6 @@ impl SandboxManager {
         }
         Ok(url)
     }
-    async fn get_model<W: DeserializeOwned + Serialize, T: DeserializeOwned>(
-        &self,
-        url: Url,
-    ) -> Result<T> {
-        let wire: W = self.transport.json(Method::GET, url, None::<&()>).await?;
-        convert(wire)
-    }
     pub async fn create(&self, options: CreateSandboxOptions) -> Result<Sandbox> {
         let image = match &options.source {
             SandboxSource::Image(image) => Some(image.uri.as_str()),
@@ -232,9 +224,9 @@ impl SandboxManager {
         };
         let mut metric = crate::observability::CreationMetric::new(&self.config, image);
         let body = create_body(&options)?;
-        let response: api::CreateSandboxResponse = self
-            .transport
-            .json(Method::POST, self.path(&["sandboxes"])?, Some(&body))
+        let response = client::Client::new(&self.transport)
+            .post_sandboxes(&body)?
+            .json()
             .await?;
         let id = response.id.clone();
         metric.created(&id);
@@ -270,9 +262,9 @@ impl SandboxManager {
         };
         let mut metric = crate::observability::CreationMetric::new(&self.config, image);
         let body = create_body(&options)?;
-        let response: api::CreateSandboxResponse = self
-            .transport
-            .json(Method::POST, self.path(&["sandboxes"])?, Some(&body))
+        let response = client::Client::new(&self.transport)
+            .post_sandboxes(&body)?
+            .json()
             .await?;
         let id = response.id;
         metric.created(&id);
@@ -296,42 +288,48 @@ impl SandboxManager {
         self.attach(id, false).await
     }
     pub async fn get(&self, id: &str) -> Result<SandboxInfo> {
-        self.get_model::<api::Sandbox, _>(self.path(&["sandboxes", id])?)
-            .await
+        convert(
+            client::Client::new(&self.transport)
+                .get_sandboxes_sandbox_id(client::GetSandboxesSandboxIdParams { sandbox_id: id })?
+                .json()
+                .await?,
+        )
     }
     pub async fn list(&self, filter: SandboxFilter) -> Result<ListSandboxesResponse> {
-        let mut url = self.path(&["sandboxes"])?;
-        query(
-            &mut url,
-            &filter.states,
-            &filter.metadata,
-            filter.page,
-            filter.page_size,
-        )?;
-        self.get_model::<api::ListSandboxesResponse, _>(url).await
+        let metadata = encode_metadata(&filter.metadata);
+        convert(
+            client::Client::new(&self.transport)
+                .get_sandboxes(client::GetSandboxesParams {
+                    state: Some(&filter.states),
+                    metadata: metadata.as_deref(),
+                    page: filter.page.map(u64::from),
+                    page_size: filter.page_size.map(u64::from),
+                })?
+                .json()
+                .await?,
+        )
     }
     pub async fn kill(&self, id: &str) -> Result<()> {
-        self.transport
-            .empty(Method::DELETE, self.path(&["sandboxes", id])?, None::<&()>)
+        client::Client::new(&self.transport)
+            .delete_sandboxes_sandbox_id(client::DeleteSandboxesSandboxIdParams { sandbox_id: id })?
+            .empty()
             .await
     }
     pub async fn pause(&self, id: &str) -> Result<()> {
-        self.transport
-            .empty(
-                Method::POST,
-                self.path(&["sandboxes", id, "pause"])?,
-                None::<&()>,
-            )
+        client::Client::new(&self.transport)
+            .post_sandboxes_sandbox_id_pause(client::PostSandboxesSandboxIdPauseParams {
+                sandbox_id: id,
+            })?
+            .empty()
             .await
     }
     /// Accepts the resume request. Use connect to wait for Running and resolve fresh endpoints.
     pub async fn resume(&self, id: &str) -> Result<()> {
-        self.transport
-            .empty(
-                Method::POST,
-                self.path(&["sandboxes", id, "resume"])?,
-                None::<&()>,
-            )
+        client::Client::new(&self.transport)
+            .post_sandboxes_sandbox_id_resume(client::PostSandboxesSandboxIdResumeParams {
+                sandbox_id: id,
+            })?
+            .empty()
             .await
     }
     pub async fn renew(&self, id: &str, timeout: Duration) -> Result<()> {
@@ -343,12 +341,12 @@ impl SandboxManager {
             .ok_or_else(|| invalid("renew expiration overflows timestamp"))?;
         let body: api::RenewSandboxExpirationRequest =
             convert(json!({"expiresAt":expires.to_rfc3339()}))?;
-        self.transport
-            .empty(
-                Method::POST,
-                self.path(&["sandboxes", id, "renew-expiration"])?,
-                Some(&body),
-            )
+        client::Client::new(&self.transport)
+            .post_sandboxes_sandbox_id_renew_expiration(
+                client::PostSandboxesSandboxIdRenewExpirationParams { sandbox_id: id },
+                &body,
+            )?
+            .empty()
             .await
     }
     pub async fn endpoint(&self, id: &str, port: u16) -> Result<Endpoint> {
@@ -384,14 +382,26 @@ impl SandboxManager {
         if port == 0 {
             return Err(invalid("endpoint port must be nonzero"));
         }
-        let mut url = self.path(&["sandboxes", id, "endpoints", &port.to_string()])?;
-        url.query_pairs_mut()
-            .append_pair("use_server_proxy", if proxy { "true" } else { "false" });
-        if let Some(expiry) = expiry {
-            url.query_pairs_mut()
-                .append_pair("expires", &expiry.to_string());
-        }
-        self.transport.endpoint(url).await
+        let expiry = expiry.map(|value| value.to_string());
+        let response = client::Client::new(&self.transport)
+            .get_sandboxes_sandbox_id_endpoints_port(
+                client::GetSandboxesSandboxIdEndpointsPortParams {
+                    sandbox_id: id,
+                    port: u64::from(port),
+                    use_server_proxy: Some(proxy),
+                    expires: expiry.as_deref(),
+                },
+            )?
+            .raw()
+            .await?;
+        let origin = response
+            .headers()
+            .get("open-sandbox-origin")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
+        let mut endpoint: Endpoint = response.json().await?;
+        endpoint.origin = origin;
+        Ok(endpoint)
     }
     pub async fn patch_metadata(
         &self,
@@ -399,15 +409,15 @@ impl SandboxManager {
         patch: SandboxMetadataPatch,
     ) -> Result<SandboxInfo> {
         let body: api::PatchSandboxMetadataRequest = convert(patch)?;
-        let response: api::Sandbox = self
-            .transport
-            .json(
-                Method::PATCH,
-                self.path(&["sandboxes", id, "metadata"])?,
-                Some(&body),
-            )
-            .await?;
-        convert(response)
+        convert(
+            client::Client::new(&self.transport)
+                .patch_sandboxes_sandbox_id_metadata(
+                    client::PatchSandboxesSandboxIdMetadataParams { sandbox_id: id },
+                    &body,
+                )?
+                .json()
+                .await?,
+        )
     }
     pub async fn create_snapshot(
         &self,
@@ -415,40 +425,46 @@ impl SandboxManager {
         options: CreateSnapshotOptions,
     ) -> Result<SnapshotInfo> {
         let body: api::CreateSnapshotRequest = convert(options)?;
-        let response: api::Snapshot = self
-            .transport
-            .json(
-                Method::POST,
-                self.path(&["sandboxes", id, "snapshots"])?,
-                Some(&body),
-            )
-            .await?;
-        convert(response)
+        convert(
+            client::Client::new(&self.transport)
+                .post_sandboxes_sandbox_id_snapshots(
+                    client::PostSandboxesSandboxIdSnapshotsParams { sandbox_id: id },
+                    Some(&body),
+                )?
+                .json()
+                .await?,
+        )
     }
     pub async fn get_snapshot(&self, id: &str) -> Result<SnapshotInfo> {
-        self.get_model::<api::Snapshot, _>(self.path(&["snapshots", id])?)
-            .await
+        convert(
+            client::Client::new(&self.transport)
+                .get_snapshots_snapshot_id(client::GetSnapshotsSnapshotIdParams {
+                    snapshot_id: id,
+                })?
+                .json()
+                .await?,
+        )
     }
     pub async fn list_snapshots(&self, filter: SnapshotFilter) -> Result<ListSnapshotsResponse> {
-        let mut url = self.path(&["snapshots"])?;
-        query(
-            &mut url,
-            &filter.states,
-            &BTreeMap::new(),
-            filter.page,
-            filter.page_size,
-        )?;
-        if let Some(id) = filter.sandbox_id {
-            url.query_pairs_mut().append_pair("sandboxId", &id);
-        }
-        if let Some(name) = filter.name {
-            url.query_pairs_mut().append_pair("name", &name);
-        }
-        self.get_model::<api::ListSnapshotsResponse, _>(url).await
+        convert(
+            client::Client::new(&self.transport)
+                .get_snapshots(client::GetSnapshotsParams {
+                    sandbox_id: filter.sandbox_id.as_deref(),
+                    name: filter.name.as_deref(),
+                    state: Some(&filter.states),
+                    page: filter.page.map(u64::from),
+                    page_size: filter.page_size.map(u64::from),
+                })?
+                .json()
+                .await?,
+        )
     }
     pub async fn delete_snapshot(&self, id: &str) -> Result<()> {
-        self.transport
-            .empty(Method::DELETE, self.path(&["snapshots", id])?, None::<&()>)
+        client::Client::new(&self.transport)
+            .delete_snapshots_snapshot_id(client::DeleteSnapshotsSnapshotIdParams {
+                snapshot_id: id,
+            })?
+            .empty()
             .await
     }
     fn template_body(options: CreateTemplateOptions) -> Result<Value> {
@@ -473,11 +489,12 @@ impl SandboxManager {
     }
     pub async fn create_template(&self, options: CreateTemplateOptions) -> Result<TemplateInfo> {
         let body: api::CreateFsbTemplateRequest = convert(Self::template_body(options)?)?;
-        let response: api::FsbTemplate = self
-            .transport
-            .json(Method::POST, self.path(&["templates"])?, Some(&body))
-            .await?;
-        convert(response)
+        convert(
+            client::Client::new(&self.transport)
+                .create_template(&body)?
+                .json()
+                .await?,
+        )
     }
     /// Create a template with literal environment values, including an explicit empty map.
     /// Names must match ASCII `[A-Za-z_][A-Za-z0-9_]*`. Values are not shell-expanded.
@@ -501,14 +518,24 @@ impl SandboxManager {
         }
         let mut body: api::CreateFsbTemplateRequest = convert(Self::template_body(options)?)?;
         body.env = Some(env);
-        self.transport
-            .sensitive_json(Method::POST, self.path(&["templates"])?, Some(&body))
+        client::Client::new(&self.transport)
+            .create_template(&body)?
+            .sensitive(
+                "Sensitive API request failed",
+                "Invalid sensitive API response",
+            )
+            .json_as()
             .await
     }
     /// Fetch a template while retaining its environment defaults.
     pub async fn get_template_with_env(&self, id: &str) -> Result<TemplateInfoWithEnv> {
-        self.transport
-            .sensitive_json(Method::GET, self.path(&["templates", id])?, None::<&()>)
+        client::Client::new(&self.transport)
+            .get_template(client::GetTemplateParams { template_id: id })?
+            .sensitive(
+                "Sensitive API request failed",
+                "Invalid sensitive API response",
+            )
+            .json_as()
             .await
     }
     /// List templates while retaining environment defaults and pagination.
@@ -516,64 +543,57 @@ impl SandboxManager {
         &self,
         filter: TemplateFilter,
     ) -> Result<ListTemplatesWithEnvResponse> {
-        let url = self.template_list_url(filter)?;
-        self.transport
-            .sensitive_json(Method::GET, url, None::<&()>)
+        let metadata = encode_metadata(&filter.metadata);
+        client::Client::new(&self.transport)
+            .list_templates(client::ListTemplatesParams {
+                metadata: metadata.as_deref(),
+                page: filter.page.map(u64::from),
+                page_size: filter.page_size.map(u64::from),
+            })?
+            .sensitive(
+                "Sensitive API request failed",
+                "Invalid sensitive API response",
+            )
+            .json_as()
             .await
     }
     pub async fn get_template(&self, id: &str) -> Result<TemplateInfo> {
-        self.get_model::<api::FsbTemplate, _>(self.path(&["templates", id])?)
-            .await
-    }
-    fn template_list_url(&self, filter: TemplateFilter) -> Result<Url> {
-        let mut url = self.path(&["templates"])?;
-        query(
-            &mut url,
-            &[],
-            &filter.metadata,
-            filter.page,
-            filter.page_size,
-        )?;
-        Ok(url)
+        convert(
+            client::Client::new(&self.transport)
+                .get_template(client::GetTemplateParams { template_id: id })?
+                .json()
+                .await?,
+        )
     }
     pub async fn list_templates(&self, filter: TemplateFilter) -> Result<ListTemplatesResponse> {
-        self.get_model::<api::ListFsbTemplatesResponse, _>(self.template_list_url(filter)?)
-            .await
+        let metadata = encode_metadata(&filter.metadata);
+        convert(
+            client::Client::new(&self.transport)
+                .list_templates(client::ListTemplatesParams {
+                    metadata: metadata.as_deref(),
+                    page: filter.page.map(u64::from),
+                    page_size: filter.page_size.map(u64::from),
+                })?
+                .json()
+                .await?,
+        )
     }
     pub async fn delete_template(&self, id: &str) -> Result<()> {
-        self.transport
-            .empty(Method::DELETE, self.path(&["templates", id])?, None::<&()>)
+        client::Client::new(&self.transport)
+            .delete_template(client::DeleteTemplateParams { template_id: id })?
+            .empty()
             .await
     }
 }
-fn query(
-    url: &mut Url,
-    states: &[String],
-    metadata: &BTreeMap<String, String>,
-    page: Option<u32>,
-    size: Option<u32>,
-) -> Result<()> {
-    if page == Some(0) || size == Some(0) {
-        return Err(invalid("page and page size must be positive"));
+fn encode_metadata(metadata: &BTreeMap<String, String>) -> Option<String> {
+    if metadata.is_empty() {
+        return None;
     }
-    let mut query = url.query_pairs_mut();
-    for state in states {
-        query.append_pair("state", state);
+    let mut encoded = url::form_urlencoded::Serializer::new(String::new());
+    for (key, value) in metadata {
+        encoded.append_pair(key, value);
     }
-    if !metadata.is_empty() {
-        let mut encoded = url::form_urlencoded::Serializer::new(String::new());
-        for (key, value) in metadata {
-            encoded.append_pair(key, value);
-        }
-        query.append_pair("metadata", &encoded.finish());
-    }
-    if let Some(page) = page {
-        query.append_pair("page", &page.to_string());
-    }
-    if let Some(size) = size {
-        query.append_pair("pageSize", &size.to_string());
-    }
-    Ok(())
+    Some(encoded.finish())
 }
 
 #[cfg(test)]
@@ -673,18 +693,7 @@ mod tests {
     #[test]
     fn metadata_filter_roundtrips_delimiters() {
         let values = [("a&=%".into(), "hello world&=%".into())].into();
-        let mut url = Url::parse("http://localhost/v1/sandboxes").unwrap();
-        query(
-            &mut url,
-            &["Running".into(), "Paused".into()],
-            &values,
-            Some(2),
-            Some(10),
-        )
-        .unwrap();
-        let pairs: Vec<_> = url.query_pairs().collect();
-        assert_eq!(pairs.iter().filter(|(key, _)| key == "state").count(), 2);
-        let encoded = &pairs.iter().find(|(key, _)| key == "metadata").unwrap().1;
+        let encoded = encode_metadata(&values).unwrap();
         let decoded: BTreeMap<_, _> = url::form_urlencoded::parse(encoded.as_bytes())
             .map(|(k, v)| (k.into_owned(), v.into_owned()))
             .collect();

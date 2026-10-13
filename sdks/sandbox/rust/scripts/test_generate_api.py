@@ -1,3 +1,6 @@
+# Copyright 2026 The OpenSandbox Authors
+# SPDX-License-Identifier: Apache-2.0
+
 """Run with python3 -m unittest discover -s scripts -p 'test_*.py'."""
 import subprocess
 import sys
@@ -24,6 +27,7 @@ class GeneratorTests(unittest.TestCase):
                     if method in {"get", "put", "post", "delete", "patch", "head", "options", "trace"}:
                         operation_id = op.get("operationId", gen.snake(method + "_" + path))
                         self.assertIn('id: "' + operation_id + '"', result)
+                        self.assertIn("fn " + gen.snake(operation_id) + "(", first[module + "_client.rs"])
             self.assertIn("pub const OPERATIONS", result)
             self.assertIn("pub const SCHEMAS", result)
 

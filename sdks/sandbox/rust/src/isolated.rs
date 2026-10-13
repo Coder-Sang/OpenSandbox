@@ -5,6 +5,7 @@
 //! never on Drop. `run_once` awaits cleanup and reports it separately.
 use crate::{
     api::execd::{self, CreateIsolatedSessionRequest, IsolatedRunRequest},
+    api::execd_client as api,
     commands::{self, id_url, nonblank},
     files::Files,
     models::execd::Execution,
@@ -114,26 +115,18 @@ impl IsolatedSessions {
         Self { transport }
     }
     pub async fn capabilities(&self) -> Result<IsolatedCapabilities> {
-        let mut value: IsolatedCapabilities = self
-            .transport
-            .json(
-                Method::GET,
-                self.transport.url("/v1/isolated/capabilities")?,
-                None::<&()>,
-            )
+        let mut value = api::Client::new(&self.transport)
+            .isolated_capabilities()?
+            .json()
             .await?;
         value.setpriv_available.get_or_insert(false);
         value.userns_available.get_or_insert(false);
         Ok(value)
     }
     pub async fn list(&self) -> Result<Vec<IsolatedSessionSummary>> {
-        let response: execd::ListIsolatedSessionsResponse = self
-            .transport
-            .json(
-                Method::GET,
-                self.transport.url("/v1/isolated/sessions")?,
-                None::<&()>,
-            )
+        let response = api::Client::new(&self.transport)
+            .list_isolated_sessions()?
+            .json()
             .await?;
         Ok(response.sessions)
     }
@@ -153,13 +146,13 @@ impl IsolatedSessions {
         options: CreateIsolatedSessionAdvancedOptions,
     ) -> Result<IsolatedSession> {
         let body = create_body(options)?;
-        let info: execd::IsolatedCreateSessionResponse = self
-            .transport
-            .sensitive_json(
-                Method::POST,
-                self.transport.url("/v1/isolated/session")?,
-                Some(&body),
+        let info = api::Client::new(&self.transport)
+            .create_isolated_session(&body)?
+            .sensitive(
+                "Sensitive API request failed",
+                "Invalid sensitive API response",
             )
+            .json()
             .await?;
         let id = info
             .session_id
@@ -182,14 +175,7 @@ impl IsolatedSessions {
         })
     }
     pub async fn attach(&self, session_id: &str) -> Result<IsolatedSession> {
-        let state: IsolatedSessionState = self
-            .transport
-            .json(
-                Method::GET,
-                id_url(&self.transport, "/v1/isolated/session", session_id, None)?,
-                None::<&()>,
-            )
-            .await?;
+        let state = self.get(session_id).await?;
         // Preserve optional creation echoes without inventing defaults on older execd builds.
         let mut fields = serde_json::to_value(&state)?;
         let fields = fields
@@ -203,21 +189,17 @@ impl IsolatedSessions {
         self.handle(session_id.to_owned(), info)
     }
     pub async fn get(&self, session_id: &str) -> Result<IsolatedSessionState> {
-        self.transport
-            .json(
-                Method::GET,
-                id_url(&self.transport, "/v1/isolated/session", session_id, None)?,
-                None::<&()>,
-            )
+        nonblank(session_id, "session_id")?;
+        api::Client::new(&self.transport)
+            .get_isolated_session(api::GetIsolatedSessionParams { session_id })?
+            .json()
             .await
     }
     pub async fn delete(&self, session_id: &str) -> Result<()> {
-        self.transport
-            .empty(
-                Method::DELETE,
-                id_url(&self.transport, "/v1/isolated/session", session_id, None)?,
-                None::<&()>,
-            )
+        nonblank(session_id, "session_id")?;
+        api::Client::new(&self.transport)
+            .delete_isolated_session(api::DeleteIsolatedSessionParams { session_id })?
+            .empty()
             .await
     }
     pub async fn run_once(
@@ -297,13 +279,19 @@ impl IsolatedSession {
         )
     }
     pub async fn get(&self) -> Result<IsolatedSessionState> {
-        self.transport
-            .json(Method::GET, self.url(None)?, None::<&()>)
+        api::Client::new(&self.transport)
+            .get_isolated_session(api::GetIsolatedSessionParams {
+                session_id: &self.session_id,
+            })?
+            .json()
             .await
     }
     pub async fn delete(&self) -> Result<()> {
-        self.transport
-            .empty(Method::DELETE, self.url(None)?, None::<&()>)
+        api::Client::new(&self.transport)
+            .delete_isolated_session(api::DeleteIsolatedSessionParams {
+                session_id: &self.session_id,
+            })?
+            .empty()
             .await
     }
     pub async fn run(&self, code: &str, options: IsolatedRunOptions) -> Result<Execution> {
@@ -335,16 +323,20 @@ impl IsolatedSession {
         options: IsolatedRunOptions,
     ) -> Result<IsolatedBackgroundRun> {
         let body = run_body(code, options, true)?;
-        let response = Transport::checked_sensitive(
-            self.transport
-                .request(Method::POST, self.url(Some("run"))?)
-                .header(reqwest::header::ACCEPT, "application/json")
-                .json(&body)
-                .send()
-                .await
-                .map_err(|error| Error::Transport(error.without_url()))?,
-        )
-        .await?;
+        let response = api::Client::new(&self.transport)
+            .run_in_isolated_session(
+                api::RunInIsolatedSessionParams {
+                    session_id: &self.session_id,
+                },
+                &body,
+            )?
+            .header("accept", "application/json")
+            .sensitive(
+                "Sensitive API request failed",
+                "Invalid isolated background response",
+            )
+            .raw()
+            .await?;
         if response.status() != reqwest::StatusCode::ACCEPTED {
             return Err(Error::Protocol(
                 "Background run must return HTTP 202".into(),
@@ -355,25 +347,14 @@ impl IsolatedSession {
             .await
             .map_err(|_| Error::Protocol("Invalid isolated background response".into()))
     }
-    fn run_url(&self, run_id: &str, logs: bool) -> Result<Url> {
-        nonblank(run_id, "run_id")?;
-        if matches!(run_id, "." | "..") {
-            return Err(Error::InvalidConfig("Invalid run ID".into()));
-        }
-        let mut url = self.url(Some("runs"))?;
-        let mut segments = url
-            .path_segments_mut()
-            .map_err(|_| Error::InvalidConfig("Invalid endpoint".into()))?;
-        segments.push(run_id);
-        if logs {
-            segments.push("logs");
-        }
-        drop(segments);
-        Ok(url)
-    }
     pub async fn status(&self, run_id: &str) -> Result<IsolatedRunStatus> {
-        self.transport
-            .json(Method::GET, self.run_url(run_id, false)?, None::<&()>)
+        nonblank(run_id, "run_id")?;
+        api::Client::new(&self.transport)
+            .get_isolated_run_status(api::GetIsolatedRunStatusParams {
+                session_id: &self.session_id,
+                run_id,
+            })?
+            .json()
             .await
     }
     pub async fn logs(&self, run_id: &str, cursor: Option<u64>) -> Result<IsolatedRunLogs> {
@@ -383,19 +364,16 @@ impl IsolatedSession {
                 "Log cursor exceeds signed protocol range".into(),
             ));
         }
-        let mut url = self.run_url(run_id, true)?;
-        if cursor > 0 {
-            url.query_pairs_mut()
-                .append_pair("cursor", &cursor.to_string());
-        }
-        let response = Transport::checked(
-            self.transport
-                .request(Method::GET, url)
-                .header(reqwest::header::ACCEPT, "text/plain")
-                .send()
-                .await?,
-        )
-        .await?;
+        nonblank(run_id, "run_id")?;
+        let response = api::Client::new(&self.transport)
+            .get_isolated_run_logs(api::GetIsolatedRunLogsParams {
+                session_id: &self.session_id,
+                run_id,
+                cursor: (cursor > 0).then_some(cursor),
+            })?
+            .header("accept", "text/plain")
+            .raw()
+            .await?;
         let next = response
             .headers()
             .get("EXECD-ISOLATED-TAIL-CURSOR")

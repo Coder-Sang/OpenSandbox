@@ -3,9 +3,8 @@
 
 pub use crate::stream::ExecutionStream;
 use crate::{
-    api::execd::{
-        CreateSessionRequest, CreateSessionResponse, RunCommandRequest, RunInSessionRequest,
-    },
+    api::execd::{CreateSessionRequest, RunCommandRequest, RunInSessionRequest},
+    api::execd_client as api,
     models::execd::{CommandLogs, CommandStatus, Execution, RunCommandOptions},
     stream::{self},
     transport::Transport,
@@ -34,6 +33,31 @@ impl Commands {
         let body = command_body(command, options)?;
         self.start(self.transport.url("/command")?, &body).await
     }
+    /// Execute native arguments literally and aggregate the execution stream.
+    ///
+    /// Requires a nonempty argv and executable name, with no NUL in any
+    /// argument. Other arguments may be empty. Options and remote cleanup
+    /// semantics match [`Self::run`]; no shell quoting or expansion is applied.
+    pub async fn run_argv(
+        &self,
+        argv: &[impl AsRef<str>],
+        options: RunCommandOptions,
+    ) -> Result<Execution> {
+        let background = options.background;
+        consume(self.run_argv_stream(argv, options).await?, background).await
+    }
+    /// Execute native arguments literally and return their execution stream.
+    ///
+    /// Validation and options match [`Self::run_argv`]. Dropping the stream
+    /// closes its response body; call [`Self::interrupt`] to stop the remote run.
+    pub async fn run_argv_stream(
+        &self,
+        argv: &[impl AsRef<str>],
+        options: RunCommandOptions,
+    ) -> Result<ExecutionStream> {
+        let body = argv_body(argv, options)?;
+        self.start(self.transport.url("/command")?, &body).await
+    }
     async fn start(&self, url: Url, body: &impl serde::Serialize) -> Result<ExecutionStream> {
         let response = self
             .transport
@@ -49,9 +73,9 @@ impl Commands {
             cwd: cwd.map(str::to_owned),
             ..Default::default()
         };
-        let response: CreateSessionResponse = self
-            .transport
-            .json(Method::POST, self.transport.url("/session")?, Some(&body))
+        let response = api::Client::new(&self.transport)
+            .create_session(Some(&body))?
+            .json()
             .await?;
         if response.session_id.trim().is_empty() {
             return Err(Error::Protocol("Session response has an empty ID".into()));
@@ -59,8 +83,11 @@ impl Commands {
         Ok(response.session_id)
     }
     pub async fn delete_session(&self, session_id: &str) -> Result<()> {
-        let url = id_url(&self.transport, "/session", session_id, None)?;
-        self.transport.empty(Method::DELETE, url, None::<&()>).await
+        nonblank(session_id, "session_id")?;
+        api::Client::new(&self.transport)
+            .delete_session(api::DeleteSessionParams { session_id })?
+            .empty()
+            .await
     }
     pub async fn run_in_session(
         &self,
@@ -104,22 +131,21 @@ impl Commands {
         .await
     }
     pub async fn status(&self, command_id: &str) -> Result<CommandStatus> {
-        self.transport
-            .json(
-                Method::GET,
-                id_url(&self.transport, "/command/status", command_id, None)?,
-                None::<&()>,
-            )
+        nonblank(command_id, "command_id")?;
+        api::Client::new(&self.transport)
+            .get_command_status(api::GetCommandStatusParams { id: command_id })?
+            .json_as()
             .await
     }
     pub async fn logs(&self, command_id: &str, cursor: Option<u64>) -> Result<CommandLogs> {
-        let mut url = id_url(&self.transport, "/command", command_id, Some("logs"))?;
-        if let Some(cursor) = cursor {
-            url.query_pairs_mut()
-                .append_pair("cursor", &cursor.to_string());
-        }
-        let response =
-            Transport::checked(self.transport.request(Method::GET, url).send().await?).await?;
+        nonblank(command_id, "command_id")?;
+        let response = api::Client::new(&self.transport)
+            .get_background_command_logs(api::GetBackgroundCommandLogsParams {
+                id: command_id,
+                cursor,
+            })?
+            .raw()
+            .await?;
         let cursor = response
             .headers()
             .get("EXECD-COMMANDS-TAIL-CURSOR")
@@ -137,9 +163,10 @@ impl Commands {
     }
     pub async fn interrupt(&self, command_id: &str) -> Result<()> {
         nonblank(command_id, "command_id")?;
-        let mut url = self.transport.url("/command")?;
-        url.query_pairs_mut().append_pair("id", command_id);
-        self.transport.empty(Method::DELETE, url, None::<&()>).await
+        api::Client::new(&self.transport)
+            .interrupt_command(api::InterruptCommandParams { id: command_id })?
+            .empty()
+            .await
     }
 }
 pub(crate) fn nonblank(value: &str, field: &str) -> Result<()> {
@@ -187,6 +214,33 @@ fn timeout_ms(timeout: Option<std::time::Duration>) -> Result<Option<i64>> {
 }
 fn command_body(command: &str, options: RunCommandOptions) -> Result<RunCommandRequest> {
     nonblank(command, "command")?;
+    Ok(RunCommandRequest {
+        command: Some(command.to_owned()),
+        ..command_options(options)?
+    })
+}
+fn argv_body(argv: &[impl AsRef<str>], options: RunCommandOptions) -> Result<RunCommandRequest> {
+    if argv
+        .first()
+        .is_none_or(|executable| executable.as_ref().is_empty())
+    {
+        return Err(Error::InvalidConfig(
+            "argv must contain a nonempty executable name".into(),
+        ));
+    }
+    if argv.iter().any(|argument| argument.as_ref().contains('\0')) {
+        return Err(Error::InvalidConfig("argv must contain no NUL".into()));
+    }
+    Ok(RunCommandRequest {
+        argv: Some(
+            argv.iter()
+                .map(|argument| argument.as_ref().to_owned())
+                .collect(),
+        ),
+        ..command_options(options)?
+    })
+}
+fn command_options(options: RunCommandOptions) -> Result<RunCommandRequest> {
     if options.gid.is_some() && options.uid.is_none() {
         return Err(Error::InvalidConfig(
             "uid is required when gid is provided".into(),
@@ -198,8 +252,6 @@ fn command_body(command: &str, options: RunCommandOptions) -> Result<RunCommandR
         ));
     }
     Ok(RunCommandRequest {
-        command: Some(command.to_owned()),
-        argv: None,
         cwd: options.cwd,
         background: Some(options.background),
         timeout: timeout_ms(options.timeout)?,
@@ -231,141 +283,4 @@ pub(crate) async fn consume(mut stream: ExecutionStream, background: bool) -> Re
     Ok(execution)
 }
 #[cfg(test)]
-pub(crate) mod tests {
-    pub(crate) async fn serve_once(
-        response: Vec<u8>,
-    ) -> (
-        crate::transport::Transport,
-        tokio::task::JoinHandle<Vec<u8>>,
-    ) {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let task = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let mut request = Vec::new();
-            let header_end = loop {
-                let mut buffer = [0; 4096];
-                let read = socket.read(&mut buffer).await.unwrap();
-                assert!(read > 0);
-                request.extend_from_slice(&buffer[..read]);
-                if let Some(pos) = request.windows(4).position(|w| w == b"\r\n\r\n") {
-                    break pos + 4;
-                }
-            };
-            let headers = String::from_utf8_lossy(&request[..header_end]);
-            let content_length = headers
-                .lines()
-                .find_map(|line| {
-                    let (name, value) = line.split_once(':')?;
-                    name.eq_ignore_ascii_case("content-length")
-                        .then(|| value.trim().parse::<usize>().unwrap())
-                })
-                .unwrap_or(0);
-            while request.len() < header_end + content_length {
-                let mut buffer = [0; 4096];
-                let read = socket.read(&mut buffer).await.unwrap();
-                assert!(read > 0);
-                request.extend_from_slice(&buffer[..read]);
-            }
-            socket.write_all(&response).await.unwrap();
-            request
-        });
-        let config = crate::ConnectionConfig::builder()
-            .domain(format!("http://{address}/prefix"))
-            .header("x-endpoint-token", "test-token")
-            .build()
-            .unwrap();
-        (crate::transport::Transport::new(&config).unwrap(), task)
-    }
-
-    #[tokio::test]
-    async fn stream_http_preserves_path_headers_and_timeout_units() {
-        let body = "data: {\"type\":\"init\",\"text\":\"cmd\"}\n\ndata: {\"type\":\"execution_complete\"}\n\n";
-        let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
-        let (transport, task) = serve_once(response.into_bytes()).await;
-        let execution = Commands::new(transport)
-            .run(
-                "echo hi",
-                RunCommandOptions {
-                    timeout: Some(std::time::Duration::from_millis(250)),
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap();
-        assert_eq!(execution.id.as_deref(), Some("cmd"));
-        let request = String::from_utf8(task.await.unwrap()).unwrap();
-        assert!(request.starts_with("POST /prefix/v1/command HTTP/1.1"));
-        assert!(request.contains("x-endpoint-token: test-token"));
-        assert!(request.contains("\"timeout\":250"));
-    }
-
-    use super::*;
-    #[tokio::test]
-    async fn error_only_http_preserves_execution_failure() {
-        for value in ["7", "execution timed out", "executable not found"] {
-            let body = format!("data: {{\"type\":\"init\",\"text\":\"cmd\"}}\n\ndata: {{\"type\":\"stdout\",\"text\":\"before failure\"}}\n\ndata: {}\n\n", serde_json::json!({"type":"error","error":{"ename":"CommandError","evalue":value}}));
-            let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
-            let (transport, task) = serve_once(response.into_bytes()).await;
-            let execution = Commands::new(transport)
-                .run("false", Default::default())
-                .await
-                .unwrap();
-            assert_eq!(execution.id.as_deref(), Some("cmd"));
-            assert_eq!(execution.logs.stdout[0].text, "before failure");
-            assert_eq!(execution.error.unwrap().evalue, value);
-            assert_eq!(execution.exit_code, value.parse::<i32>().ok());
-            assert!(!execution.complete);
-            task.await.unwrap();
-        }
-    }
-
-    #[test]
-    fn command_mapping_and_validation() {
-        let options = RunCommandOptions {
-            timeout: Some(std::time::Duration::from_millis(1500)),
-            ..Default::default()
-        };
-        assert_eq!(
-            command_body("echo hi", options).unwrap().timeout,
-            Some(1500)
-        );
-        assert!(command_body("", Default::default()).is_err());
-        assert!(command_body(
-            "true",
-            RunCommandOptions {
-                gid: Some(1),
-                ..Default::default()
-            }
-        )
-        .is_err());
-        assert!(timeout_ms(Some(std::time::Duration::from_nanos(1))).is_err());
-        assert_eq!(
-            timeout_ms(Some(std::time::Duration::ZERO)).unwrap(),
-            Some(0)
-        );
-        assert!(timeout_ms(Some(std::time::Duration::MAX)).is_err());
-    }
-    #[tokio::test]
-    async fn aggregation_and_premature_eof() {
-        let source = [
-            r#"{"type":"init","text":"cmd"}"#,
-            r#"{"type":"stdout","text":"hello"}"#,
-            r#"{"type":"error","error":{"ename":"exit","evalue":"7"}}"#,
-            r#"{"type":"execution_complete"}"#,
-        ];
-        let events = source
-            .into_iter()
-            .map(|s| Ok(serde_json::from_str(s).unwrap()));
-        let result = consume(Box::pin(futures_util::stream::iter(events)), false)
-            .await
-            .unwrap();
-        assert_eq!(result.id.as_deref(), Some("cmd"));
-        assert_eq!(result.logs.stdout[0].text, "hello");
-        assert_eq!(result.exit_code, Some(7));
-        assert!(consume(Box::pin(futures_util::stream::empty()), false)
-            .await
-            .is_err());
-    }
-}
+pub(crate) mod tests;

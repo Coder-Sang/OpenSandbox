@@ -27,6 +27,13 @@ impl Drop for Server {
 }
 impl Server {
     async fn start(replies: Vec<(u16, Value, String)>, template: bool) -> Self {
+        Self::start_stalling_response(replies, template, false).await
+    }
+    async fn start_stalling_response(
+        replies: Vec<(u16, Value, String)>,
+        template: bool,
+        stall: bool,
+    ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let endpoint = json!({"endpoint":format!("{url}/route"),"headers":{"OPENSANDBOX-EGRESS-AUTH":"endpoint-secret"}});
@@ -50,8 +57,9 @@ impl Server {
         }
         all.extend(replies);
         let (tx, requests) = mpsc::channel(32);
+        let last = all.len() - 1;
         let task = tokio::spawn(async move {
-            for (status, body, headers) in all {
+            for (index, (status, body, headers)) in all.into_iter().enumerate() {
                 let (mut socket, _) = listener.accept().await.unwrap();
                 let mut bytes = Vec::new();
                 let end = loop {
@@ -95,7 +103,14 @@ impl Server {
                 } else {
                     body.to_string()
                 };
-                socket.write_all(format!("HTTP/1.1 {status} Response\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n{headers}\r\n{body}",body.len()).as_bytes()).await.unwrap();
+                socket.write_all(format!("HTTP/1.1 {status} Response\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n{headers}\r\n",body.len()).as_bytes()).await.unwrap();
+                if stall && index == last {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    // The client has timed out; continue listening for unwanted retries.
+                    let _ = socket.write_all(body.as_bytes()).await;
+                } else {
+                    socket.write_all(body.as_bytes()).await.unwrap();
+                }
             }
             // Keep listening so unexpected requests are detected rather than refused.
             let (mut socket, _) = listener.accept().await.unwrap();
@@ -123,10 +138,21 @@ impl Server {
             .unwrap()
     }
     async fn egress(&mut self, template: bool) -> Egress {
+        self.egress_with_settings(template, Duration::from_secs(30), false)
+            .await
+    }
+    async fn egress_with_settings(
+        &mut self,
+        template: bool,
+        timeout: Duration,
+        proxy: bool,
+    ) -> Egress {
         let manager = SandboxManager::new(
             ConnectionConfig::builder()
                 .domain(&self.url)
                 .api_key("control-secret")
+                .request_timeout(timeout)
+                .use_server_proxy(proxy)
                 .build()
                 .unwrap(),
         )
@@ -315,4 +341,25 @@ async fn redirects_and_decode_errors_do_not_leak() {
         ));
     }
     server.no_request().await;
+}
+
+#[tokio::test]
+async fn vault_body_timeout_is_transport_failure_and_never_retries_mutation() {
+    for proxy in [false, true] {
+        let mut server = Server::start_stalling_response(vec![ok(state())], false, true).await;
+        let egress = server
+            .egress_with_settings(false, Duration::from_millis(50), proxy)
+            .await;
+        let create: CredentialVaultCreateRequest =
+            serde_json::from_value(json!({"credentials":[],"bindings":[]})).unwrap();
+        let error = egress.create(&create).await.unwrap_err();
+        assert!(matches!(&error, Error::Transport(error) if error.is_timeout()));
+        assert!(!format!("{error:?} {error}").contains("control-secret"));
+        assert!(!format!("{error:?} {error}").contains("endpoint-secret"));
+        let request = server.next().await;
+        assert_eq!(request.method, "POST");
+        assert_eq!(request.target, "/route/credential-vault");
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        server.no_request().await;
+    }
 }

@@ -1,8 +1,14 @@
 // Copyright 2026 The OpenSandbox Authors
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::{
+    api::{
+        lifecycle::{MetricsEvent, MetricsEventEventType},
+        lifecycle_client,
+    },
+    transport::Transport,
+};
 use crate::{config::metrics_disabled_by_env, ConnectionConfig};
-use serde::Serialize;
 use std::{
     sync::{Arc, OnceLock},
     time::{Duration, Instant},
@@ -15,18 +21,6 @@ static METRICS_SLOTS: OnceLock<Arc<Semaphore>> = OnceLock::new();
 static METRICS_CLIENT: OnceLock<Option<reqwest::Client>> = OnceLock::new();
 #[cfg(all(test, feature = "tracing"))]
 pub(crate) static TRACER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct CreateEvent {
-    event_type: &'static str,
-    create_duration_ms: u64,
-    success: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    sandbox_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    image: Option<String>,
-}
 
 /// Reports on drop as well, so cancellation does not replace or hide the outcome.
 pub(crate) struct CreationMetric {
@@ -75,18 +69,16 @@ impl Drop for CreationMetric {
         else {
             return;
         };
-        let Ok(url) = self.config.base_url.join("metrics/events") else {
-            return;
-        };
-        let mut headers = self.config.headers.clone();
-        headers.remove("traceparent");
-        headers.remove("tracestate");
-        let payload = CreateEvent {
-            event_type: "sandbox.create",
-            create_duration_ms: self.started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+        let mut config = self.config.clone();
+        config.headers.remove("traceparent");
+        config.headers.remove("tracestate");
+        let payload = MetricsEvent {
+            event_type: MetricsEventEventType::SandboxCreate,
+            create_duration_ms: self.started.elapsed().as_millis().min(i64::MAX as u128) as i64,
             success: self.success,
             sandbox_id: self.sandbox_id.take(),
             image: self.image.take(),
+            ..Default::default()
         };
         let timeout = METRICS_TIMEOUT.min(self.config.request_timeout);
         runtime.spawn(async move {
@@ -105,13 +97,15 @@ impl Drop for CreationMetric {
                 return;
             };
             let _ = tokio::time::timeout(timeout, async {
-                let Ok(mut response) = client
-                    .post(url)
-                    .headers(headers)
-                    .json(&payload)
-                    .send()
-                    .await
+                let Ok(transport) = Transport::with_client(&config, client) else {
+                    return;
+                };
+                let Ok(call) =
+                    lifecycle_client::Client::new(&transport).report_metrics_event(&payload)
                 else {
+                    return;
+                };
+                let Ok(mut response) = call.raw().await else {
                     return;
                 };
                 // Stream and discard, never allocate an unbounded response body.

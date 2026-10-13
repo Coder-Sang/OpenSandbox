@@ -130,14 +130,15 @@ The sandbox SDK is an independent crate, not part of the pnpm workspace:
 
 ```bash
 cd sdks/sandbox/rust
-cargo fmt --all -- --check
+cargo +1.85.1 fmt --all -- --check
 cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked --all-features
 cargo doc --locked --no-deps --all-features
 cargo package --locked
 ```
 
-See [sdks/AGENTS.md](sdks/AGENTS.md) for API generation instructions.
+These are basic local checks. See [sdks/AGENTS.md](sdks/AGENTS.md) for the complete
+MSRV/stable feature matrix, API generation and interpreter packaging requirements.
 
 ## Project Structure
 

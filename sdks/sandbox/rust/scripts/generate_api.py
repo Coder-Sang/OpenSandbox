@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
-"""Generate isolated Rust wire models and operation metadata from repository specs.
+# Copyright 2026 The OpenSandbox Authors
+# SPDX-License-Identifier: Apache-2.0
 
-Requires Python >=3.9 and PyYAML (see requirements.txt). No client or Cargo tree
-is generated. Dates stay wire strings, binary bodies are bytes, and constraints
+"""Generate isolated Rust wire models, operation clients and metadata from repository specs.
+
+Requires Python >=3.9 and PyYAML (see requirements.txt). No Cargo tree is
+generated. Dates stay wire strings, binary bodies are bytes, and constraints
 are retained in schema/operation metadata rather than silently discarded.
 """
 import argparse
@@ -13,6 +16,7 @@ import subprocess
 from pathlib import Path
 
 import yaml
+from generate_client import generate_client
 
 class SpecLoader(yaml.SafeLoader):
     """Keep timestamps as wire strings and avoid YAML 1.1 yes/no booleans."""
@@ -271,12 +275,17 @@ class Generator:
         return HEADER + definitions + "\n\npub const SCHEMAS: &[(&str, &str)] = &[\n" + schemas + "\n];\n\npub const OPERATIONS: &[super::Operation] = &[\n" + ",\n".join(ops) + "\n];\n\n/// Resolve a generated operation for the SDK's shared transport.\npub fn operation(id: &str) -> Option<&'static super::Operation> {\n    OPERATIONS.iter().find(|operation| operation.id == id)\n}\n"
 
 
-MOD = HEADER + '''//! Isolated wire models and API operation metadata generated from OpenAPI 3.1.
-//! This layer has no HTTP client. Binary/multipart metadata is not JSON transport.
+MOD = HEADER + '''//! Wire models, operation clients and metadata generated from OpenAPI 3.1.
+//! SDK facades retain public ergonomics, streaming parsers and transport policy.
 pub mod lifecycle;
 pub mod execd;
 pub mod egress;
 pub mod diagnostic;
+pub(crate) mod client;
+pub(crate) mod lifecycle_client;
+pub(crate) mod execd_client;
+pub(crate) mod egress_client;
+pub(crate) mod diagnostic_client;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Parameter {
@@ -321,12 +330,22 @@ where D: serde::Deserializer<'de>, T: serde::Deserialize<'de> {
 
 
 def outputs(spec_dir):
-    result = {"mod.rs": MOD + "\n" + Path(__file__).with_name("wire_tests.rs").read_text()}
+    result = {"mod.rs": MOD + "\n" + Path(__file__).with_name("wire_tests.rs").read_text(),
+              "client.rs": HEADER + Path(__file__).with_name("client_runtime.rs").read_text()}
     for module, filename in SPECS.items():
         spec = yaml.load((spec_dir / filename).read_text(), Loader=SpecLoader)
         if spec.get("openapi") != "3.1.0":
             raise ValueError("Expected OpenAPI 3.1.0: " + filename)
-        result[module + ".rs"] = Generator(spec).generate()
+        generator = Generator(spec)
+        models = generator.generate()
+        definitions = set(generator.definitions)
+        client = generate_client(generator, snake, pascal, literal).replace("MODELS_MODULE", module)
+        # Operation models are already registered by generate(); client emission
+        # must not introduce definitions absent from the wire model output.
+        if set(generator.definitions) != definitions:
+            raise ValueError("Client introduced models absent from generated wire output: " + filename)
+        result[module + ".rs"] = models
+        result[module + "_client.rs"] = HEADER + client
     return result
 
 

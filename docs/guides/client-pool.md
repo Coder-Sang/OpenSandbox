@@ -460,32 +460,16 @@ or mutual-TLS client certificate configuration. CA-file URL query parameters are
 not a supported way to configure trust. Do not disable verification with
 `#insecure`.
 
-The opt-in TLS integration test requires a **dedicated**, TLS-only Redis instance
-with password authentication. Use ephemeral certificates with a `DNS:localhost`
-SAN and no IP SAN, disable Redis persistence, and bind the container's published
-port only to loopback. Never point the test at a user's Redis service or change
-system trust stores. Supply a second, unrelated CA to verify trust rejection:
+The dedicated [Redis/TLS test runner](/sdks/rust#live-identity-argv-and-redis-tests)
+provisions loopback-only fixtures with ephemeral certificates and authentication.
+It runs plaintext and TLS pool tests plus child-process checks for a trusted CA,
+an untrusted CA, a hostname mismatch and a wrong password. It does not change
+the system trust store or use a shared Redis service.
 
-```bash
-# From sdks/sandbox/rust. PORT belongs to the dedicated fixture.
-export OPENSANDBOX_REDIS_TLS_TEST=1
-export OPENSANDBOX_REDIS_TLS_URL="rediss://:${TEST_PASSWORD}@localhost:${PORT}/0"
-export OPENSANDBOX_REDIS_TLS_WRONG_HOST_URL="rediss://:${TEST_PASSWORD}@127.0.0.1:${PORT}/0"
-export OPENSANDBOX_REDIS_TLS_CA=/path/to/ephemeral-ca.pem
-export OPENSANDBOX_REDIS_TLS_UNTRUSTED_CA=/path/to/unrelated-ca.pem
-cargo test --locked --features redis --test redis_tls -- --nocapture
-```
-
-Each case runs in a child process with its own `SSL_CERT_FILE`, without changing
-the parent environment. Trusted TLS exercises authenticated public store
-configuration, leases, idle insertion/snapshot/acquisition, and namespace cleanup.
-Negative cases check both the reference driver's rejection cause and the public
-store's error for an untrusted CA, a hostname absent from the SAN, and a wrong
-password. TLS connection failures surface as
+TLS connection failures surface as
 `PoolError::Store("Redis connection failed")`, without exposing credentials or
-certificate details. Delete only the
-uniquely labeled fixture after testing. Its generation key intentionally persists
-until the fixture is removed.
+certificate details. The tests check the reference driver's specific rejection
+cause separately from that public error.
 
 ### Go
 
