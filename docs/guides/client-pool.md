@@ -559,3 +559,30 @@ it any more.
 - JavaScript: [SDK entry point](/sdks/javascript) — `SandboxPool` and the `/pool-redis` export.
 - Kotlin: [`/sdks/kotlin`](/sdks/kotlin) &mdash; `SandboxPool` builder, `sandbox-pool-redis` module.
 - Go: [`/sdks/go`](/sdks/go) &mdash; `SandboxPool` interface, `RedisPoolStateStore`, distributed deployment notes.
+
+
+## Pod locator snapshots (fork)
+
+Kubernetes Create/Get responses may include an optional top-level
+`backendIdentifiers` object with `namespace`, `workloadName`, `workloadUid`,
+and `podName`. `podName` is included only when the current workload snapshot
+proves a unique active Pool allocation. Missing, malformed, releasing, deleted,
+or multi-Pod allocations do not expose a guessed name. `workloadUid` is **not**
+a Pod UID. No additional Pod read is performed to build this snapshot.
+
+`GET /v1/sandboxes/{id}/diagnostics/context` returns the same identifiers with
+`sandboxId`, `state`, and `backendType: "kubernetes"`. This structured endpoint
+is separate from deprecated plain-text inspect. Backends that do not implement
+structured context return `501`, after their normal Sandbox lookup.
+
+Identifiers are point-in-time discovery information, not an authorization token,
+readiness guarantee, or lease. A consumer must still verify the actual Pod UID
+when binding a resource. A Pod can disappear or be replaced after the response.
+Creation reuses the workload returned by the existing readiness wait; it does
+not add a new wait or issue a Pod query solely to populate these fields.
+
+The addition does not change existing fields or Create `202` / Get `200` status
+codes. Old Python SDK generated models tolerate unknown top-level fields, but
+older high-level converters discard them. Update the SDK if an application
+needs to consume the locator. Do not embed a structured locator in the existing
+string-valued `metadata` or `extensions` maps.

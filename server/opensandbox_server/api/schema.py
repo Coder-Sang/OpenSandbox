@@ -717,6 +717,18 @@ class CreateSandboxRequest(BaseModel):
         return self._resolved_snapshot_backend
 
 
+class BackendIdentifiers(BaseModel):
+    """Point-in-time backend identifiers, never a Pod identity or lease proof."""
+
+    namespace: str
+    workload_name: Optional[str] = Field(default=None, alias="workloadName")
+    workload_uid: Optional[str] = Field(default=None, alias="workloadUid")
+    pod_name: Optional[str] = Field(default=None, alias="podName")
+
+    class Config:
+        populate_by_name = True
+
+
 class CreateSandboxResponse(BaseModel):
     """
     Response from creating a new sandbox.
@@ -750,6 +762,15 @@ class CreateSandboxResponse(BaseModel):
     created_at: datetime = Field(..., alias="createdAt", description="Sandbox creation timestamp")
     entrypoint: Optional[List[str]] = Field(
         None, description="Entry process specification from creation request"
+    )
+
+    backend_identifiers: Optional[BackendIdentifiers] = Field(
+        default=None,
+        alias="backendIdentifiers",
+        description=(
+            "Point-in-time backend locator. podName is present only for a confirmed "
+            "unique active Pool allocation; workloadUid is not a Pod UID."
+        ),
     )
 
     class Config:
@@ -822,6 +843,15 @@ class Sandbox(BaseModel):
         description="Timestamp when sandbox will auto-terminate. Null when manual cleanup is enabled.",
     )
     created_at: datetime = Field(..., alias="createdAt", description="Sandbox creation timestamp")
+
+    backend_identifiers: Optional[BackendIdentifiers] = Field(
+        default=None,
+        alias="backendIdentifiers",
+        description=(
+            "Point-in-time backend locator. podName is present only for a confirmed "
+            "unique active Pool allocation; workloadUid is not a Pod UID."
+        ),
+    )
 
     class Config:
         populate_by_name = True

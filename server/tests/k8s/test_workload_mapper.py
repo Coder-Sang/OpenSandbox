@@ -114,6 +114,7 @@ class TestBuildSandboxFromWorkload:
         sandbox = _build_sandbox_from_workload(workload, _WorkloadProvider())
 
         assert sandbox.allocation is None, name
+        assert sandbox.backend_identifiers is not None and sandbox.backend_identifiers.pod_name is None, name
 
     def test_renewal_generation_drift_remains_confirmed(self):
         workload = _allocated_workload()
@@ -184,6 +185,7 @@ class TestBuildSandboxFromWorkload:
 def _allocated_workload(pool_ref="pool-runc"):
     return {
         "metadata": {
+            "namespace": "tenant-a",
             "labels": {"opensandbox.io/id": "sandbox-1"},
             "annotations": {
                 "sandbox.opensandbox.io/alloc-status": json.dumps(
@@ -287,3 +289,31 @@ class TestExtractPlatformFromWorkload:
     def test_empty_workload_returns_none(self):
         workload = {}
         assert _extract_platform_from_workload(workload) is None
+
+
+def test_backend_identifiers_confirmed_unique_pool_snapshot():
+    workload = _allocated_workload()
+    workload["metadata"].update(namespace="tenant-a", name="workload-1", uid="workload-uid")
+    sandbox = _build_sandbox_from_workload(workload, _WorkloadProvider())
+    assert sandbox.backend_identifiers.model_dump(by_alias=True, exclude_none=True) == {
+        "namespace": "tenant-a", "workloadName": "workload-1",
+        "workloadUid": "workload-uid", "podName": "pod-1",
+    }
+
+
+def test_backend_identifiers_never_guess_ambiguous_pod():
+    workload = _allocated_workload()
+    workload["metadata"].update(namespace="tenant-a", name="not-a-pod")
+    _set_annotation(workload, {"pods": ["pod-1", "pod-2"], "poolRef": "pool-runc"})
+    workload["status"]["allocated"] = 2
+    sandbox = _build_sandbox_from_workload(workload, _WorkloadProvider())
+    assert sandbox.allocation is not None
+    assert sandbox.backend_identifiers.pod_name is None
+    assert sandbox.backend_identifiers.workload_name == "not-a-pod"
+
+
+def test_backend_identifiers_missing_namespace_omitted():
+    workload = _allocated_workload()
+    workload["metadata"].pop("namespace")
+    sandbox = _build_sandbox_from_workload(workload, _WorkloadProvider())
+    assert sandbox.backend_identifiers is None

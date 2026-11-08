@@ -528,3 +528,25 @@ def test_get_sandbox_events_maps_kubernetes_api_errors(
     assert typed_detail["code"] == expected_code
     assert "pod-1" in typed_detail["message"]
     assert api_exc.body in typed_detail["message"]
+
+
+def test_context_reuses_authorized_sandbox_lookup_without_pod_read():
+    from opensandbox_server.api.schema import BackendIdentifiers
+    service = _DiagnosticsService([])
+    service.get_sandbox = MagicMock(return_value=SimpleNamespace(
+        status=SimpleNamespace(state="Running"),
+        backend_identifiers=BackendIdentifiers(namespace="tenant-a", podName="pod-1"),
+    ))
+    result = service.get_sandbox_diagnostic_context("sbx-1")
+    assert result.backend_identifiers == {"namespace": "tenant-a", "podName": "pod-1"}
+    service.get_sandbox.assert_called_once_with("sbx-1")
+    service.k8s_client.list_pods.assert_not_called()
+
+
+def test_context_preserves_sandbox_lookup_error():
+    service = _DiagnosticsService([])
+    service.get_sandbox = MagicMock(side_effect=HTTPException(404, "not found"))
+    with pytest.raises(HTTPException) as exc:
+        service.get_sandbox_diagnostic_context("sbx-1")
+    assert exc.value.status_code == 404
+    service.k8s_client.list_pods.assert_not_called()

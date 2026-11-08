@@ -16,10 +16,12 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass
 from typing import Any, Optional
 
 from opensandbox_server.api.schema import (
     AllocationSummary,
+    BackendIdentifiers,
     ImageSpec,
     PlatformSpec,
     Sandbox,
@@ -94,6 +96,7 @@ def _build_sandbox_from_workload(workload: Any, workload_provider: Any) -> Sandb
         entrypoint=entrypoint,
         platform=platform_spec,
         allocation=allocation,
+        backendIdentifiers=_extract_backend_identifiers(workload),
     )
 
 
@@ -104,12 +107,27 @@ _ALLOCATION_RELEASE_ANNOTATION_KEYS = (
 )
 
 
+@dataclass(frozen=True)
+class _ConfirmedPoolAllocation:
+    pool_ref: str
+    pod_names: tuple[str, ...]
+
+
 def _extract_confirmed_pool_allocation(
     metadata: Any,
     spec: Any,
     status: Any,
 ) -> Optional[AllocationSummary]:
-    """Return a summary only when current pool allocation evidence is complete."""
+    allocation = _confirmed_pool_allocation(metadata, spec, status)
+    return AllocationSummary(poolRef=allocation.pool_ref) if allocation else None
+
+
+def _confirmed_pool_allocation(
+    metadata: Any,
+    spec: Any,
+    status: Any,
+) -> Optional[_ConfirmedPoolAllocation]:
+    """Parse allocation once, retaining all existing strict evidence checks."""
     pool_ref = _field(spec, "poolRef", "pool_ref")
     if not isinstance(pool_ref, str) or not pool_ref.strip() or pool_ref == "*":
         return None
@@ -154,7 +172,30 @@ def _extract_confirmed_pool_allocation(
     if _has_released_or_releasing_allocation_pods(annotations, pods):
         return None
 
-    return AllocationSummary(poolRef=pool_ref)
+    return _ConfirmedPoolAllocation(pool_ref, tuple(pods))
+
+
+def _extract_backend_identifiers(workload: Any) -> Optional[BackendIdentifiers]:
+    """Build discovery data from this workload snapshot, without guessing Pods."""
+    metadata = _field(workload, "metadata")
+    namespace = _field(metadata, "namespace")
+    if not isinstance(namespace, str) or not namespace:
+        return None
+    name = _field(metadata, "name")
+    uid = _field(metadata, "uid")
+    allocation = _confirmed_pool_allocation(
+        metadata, _field(workload, "spec"), _field(workload, "status")
+    )
+    return BackendIdentifiers(
+        namespace=namespace,
+        workloadName=name if isinstance(name, str) and name else None,
+        workloadUid=uid if isinstance(uid, str) and uid else None,
+        podName=(
+            allocation.pod_names[0]
+            if allocation is not None and len(allocation.pod_names) == 1
+            else None
+        ),
+    )
 
 
 def _has_released_or_releasing_allocation_pods(

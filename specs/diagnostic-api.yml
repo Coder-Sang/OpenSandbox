@@ -18,6 +18,10 @@ info:
     parse individual payload lines as a stable schema. Servers may impose
     implementation-defined retention and response size limits.
 
+    The context endpoint separately returns structured backend identifiers,
+    using the same locator snapshot as lifecycle Create/Get. It is not a
+    readiness guarantee or a substitute for Pod UID verification.
+
     ## Authentication
 
     API Key authentication is required for all operations:
@@ -42,6 +46,30 @@ tags:
   - name: Diagnostics
     description: Sandbox troubleshooting payload descriptors
 paths:
+  /sandboxes/{sandboxId}/diagnostics/context:
+    get:
+      tags: [Diagnostics]
+      summary: Get structured backend locator context
+      description: |
+        Return the same point-in-time locator snapshot as lifecycle Create/Get.
+        No extra Pod read is performed. Identifiers are not lease or identity proofs.
+        Unsupported backends return 501 after normal sandbox lookup.
+      operationId: getSandboxDiagnosticContext
+      parameters:
+        - $ref: '#/components/parameters/SandboxId'
+      responses:
+        '200':
+          description: Structured context snapshot
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DiagnosticContext'
+        '401':
+          description: Authentication required
+        '404':
+          description: Sandbox not found
+        '501':
+          description: Backend does not support context
   /sandboxes/{sandboxId}/diagnostics/logs:
     get:
       tags: [Diagnostics]
@@ -283,6 +311,22 @@ components:
         X-Request-ID:
           $ref: '#/components/headers/XRequestId'
   schemas:
+    DiagnosticContext:
+      type: object
+      required: [sandboxId, backendType, backendIdentifiers]
+      properties:
+        sandboxId:
+          type: string
+        state:
+          type: string
+        backendType:
+          type: string
+          examples: [kubernetes]
+        backendIdentifiers:
+          type: object
+          additionalProperties:
+            type: string
+          description: Optional namespace, workloadName, workloadUid and podName. workloadUid is not a Pod UID.
     DiagnosticContentResponse:
       type: object
       description: |

@@ -33,6 +33,28 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["DevOps"])
 
 
+@router.get(
+    "/sandboxes/{sandbox_id}/diagnostics/context",
+    response_model=None,
+    status_code=status.HTTP_200_OK,
+    responses={
+        200: {"description": "Structured runtime context"},
+        404: {"description": "Sandbox not found"},
+        501: {"description": "Backend does not support diagnostic context"},
+    },
+)
+def get_sandbox_diagnostic_context(sandbox_id: str) -> JSONResponse:
+    result = sandbox_service.get_sandbox_diagnostic_context(sandbox_id)
+    payload: dict[str, object] = {
+        "sandboxId": result.sandbox_id,
+        "backendType": result.backend_type,
+        "backendIdentifiers": result.backend_identifiers,
+    }
+    if result.state is not None:
+        payload["state"] = result.state
+    return JSONResponse(status_code=status.HTTP_200_OK, content=payload)
+
+
 def _diagnostic_inline_response(
     result: DiagnosticResult,
 ) -> JSONResponse:

@@ -93,6 +93,7 @@ from opensandbox_server.services.k8s.status_helpers import (
 from opensandbox_server.services.k8s.workload_mapper import (
     _build_sandbox_from_workload,
     _extract_platform_from_workload,
+    _extract_backend_identifiers,
 )
 from opensandbox_server.services.signing import (
     build_canonical_bytes,
@@ -1204,6 +1205,7 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
                     extensions=extract_extensions_from_mapping(annotations),
                     entrypoint=request.entrypoint,
                     platform=effective_platform or request.platform,
+                    backendIdentifiers=_extract_backend_identifiers(workload),
                 )
                 # Reached success — the caller now owns the sandbox lifecycle
                 # and any PVCs we created. delete_sandbox is responsible for

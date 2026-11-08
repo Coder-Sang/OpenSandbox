@@ -1275,10 +1275,28 @@ components:
           type: boolean
           description: Whether there are more pages after the current one
       required: [page, pageSize, totalItems, totalPages, hasNextPage]
+    BackendIdentifiers:
+      type: object
+      description: Point-in-time backend locator, not a Pod identity or lease guarantee. workloadUid is not a Pod UID.
+      required: [namespace]
+      properties:
+        namespace:
+          type: string
+        workloadName:
+          type: string
+        workloadUid:
+          type: string
+        podName:
+          type: string
+          description: Present only for a confirmed unique active Pool allocation.
+
     CreateSandboxResponse:
       type: object
       description: Response from creating a new sandbox. Contains essential information without startup source details and updatedAt.
       properties:
+        backendIdentifiers:
+          $ref: '#/components/schemas/BackendIdentifiers'
+
         id:
           type: string
           description: Unique sandbox identifier
@@ -1416,6 +1434,9 @@ components:
       type: object
       description: Runtime execution environment provisioned from a container image or restored from a snapshot
       properties:
+        backendIdentifiers:
+          $ref: '#/components/schemas/BackendIdentifiers'
+
         id:
           type: string
           description: Unique sandbox identifier

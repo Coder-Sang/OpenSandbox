@@ -22,7 +22,7 @@ by querying K8s Pod state and events. Mixed into KubernetesSandboxService.
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from fastapi import HTTPException, status
 from kubernetes.client.exceptions import ApiException
@@ -32,6 +32,7 @@ from opensandbox_server.services.constants import (
     SandboxErrorCodes,
 )
 from opensandbox_server.services.diagnostics import (
+    DiagnosticContext,
     DiagnosticResult,
     limit_diagnostic_lines,
     unsupported_scope_error,
@@ -49,6 +50,10 @@ _STABLE_EVENT_LINE_LIMIT = 50
 #: on any pod with more than one container.
 DEFAULT_LOG_CONTAINER = "sandbox"
 
+if TYPE_CHECKING:
+    from opensandbox_server.api.schema import Sandbox
+
+
 
 def _parse_since(since: str) -> int:
     """Parse a human-readable duration string (e.g. '10m', '1h') into seconds."""
@@ -62,6 +67,23 @@ def _parse_since(since: str) -> int:
 
 class K8sDiagnosticsMixin:
     """Mixin that implements diagnostics methods for the Kubernetes backend."""
+
+    if TYPE_CHECKING:
+        def get_sandbox(self, sandbox_id: str) -> Sandbox: ...
+
+    def get_sandbox_diagnostic_context(self, sandbox_id: str) -> DiagnosticContext:
+        # Use the same lookup/namespace policy and snapshot parser as Get.
+        sandbox = self.get_sandbox(sandbox_id)
+        identifiers = sandbox.backend_identifiers
+        return DiagnosticContext(
+            sandbox_id=sandbox_id,
+            backend_type="kubernetes",
+            state=sandbox.status.state,
+            backend_identifiers=(
+                identifiers.model_dump(by_alias=True, exclude_none=True)
+                if identifiers is not None else {}
+            ),
+        )
 
     def get_sandbox_log_diagnostics(
         self,

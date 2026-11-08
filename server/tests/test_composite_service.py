@@ -99,3 +99,30 @@ def test_template_id_still_routes_to_fsb() -> None:
 
     assert result == "created-by-fsb"
     assert fsb.requests and kubernetes.requests == []
+
+
+def test_context_routes_by_sandbox_backend():
+    from unittest.mock import MagicMock
+    kubernetes, fsb = MagicMock(), MagicMock()
+    composite = CompositeSandboxService(kubernetes=kubernetes, fsb=fsb)
+    composite.get_sandbox_diagnostic_context("sbx-1")
+    composite.get_sandbox_diagnostic_context("fsb-1")
+    kubernetes.get_sandbox_diagnostic_context.assert_called_once_with("sbx-1")
+    fsb.get_sandbox_diagnostic_context.assert_called_once_with("fsb-1")
+
+
+def test_unsupported_context_checks_lookup_before_501():
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+    import pytest
+    from fastapi import HTTPException
+    from opensandbox_server.services.sandbox_service import SandboxService
+    backend = SimpleNamespace(get_sandbox=MagicMock())
+    with pytest.raises(HTTPException) as exc:
+        SandboxService.get_sandbox_diagnostic_context(backend, "sbx-1")
+    assert exc.value.status_code == 501
+    backend.get_sandbox.assert_called_once_with("sbx-1")
+    backend.get_sandbox.side_effect = HTTPException(404, "not found")
+    with pytest.raises(HTTPException) as exc:
+        SandboxService.get_sandbox_diagnostic_context(backend, "missing")
+    assert exc.value.status_code == 404

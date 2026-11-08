@@ -255,8 +255,25 @@ class TestKubernetesSandboxServiceCreate:
             "last_transition_at": datetime.now(timezone.utc),
         }
 
+        # Locator must use the same allocated snapshot, before Pod readiness.
+        import json
+        mock_workload["metadata"].update(
+            namespace="tenant-a", name="workload-1", uid="workload-uid",
+            finalizers=["pool.sandbox.opensandbox.io/pool-allocation"],
+        )
+        mock_workload["metadata"].setdefault("annotations", {})["sandbox.opensandbox.io/alloc-status"] = json.dumps(
+            {"poolRef": "pool-1", "pods": ["pod-1"]}
+        )
+        mock_workload["spec"]["poolRef"] = "pool-1"
+        mock_workload["status"] = {"allocated": 1}
+
         response = await k8s_service.create_sandbox(create_sandbox_request)
 
+        assert response.backend_identifiers.model_dump(by_alias=True, exclude_none=True) == {
+            "namespace": "tenant-a", "workloadName": "workload-1",
+            "workloadUid": "workload-uid", "podName": "pod-1",
+        }
+        k8s_service.workload_provider.get_workload.assert_called_once()
         assert response.status.state == "Running"
         assert response.status.reason == "IP_ASSIGNED"
         assert response.status.message == "Pod has IP assigned and sandbox is ready for requests"

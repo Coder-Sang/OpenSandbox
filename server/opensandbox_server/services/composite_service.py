@@ -28,7 +28,7 @@ from opensandbox_server.api.schema import (
     RenewSandboxExpirationResponse,
     Sandbox,
 )
-from opensandbox_server.services.diagnostics import DiagnosticResult
+from opensandbox_server.services.diagnostics import DiagnosticContext, DiagnosticResult
 from opensandbox_server.services.extension_service import ExtensionService
 from opensandbox_server.services.fast_sandbox.service import FastSandboxService
 from opensandbox_server.services.k8s.kubernetes_service import KubernetesSandboxService
@@ -131,6 +131,9 @@ class CompositeSandboxService(SandboxService, ExtensionService):
 
     def delete_network_policy_rules(self, sandbox_id: str, targets: list) -> dict:
         return self._fsb.delete_network_policy_rules(sandbox_id, targets)
+
+    def get_sandbox_diagnostic_context(self, sandbox_id: str) -> DiagnosticContext:
+        return self._backend(sandbox_id).get_sandbox_diagnostic_context(sandbox_id)
 
     def get_sandbox_log_diagnostics(self, sandbox_id: str, scope: str) -> DiagnosticResult:
         return self._backend(sandbox_id).get_sandbox_log_diagnostics(sandbox_id, scope)

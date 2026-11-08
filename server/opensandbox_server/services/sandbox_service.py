@@ -24,6 +24,8 @@ import socket
 from typing import Optional
 from uuid import uuid4
 
+from fastapi import HTTPException
+
 from opensandbox_server.api.schema import (
     CreateSandboxRequest,
     CreateSandboxResponse,
@@ -35,7 +37,7 @@ from opensandbox_server.api.schema import (
     RenewSandboxExpirationResponse,
     Sandbox,
 )
-from opensandbox_server.services.diagnostics import DiagnosticResult
+from opensandbox_server.services.diagnostics import DiagnosticContext, DiagnosticResult
 from opensandbox_server.services.validators import ensure_valid_port
 
 
@@ -261,6 +263,17 @@ class SandboxService(ABC):
 
     # Diagnostics (DevOps)
     # ------------------------------------------------------------------
+
+    def get_sandbox_diagnostic_context(self, sandbox_id: str) -> DiagnosticContext:
+        """Backends must explicitly opt in to structured backend identifiers."""
+        self.get_sandbox(sandbox_id)
+        raise HTTPException(
+            status_code=501,
+            detail={
+                "code": "DIAGNOSTICS_CONTEXT_UNSUPPORTED",
+                "message": "This backend does not support diagnostic context.",
+            },
+        )
 
     @abstractmethod
     def get_sandbox_log_diagnostics(
