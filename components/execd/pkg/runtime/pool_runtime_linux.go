@@ -311,7 +311,9 @@ func (m *PoolRuntimeManager) Start(spec *PoolIsolationSpec) error {
 		LifecycleControlStdin: true,
 		EnvPassthrough:        isolation.EnvSpec{Mode: isolation.EnvModeDeny},
 	}
-	cmd := exec.Command("/bin/sh", "-c", "trap 'exit 0' TERM INT; while :; do sleep 3600 & wait $!; done")
+	// The native gate becomes the protected PID-1 anchor after READY. If its
+	// internal marker is absent, /bin/false exits instead of running user code.
+	cmd := exec.Command("/bin/false")
 	cmd.Env = append(os.Environ(), poolAnchorEnv)
 	// The anchor has no user-visible stderr. Route bwrap/gate diagnostics to
 	// execd so a fail-closed startup identifies the failing boundary.
@@ -367,11 +369,21 @@ func (m *PoolRuntimeManager) Start(spec *PoolIsolationSpec) error {
 	}
 	state := &poolRuntimeState{pid: identity.PID, uidMode: m.uidMode, root: root, namespaces: namespaceFiles, helper: helper, process: mp, lifecycle: lifecycle}
 	state.valid.Store(true)
-	if err := lifecycle.MarkReady(); err != nil {
+	protectedLifecycle, ok := lifecycle.(isolation.ProtectedAnchorLifecycle)
+	if !ok {
 		state.valid.Store(false)
 		_ = root.Close()
 		closePoolFiles(namespaceFiles)
 		lifecycle.Abort()
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		return errors.New("pool bwrap runtime lacks protected anchor handshake")
+	}
+	if err := protectedLifecycle.MarkAnchorReady(); err != nil {
+		state.valid.Store(false)
+		_ = root.Close()
+		closePoolFiles(namespaceFiles)
+		lifecycle.Abort()
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		return fmt.Errorf("release pool bwrap gate: %w", err)
 	}
 	startupTimer := time.NewTimer(100 * time.Millisecond)

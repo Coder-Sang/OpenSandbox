@@ -35,10 +35,13 @@ force. `allow_private_proc_read` is intentionally disabled by default because
 it expands Landlock visibility from `/proc/self` to the Pool runtime's private
 PID namespace. A Pool enabling it must also protect its PID-1 anchor from
 same-UID memory inspection and repeat the attack matrix for that image and
-kernel. Execd accepts this setting only for forced bwrap Pools, grants read-only
-access to the private procfs, and makes the long-lived PID-1 anchor
-non-dumpable before releasing the startup gate. It never grants access to the
-outer execd/task-executor procfs and does not add `CAP_SYS_PTRACE`.
+kernel. Execd accepts this setting only for forced bwrap Pools and grants
+read-only access to the private procfs. It validates and pins the Pool PID-1
+anchor while the native gate is inspectable, then waits for the gate to become
+non-dumpable before marking the runtime ready. The gate remains the native
+anchor instead of executing a shell, which would reset that protection. It
+never grants access to the outer execd/task-executor procfs or adds
+`CAP_SYS_PTRACE`.
 
 ```yaml
 apiVersion: sandbox.opensandbox.io/v1alpha1
@@ -109,6 +112,11 @@ namespaces, and descriptor-based bind mounts. Execd chooses the UID mode at
 startup: it prefers a nested user namespace and falls back to real UID/GID 0
 with `setpriv` when nested user namespaces are unavailable. If neither mode is
 available, initialization fails closed.
+
+When an initContainer installs execd into a shared volume, install
+`/opt/opensandbox/opensandbox-session-gate` from the **same execd image** as
+`/opt/opensandbox/execd`. The Pool anchor handshake requires matching
+versions of both binaries; updating only execd will fail closed.
 
 The trusted execd container is not privileged. It drops all capabilities and
 adds only `SYS_ADMIN`, `SYS_CHROOT`, `SETPCAP`, and `SETGID`, with Pod-level

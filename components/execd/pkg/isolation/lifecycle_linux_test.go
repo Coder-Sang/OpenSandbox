@@ -907,6 +907,136 @@ func TestSessionGateHelperFailsClosedAndExecutesOnlyAfterReady(t *testing.T) {
 	}
 }
 
+func TestPoolAnchorGateProtectsAfterReady(t *testing.T) {
+	compiler, err := exec.LookPath("cc")
+	if err != nil {
+		t.Skip("C compiler is unavailable")
+	}
+	binary := filepath.Join(t.TempDir(), "opensandbox-session-gate")
+	compile := exec.Command(compiler, "-O2", "-Wall", "-Wextra", "-Werror", "-o", binary,
+		filepath.Join("..", "..", "native", "session-gate.c"))
+	if output, err := compile.CombinedOutput(); err != nil {
+		t.Fatalf("compile native gate: %v\n%s", err, output)
+	}
+
+	parent, child, _, err := newGateSocketpair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer parent.Close()
+	gateExecutable, err := os.Open(binary)
+	if err != nil {
+		child.Close()
+		t.Fatal(err)
+	}
+	command := exec.Command(binary, "3", "4", "--", "/bin/false")
+	command.Env = append(os.Environ(), "OPENSANDBOX_POOL_ANCHOR=1")
+	command.ExtraFiles = []*os.File{child, gateExecutable}
+	if err := command.Start(); err != nil {
+		child.Close()
+		gateExecutable.Close()
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = command.Process.Kill()
+		_ = command.Wait()
+	}()
+	child.Close()
+	gateExecutable.Close()
+
+	buffer := make([]byte, len(poolAnchorProtectedFrame)+1)
+	if err := parent.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	n, err := parent.Read(buffer)
+	if err != nil || string(buffer[:n]) != sessionGateWaitingFrame {
+		t.Fatalf("waiting frame = %q, error = %v", buffer[:n], err)
+	}
+	if _, err := readNetNamespaceID(command.Process.Pid); err != nil {
+		t.Fatalf("execd must inspect the gate before READY: %v", err)
+	}
+	lifecycle := &bwrapLifecycle{
+		state:    lifecycleIdentityReady,
+		control:  parent,
+		identity: WorkloadIdentity{PID: command.Process.Pid},
+	}
+	if err := lifecycle.MarkAnchorReady(); err != nil {
+		t.Fatalf("native anchor did not confirm protection: %v", err)
+	}
+	if err := command.Process.Signal(syscall.Signal(0)); err != nil {
+		t.Fatalf("native anchor exited or ran /bin/false: %v", err)
+	}
+	if _, err := readNetNamespaceID(command.Process.Pid); err == nil {
+		t.Log("protected namespace remains readable; test process may have CAP_SYS_PTRACE")
+	} else if !errors.Is(err, unix.EACCES) && !errors.Is(err, unix.EPERM) {
+		t.Fatalf("unexpected protected namespace error: %v", err)
+	}
+	if err := command.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	if err := command.Wait(); err != nil {
+		t.Fatalf("native anchor did not shut down cleanly: %v", err)
+	}
+}
+
+func TestMarkAnchorReadyRejectsMissingProtection(t *testing.T) {
+	parent, child, _, err := newGateSocketpair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer child.Close()
+	lifecycle := &bwrapLifecycle{
+		state:    lifecycleIdentityReady,
+		control:  parent,
+		identity: WorkloadIdentity{PID: os.Getpid()},
+	}
+	readyRead := make(chan string, 1)
+	go func() {
+		buffer := make([]byte, len(sessionGateReadyFrame)+1)
+		n, _ := child.Read(buffer)
+		readyRead <- string(buffer[:n])
+		_ = child.Close()
+	}()
+	if err := lifecycle.MarkAnchorReady(); err == nil {
+		t.Fatal("missing protected acknowledgement was accepted")
+	}
+	if got := <-readyRead; got != sessionGateReadyFrame {
+		t.Fatalf("ready frame = %q, want %q", got, sessionGateReadyFrame)
+	}
+	if lifecycle.state != lifecycleAborted {
+		t.Fatalf("lifecycle state = %v, want aborted", lifecycle.state)
+	}
+}
+
+func TestMarkAnchorReadyAcceptsAuthenticatedProtection(t *testing.T) {
+	parent, child, _, err := newGateSocketpair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer child.Close()
+	lifecycle := &bwrapLifecycle{
+		state:    lifecycleIdentityReady,
+		control:  parent,
+		identity: WorkloadIdentity{PID: os.Getpid()},
+	}
+	readyRead := make(chan string, 1)
+	go func() {
+		buffer := make([]byte, len(sessionGateReadyFrame)+1)
+		n, _ := child.Read(buffer)
+		readyRead <- string(buffer[:n])
+		_, _ = child.Write([]byte(poolAnchorProtectedFrame))
+	}()
+	if err := lifecycle.MarkAnchorReady(); err != nil {
+		t.Fatal(err)
+	}
+	if got := <-readyRead; got != sessionGateReadyFrame {
+		t.Fatalf("ready frame = %q, want %q", got, sessionGateReadyFrame)
+	}
+	if lifecycle.state != lifecycleWorkloadReady {
+		t.Fatalf("lifecycle state = %v, want workload ready", lifecycle.state)
+	}
+}
+
 func TestLifecycleArgvExecutesGateDescriptorAfterRestoringProc(t *testing.T) {
 	uid := uint32(65534)
 	gid := uint32(65534)
