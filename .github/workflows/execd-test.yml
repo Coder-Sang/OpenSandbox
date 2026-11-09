@@ -56,6 +56,14 @@ jobs:
         run: |
           go test -v -coverpkg=./... -coverprofile=coverage.out -covermode=atomic ./pkg/...
 
+      - name: Verify filesystem identity permissions as root
+        working-directory: components/execd
+        run: |
+          go test -c -o /tmp/execd-filesystem-identity.test ./pkg/web
+          sudo /tmp/execd-filesystem-identity.test -test.run "^TestFilesystemIdentity" -test.v -test.timeout 90s
+          go test -c -o /tmp/execd-filesystem-runtime.test ./pkg/runtime
+          sudo /tmp/execd-filesystem-runtime.test -test.run "^TestFilesystem" -test.v -test.timeout 90s
+
       - name: Run execd-ebpf variant tests
         working-directory: components/execd
         run: |
@@ -218,6 +226,13 @@ jobs:
           ninja -C builddir
           sudo cp builddir/bwrap /usr/local/bin/bwrap
           bwrap --version
+
+      - name: Multi-overlay mounts smoke test
+        working-directory: components/execd
+        shell: bash
+        run: |
+          chmod +x tests/smoke_overlays.sh
+          SMOKE_OVERLAYS_REQUIRE_ROOT=1 bash tests/smoke_overlays.sh
 
       - name: Build and install native session workload gate
         working-directory: components/execd

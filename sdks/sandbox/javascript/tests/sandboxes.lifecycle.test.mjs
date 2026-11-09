@@ -1,6 +1,23 @@
+// Copyright 2026 The OpenSandbox Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import createClient from "openapi-fetch";
+
+import { SandboxApiException } from "../dist/index.js";
 import { SandboxesAdapter } from "../dist/internal.js";
 
 function createAdapter() {
@@ -125,3 +142,21 @@ test("deleteSandbox forwards AbortSignal to the transport", async () => {
   assert.equal(deleteOptions.params.path.sandboxId, "sandbox-1");
   assert.equal(deleteOptions.signal, controller.signal);
 });
+
+for (const [name, makeResponse] of [
+  ["Content-Length: 0", () => new Response(null, { status: 502, headers: { "Content-Length": "0" } })],
+  ["an empty chunked body", () => new Response("", { status: 502 })],
+]) {
+  test(`deleteSandbox rejects a non-2xx response with ${name}`, async () => {
+    // A real openapi-fetch client: for an empty error body it returns no
+    // `error`, so the status code is the only signal that the call failed.
+    const client = createClient({ baseUrl: "http://lifecycle.test", fetch: async () => makeResponse() });
+    const adapter = new SandboxesAdapter(client);
+
+    await assert.rejects(adapter.deleteSandbox("sandbox-1"), (err) => {
+      assert.ok(err instanceof SandboxApiException);
+      assert.equal(err.statusCode, 502);
+      return true;
+    });
+  });
+}

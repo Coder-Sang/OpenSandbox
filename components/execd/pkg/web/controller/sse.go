@@ -1,4 +1,4 @@
-// Copyright 2025 Alibaba Group Holding Ltd.
+// Copyright 2025 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -160,7 +160,7 @@ func (c *CodeInterpretingController) setServerEventsHandler(ctx context.Context)
 				Timestamp: time.Now().UnixMilli(),
 			}
 			payload := event.ToJSON()
-			c.writeSingleEvent("OnExecuteStdout", payload, true, event.Summary())
+			c.writeSingleEvent("OnExecuteStdout", payload, false, event.Summary())
 		},
 		OnExecuteStderr: func(text string) {
 			if text == "" {
@@ -173,7 +173,7 @@ func (c *CodeInterpretingController) setServerEventsHandler(ctx context.Context)
 				Timestamp: time.Now().UnixMilli(),
 			}
 			payload := event.ToJSON()
-			c.writeSingleEvent("OnExecuteStderr", payload, true, event.Summary())
+			c.writeSingleEvent("OnExecuteStderr", payload, false, event.Summary())
 		},
 	}
 

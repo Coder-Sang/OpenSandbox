@@ -1,4 +1,4 @@
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -22,7 +22,7 @@ by querying K8s Pod state and events. Mixed into KubernetesSandboxService.
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from fastapi import HTTPException, status
 from kubernetes.client.exceptions import ApiException
@@ -32,10 +32,12 @@ from opensandbox_server.services.constants import (
     SandboxErrorCodes,
 )
 from opensandbox_server.services.diagnostics import (
+    DiagnosticContext,
     DiagnosticResult,
     limit_diagnostic_lines,
     unsupported_scope_error,
 )
+from opensandbox_server.services.k8s.workload_mapper import allocated_pod_names
 
 _SUPPORTED_LOG_SCOPES = ("container", "all")
 _SUPPORTED_EVENT_SCOPES = ("runtime", "all")
@@ -48,6 +50,10 @@ _STABLE_EVENT_LINE_LIMIT = 50
 #: (e.g. "execd-installer"). Without this default, Kubernetes returns HTTP 400
 #: on any pod with more than one container.
 DEFAULT_LOG_CONTAINER = "sandbox"
+
+if TYPE_CHECKING:
+    from opensandbox_server.api.schema import Sandbox
+
 
 
 def _parse_since(since: str) -> int:
@@ -62,6 +68,23 @@ def _parse_since(since: str) -> int:
 
 class K8sDiagnosticsMixin:
     """Mixin that implements diagnostics methods for the Kubernetes backend."""
+
+    if TYPE_CHECKING:
+        def get_sandbox(self, sandbox_id: str) -> Sandbox: ...
+
+    def get_sandbox_diagnostic_context(self, sandbox_id: str) -> DiagnosticContext:
+        # Use the same lookup/namespace policy and snapshot parser as Get.
+        sandbox = self.get_sandbox(sandbox_id)
+        identifiers = sandbox.backend_identifiers
+        return DiagnosticContext(
+            sandbox_id=sandbox_id,
+            backend_type="kubernetes",
+            state=sandbox.status.state,
+            backend_identifiers=(
+                identifiers.model_dump(by_alias=True, exclude_none=True)
+                if identifiers is not None else {}
+            ),
+        )
 
     def get_sandbox_log_diagnostics(
         self,
@@ -130,12 +153,32 @@ class K8sDiagnosticsMixin:
         )
 
     def _find_pod_for_sandbox(self, sandbox_id: str):
+        namespace = self._resolve_namespace()
+        workload = None
+        workload_provider = getattr(self, "workload_provider", None)
+        if workload_provider is not None:
+            from opensandbox_server.services.k8s.workload_access import (
+                _get_owned_workload_or_404,
+            )
+
+            workload = _get_owned_workload_or_404(
+                workload_provider,
+                namespace,
+                sandbox_id,
+            )
         label_selector = f"{SANDBOX_ID_LABEL}={sandbox_id}"
         try:
             pods = self.k8s_client.list_pods(
-                namespace=self._resolve_namespace(),
+                namespace=namespace,
                 label_selector=label_selector,
             )
+            if not pods:
+                # Pool-allocated pods don't carry the sandbox ID label.
+                pods = [
+                    pod
+                    for name in allocated_pod_names(workload)
+                    if (pod := self.k8s_client.read_pod(namespace, name)) is not None
+                ]
         except Exception as exc:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

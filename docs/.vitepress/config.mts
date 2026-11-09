@@ -1,3 +1,17 @@
+// Copyright 2026 The OpenSandbox Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 import { defineConfig } from "vitepress";
 
 const sdkSidebar = [
@@ -63,14 +77,15 @@ export default defineConfig({
 
     nav: [
       { text: "Getting Started", link: "/getting-started/" },
+      { text: "Architecture", link: "/architecture/" },
       { text: "Guides", link: "/guides/" },
       {
         text: "Reference",
         items: [
           { text: "SDKs", link: "/sdks/" },
           { text: "API Specs", link: "/api/" },
-          { text: "Components", link: "/components/" },
-          { text: "Kubernetes", link: "/kubernetes/" },
+          { text: "CLI", link: "/cli/" },
+          { text: "Deployment", link: "/deployment/" },
           { text: "Migration Guides", link: "/reference/execd-path-migration" },
         ],
       },
@@ -104,15 +119,82 @@ export default defineConfig({
       "/architecture/": [
         {
           text: "Architecture",
+          items: [{ text: "Overview", link: "/architecture/" }],
+        },
+        {
+          text: "Control Plane",
           items: [
-            { text: "Overview", link: "/architecture/" },
+            { text: "Server", link: "/architecture/control-plane/server" },
             {
-              text: "Single-Host Network",
-              link: "/architecture/single-host-network",
+              text: "Kubernetes Controller",
+              link: "/architecture/control-plane/operator",
+            },
+          ],
+        },
+        {
+          text: "Data Plane",
+          items: [
+            { text: "Execd", link: "/architecture/data-plane/execd" },
+            {
+              text: "Node Agent",
+              link: "/architecture/data-plane/node-agent",
+            },
+          ],
+        },
+        {
+          text: "Network",
+          items: [
+            { text: "Ingress", link: "/architecture/network/ingress" },
+            { text: "Egress", link: "/architecture/network/egress" },
+            {
+              text: "Single-Host Network (Docker)",
+              link: "/architecture/network/single-host-network",
             },
             {
               text: "Network Isolation",
-              link: "/architecture/network-isolation",
+              link: "/architecture/network/network-isolation",
+            },
+          ],
+        },
+        {
+          text: "Fast Sandbox",
+          items: [
+            { text: "Overview", link: "/architecture/fast-sandbox/" },
+            { text: "Templates", link: "/architecture/fast-sandbox/templates" },
+            {
+              text: "Scheduling",
+              link: "/architecture/fast-sandbox/scheduling",
+            },
+            { text: "Networking", link: "/architecture/fast-sandbox/networking" },
+            {
+              text: "Pause, Resume, and Snapshots",
+              link: "/architecture/fast-sandbox/checkpoints",
+            },
+            { text: "High Availability", link: "/architecture/fast-sandbox/ha" },
+            { text: "Storage", link: "/architecture/fast-sandbox/storage" },
+            {
+              text: "Firecracker",
+              link: "/architecture/fast-sandbox/firecracker",
+            },
+            {
+              text: "Performance",
+              link: "/architecture/fast-sandbox/performance",
+            },
+          ],
+        },
+      ],
+
+      "/deployment/": [
+        {
+          text: "Deployment",
+          items: [
+            {
+              text: "Kubernetes Deployment",
+              link: "/deployment/",
+            },
+            {
+              text: "ACK Deployment",
+              link: "/deployment/ack",
             },
           ],
         },
@@ -126,51 +208,47 @@ export default defineConfig({
           items: [
             { text: "Overview", link: "/guides/" },
             { text: "Credential Vault", link: "/guides/credential-vault" },
+            {
+              text: "Chained Upstream Proxy",
+              link: "/guides/egress-upstream-proxy",
+            },
             { text: "Secure Access", link: "/guides/secure-access" },
             { text: "Secure Container", link: "/guides/secure-container" },
             { text: "Multi-Tenancy", link: "/guides/multi-tenancy" },
             { text: "Isolation Sessions", link: "/guides/isolation-sessions" },
             { text: "Pause & Resume", link: "/guides/pause-resume" },
+            {
+              text: "Kubernetes Resume Benchmark",
+              link: "/guides/kubernetes-resume-benchmark",
+            },
+            { text: "Pod Provision Failure Recovery", link: "/guides/pod-recovery" },
+            {
+              text: "QEMU VMState Snapshots",
+              link: "/guides/qemu-vmstate-snapshots",
+            },
+            {
+              text: "Egress SSE Truncation",
+              link: "/guides/egress-sse-truncation",
+            },
             { text: "Lifecycle Hooks", link: "/guides/lifecycle-hooks" },
             { text: "Windows Sandbox", link: "/guides/windows-sandbox" },
+            {
+              text: "Node Agent Configuration",
+              link: "/guides/node-agent",
+            },
           ],
         },
       ],
 
       "/sdks/": sdkSidebar,
 
-      "/components/": [
-        {
-          text: "Components",
-          items: [
-            { text: "Overview", link: "/components/" },
-            { text: "Server", link: "/components/server" },
-            { text: "Execd", link: "/components/execd" },
-            { text: "Ingress", link: "/components/ingress" },
-            { text: "Egress", link: "/components/egress" },
-            { text: "Node Agent", link: "/components/node-agent" },
-          ],
-        },
-      ],
-
-      "/kubernetes/": [
-        {
-          text: "Kubernetes",
-          items: [
-            { text: "Overview", link: "/kubernetes/" },
-            { text: "Deployment", link: "/kubernetes/deployment" },
-            {
-              text: "QEMU VMState Snapshots",
-              link: "/kubernetes/qemu-vmstate-snapshots",
-            },
-          ],
-        },
-      ],
-
       "/api/": [
         {
           text: "API Reference",
-          items: [{ text: "OpenAPI Specs", link: "/api/" }],
+          items: [
+            { text: "OpenAPI Specs", link: "/api/" },
+            { text: "Implementation Compatibility", link: "/api/implementation-compatibility" },
+          ],
         },
       ],
 
@@ -188,13 +266,14 @@ export default defineConfig({
             { text: "Claude Code", link: "/examples/claude-code" },
             { text: "Gemini CLI", link: "/examples/gemini-cli" },
             { text: "Codex CLI", link: "/examples/codex-cli" },
+            { text: "Apply Model Patches", link: "/examples/apply-patch" },
             { text: "OpenCode", link: "/examples/opencode" },
             { text: "Qwen Code", link: "/examples/qwen-code" },
             { text: "Kimi CLI", link: "/examples/kimi-cli" },
             { text: "LangGraph", link: "/examples/langgraph" },
             { text: "Google ADK", link: "/examples/google-adk" },
             { text: "OpenClaw", link: "/examples/openclaw" },
-            { text: "NullClaw", link: "/examples/nullclaw" },
+            { text: "DeerFlow", link: "/examples/deer-flow" },
           ],
         },
         {
@@ -212,6 +291,7 @@ export default defineConfig({
           collapsed: false,
           items: [
             { text: "Code Interpreter", link: "/examples/code-interpreter" },
+            { text: "Scheduled Client Pool", link: "/examples/client-pool-schedule" },
             { text: "AIO Sandbox", link: "/examples/aio-sandbox" },
             { text: "Agent Sandbox", link: "/examples/agent-sandbox" },
             { text: "Windows", link: "/examples/windows" },
@@ -234,6 +314,10 @@ export default defineConfig({
             {
               text: "Docker OSSFS Volume",
               link: "/examples/docker-ossfs-volume-mount",
+            },
+            {
+              text: "rclone Volume Mount",
+              link: "/examples/rclone-volume-mount",
             },
             {
               text: "Kubernetes PVC",

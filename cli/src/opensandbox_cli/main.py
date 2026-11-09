@@ -1,4 +1,4 @@
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -32,11 +32,9 @@ from opensandbox_cli.commands.egress import egress_group
 from opensandbox_cli.commands.file import file_group
 from opensandbox_cli.commands.sandbox import sandbox_group
 from opensandbox_cli.commands.skills import skills_group
+from opensandbox_cli.commands.snapshot import snapshot_group
+from opensandbox_cli.commands.template import template_group
 from opensandbox_cli.config import resolve_config
-
-# ---------------------------------------------------------------------------
-# Banner
-# ---------------------------------------------------------------------------
 
 BANNER = r"""[bold cyan]
    ____                   _____                 _ _
@@ -130,8 +128,9 @@ def cli(
     ctx.call_on_close(lambda: ctx.obj.close())
 
 
-# Register sub-command groups
 cli.add_command(sandbox_group)
+cli.add_command(template_group)
+cli.add_command(snapshot_group)
 cli.add_command(command_group)
 cli.add_command(file_group)
 cli.add_command(egress_group)

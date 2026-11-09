@@ -1,4 +1,4 @@
-# Copyright 2025 Alibaba Group Holding Ltd.
+# Copyright 2025 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -717,6 +717,18 @@ class CreateSandboxRequest(BaseModel):
         return self._resolved_snapshot_backend
 
 
+class BackendIdentifiers(BaseModel):
+    """Point-in-time backend identifiers, never a Pod identity or lease proof."""
+
+    namespace: str
+    workload_name: Optional[str] = Field(default=None, alias="workloadName")
+    workload_uid: Optional[str] = Field(default=None, alias="workloadUid")
+    pod_name: Optional[str] = Field(default=None, alias="podName")
+
+    class Config:
+        populate_by_name = True
+
+
 class CreateSandboxResponse(BaseModel):
     """
     Response from creating a new sandbox.
@@ -750,6 +762,15 @@ class CreateSandboxResponse(BaseModel):
     created_at: datetime = Field(..., alias="createdAt", description="Sandbox creation timestamp")
     entrypoint: Optional[List[str]] = Field(
         None, description="Entry process specification from creation request"
+    )
+
+    backend_identifiers: Optional[BackendIdentifiers] = Field(
+        default=None,
+        alias="backendIdentifiers",
+        description=(
+            "Point-in-time backend locator. podName is present only for a confirmed "
+            "unique active Pool allocation; workloadUid is not a Pod UID."
+        ),
     )
 
     class Config:
@@ -822,6 +843,15 @@ class Sandbox(BaseModel):
         description="Timestamp when sandbox will auto-terminate. Null when manual cleanup is enabled.",
     )
     created_at: datetime = Field(..., alias="createdAt", description="Sandbox creation timestamp")
+
+    backend_identifiers: Optional[BackendIdentifiers] = Field(
+        default=None,
+        alias="backendIdentifiers",
+        description=(
+            "Point-in-time backend locator. podName is present only for a confirmed "
+            "unique active Pool allocation; workloadUid is not a Pod UID."
+        ),
+    )
 
     class Config:
         populate_by_name = True
@@ -1040,7 +1070,11 @@ class RenewSandboxExpirationRequest(BaseModel):
     expires_at: datetime = Field(
         ...,
         alias="expiresAt",
-        description="New absolute expiration time in UTC (RFC 3339 format). Must be in the future.",
+        description=(
+            "New absolute expiration time in UTC (RFC 3339 format). Must be in the future. "
+            "May be earlier than, equal to, or later than the current expiresAt. "
+            "The creation-time limit server.max_sandbox_timeout_seconds does not apply."
+        ),
     )
 
     class Config:
@@ -1298,6 +1332,17 @@ class CreateFsbTemplateRequest(BaseModel):
         min_length=1,
         description="Guest business command (argv); empty defaults to ['tail', '-f', '/dev/null'].",
     )
+    env: Optional[Dict[str, str]] = Field(
+        None,
+        description=(
+            "Environment variables baked into the golden image (injected as "
+            "/etc/sandbox-init.env in the guest; literal values only). The "
+            "source image's own OCI Config.Env is inherited like a container "
+            "runtime would; an env with the same name here overrides the "
+            "inherited value. Names must be valid shell variable names "
+            "([A-Za-z_][A-Za-z0-9_]*)."
+        ),
+    )
     metadata: Optional[Dict[str, str]] = Field(
         None,
         description="Custom key-value metadata for management, filtering, and tagging",
@@ -1356,9 +1401,10 @@ class FsbTemplate(BaseModel):
     image: str = Field(..., description="Source OCI image reference")
     resource_limits: Optional[ResourceLimits] = Field(None, alias="resourceLimits")
     entrypoint: Optional[List[str]] = Field(None, description="Guest business command (argv)")
-    metadata: Optional[Dict[str, str]] = Field(
-        None, description="Custom metadata from the creation request"
+    env: Optional[Dict[str, str]] = Field(
+        None, description="Environment variables baked into the golden image"
     )
+    metadata: Optional[Dict[str, str]] = Field(None, description="Custom metadata from the creation request")
     readiness: Optional[FsbTemplateReadiness] = Field(None, description="Build-side readiness gate")
     publish: str = Field(..., description="S3-compatible publish target")
     format: Literal["native", "overlaybd"] = Field(..., description="Snapshot storage encoding")

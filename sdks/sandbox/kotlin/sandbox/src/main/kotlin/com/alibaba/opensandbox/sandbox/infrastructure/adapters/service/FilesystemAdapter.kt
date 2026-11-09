@@ -1,5 +1,5 @@
 /*
- * Copyright 2025 Alibaba Group Holding Ltd.
+ * Copyright 2025 The OpenSandbox Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -28,6 +28,7 @@ import com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.SetPermiss
 import com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.WriteEntry
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxEndpoint
 import com.alibaba.opensandbox.sandbox.domain.services.Filesystem
+import com.alibaba.opensandbox.sandbox.domain.services.IdentityFilesystem
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.FilesystemConverter.toApiPermissionMap
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.FilesystemConverter.toApiRenameFileItems
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.FilesystemConverter.toApiReplaceFileContentMap
@@ -62,13 +63,18 @@ import java.nio.charset.Charset
 internal class FilesystemAdapter(
     private val httpClientProvider: HttpClientProvider,
     private val execdEndpoint: SandboxEndpoint,
-) : Filesystem {
+) : IdentityFilesystem {
     companion object {
         private const val FILESYSTEM_UPLOAD_PATH = "/files/upload"
         private const val FILESYSTEM_DOWNLOAD_PATH = "/files/download"
     }
 
     private val logger = LoggerFactory.getLogger(FilesystemAdapter::class.java)
+    private val unscopedEndpoint =
+        execdEndpoint.endpoint
+            .substringBefore("/v1/filesystem/")
+            .trimEnd('/')
+            .removeSuffix("/v1/filesystem")
     private val api =
         FilesystemApi(
             "${httpClientProvider.config.protocol}://${execdEndpoint.endpoint}",
@@ -82,6 +88,26 @@ internal class FilesystemAdapter(
                 }
                 .build(),
         )
+
+    override fun withIdentity(
+        uid: Long,
+        gid: Long,
+    ): Filesystem {
+        require(uid in 0..IdentityFilesystem.MAX_IDENTITY_ID) {
+            "uid must be between 0 and ${IdentityFilesystem.MAX_IDENTITY_ID}"
+        }
+        require(gid in 0..IdentityFilesystem.MAX_IDENTITY_ID) {
+            "gid must be between 0 and ${IdentityFilesystem.MAX_IDENTITY_ID}"
+        }
+        return FilesystemAdapter(
+            httpClientProvider,
+            SandboxEndpoint(
+                endpoint = unscopedEndpoint.trimEnd('/') + "/v1/filesystem/$uid/$gid",
+                headers = execdEndpoint.headers,
+                origin = execdEndpoint.origin,
+            ),
+        )
+    }
 
     override fun readFile(
         path: String,

@@ -1,4 +1,4 @@
-# Copyright 2025 Alibaba Group Holding Ltd.
+# Copyright 2025 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -20,7 +20,7 @@ import logging
 import json
 import shlex
 from datetime import datetime
-from typing import Dict, List, Any, Optional
+from typing import Callable, Dict, List, Any, Optional
 
 from opensandbox_server.config import (
     AppConfig,
@@ -255,6 +255,7 @@ class BatchSandboxProvider(WorkloadProvider):
             containers=containers,
             egress_settings=egress_settings,
             sandbox_id=sandbox_id,
+            pod_volumes=pod_spec["volumes"],
         )
 
         if volumes:
@@ -550,6 +551,19 @@ class BatchSandboxProvider(WorkloadProvider):
             }
         }
 
+
+    def subscribe_workload(
+        self, sandbox_id: str, namespace: str, callback: Callable[[str, Dict[str, Any]], None]
+    ) -> Optional[Callable[[], None]]:
+        return self.k8s_client.subscribe_custom_objects(
+            group=self.group,
+            version=self.version,
+            namespace=namespace,
+            plural=self.plural,
+            names=[sandbox_id, self.legacy_resource_name(sandbox_id)],
+            callback=callback,
+        )
+
     def get_workload(self, sandbox_id: str, namespace: str) -> Optional[Dict[str, Any]]:
         workload = self.k8s_client.get_custom_object(
             group=self.group,
@@ -596,9 +610,16 @@ class BatchSandboxProvider(WorkloadProvider):
             label_selector=label_selector,
         )
 
-    def patch_workload(
-        self, sandbox_id: str, namespace: str, spec_patch: Dict[str, Any]
-    ) -> Dict[str, Any]:
+    def list_workloads_all_namespaces(self, label_selector: str) -> List[Dict[str, Any]]:
+        """List BatchSandboxes across all namespaces matching the label selector."""
+        return self.k8s_client.list_custom_objects_all_namespaces(
+            group=self.group,
+            version=self.version,
+            plural=self.plural,
+            label_selector=label_selector,
+        )
+
+    def patch_workload(self, sandbox_id: str, namespace: str, spec_patch: Dict[str, Any]) -> Dict[str, Any]:
         """Patch BatchSandbox spec (e.g., spec.pause for pause/resume)."""
         batchsandbox = self.get_workload(sandbox_id, namespace)
         if not batchsandbox:
@@ -835,8 +856,18 @@ class BatchSandboxProvider(WorkloadProvider):
 
     def get_status(self, workload: Dict[str, Any]) -> Dict[str, Any]:
         """Derive sandbox state from BatchSandbox status and pod readiness."""
+        metadata = workload.get("metadata", {})
+        deletion_timestamp = metadata.get("deletionTimestamp")
+        if deletion_timestamp:
+            return {
+                "state": "Stopping",
+                "reason": "DELETING",
+                "message": "Sandbox is being deleted",
+                "last_transition_at": deletion_timestamp,
+            }
+
         status = workload.get("status", {})
-        creation_timestamp = workload.get("metadata", {}).get("creationTimestamp")
+        creation_timestamp = metadata.get("creationTimestamp")
 
         # Phase is authoritative when set (Pausing/Paused/Resuming/Failed)
         phase = status.get("phase", "")

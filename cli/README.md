@@ -3,6 +3,7 @@
 `osb` is the command-line interface for OpenSandbox. It is built for the common day-to-day flows:
 
 - create and manage sandboxes
+- build golden-image templates and create sandboxes from templates or snapshots
 - run commands inside a sandbox
 - read and modify sandbox files
 - inspect runtime egress policy
@@ -155,6 +156,103 @@ Create with Credential Vault proxy enabled:
 osb sandbox create --image python:3.12 --network-policy-file network-policy.json --credential-proxy -o json
 ```
 
+Create from a template (golden image):
+
+```bash
+osb sandbox create --template <template-id> --timeout 30m -o json
+```
+
+Template mode fixes the workload shape on the server: `--image`, `--env`,
+`--resource`, `--entrypoint`, `--volumes-file`, and `--credential-proxy` cannot
+be combined with `--template`. Only `--timeout` (required), `--metadata`,
+`--extension`, and `--network-policy-file` may accompany it. Only templates in
+the `Succeeded` phase can be used. See [Manage templates](#manage-templates).
+
+Create from a snapshot:
+
+```bash
+osb sandbox create --snapshot-id <snapshot-id> --timeout 30m -o json
+```
+
+`--image`, `--template`, and `--snapshot-id` are mutually exclusive.
+
+Create from a request file (`-f`, like `kubectl apply -f`):
+
+```bash
+osb sandbox create -f sandbox-request.json -o json
+```
+
+`sandbox-request.json` uses the public `CreateSandboxRequest` JSON format
+(camelCase keys):
+
+```json
+{
+  "image": "python:3.12",
+  "timeout": 1800,
+  "resourceLimits": { "cpu": "1", "memory": "2Gi" },
+  "entrypoint": ["python", "-m", "http.server"],
+  "networkPolicy": {
+    "defaultAction": "deny",
+    "egress": [{ "action": "allow", "target": "pypi.org" }]
+  }
+}
+```
+
+- Exactly one of `image` (string or `{ "uri": ..., "auth": { "username": ..., "password": ... } }`),
+  `templateId`, or `snapshotId` is required; `timeout` is integer seconds, or
+  `null` for manual cleanup.
+- Supported fields: `image`, `templateId`, `snapshotId`, `platform`, `timeout`,
+  `resourceLimits`, `resourceRequests`, `env`, `metadata`, `extensions`,
+  `entrypoint`, `networkPolicy`, `credentialProxy`, `secureAccess`, `volumes`,
+  `lifecycle`.
+- `-f` cannot be combined with request-building flags; `--skip-health-check`,
+  `--ready-timeout`, and `-o` still apply. In template mode the file may only
+  set `timeout`, `metadata`, `extensions`, and `networkPolicy` alongside
+  `templateId` (a finite `timeout` is required).
+
+### Manage templates
+
+Templates are golden-image builds; the build runs asynchronously, so poll
+`template get` until the status phase is `Succeeded`. Template management
+requires a Kubernetes-backed runtime.
+
+```bash
+osb template create --image python:3.12 --publish s3://bucket/publish -o json
+osb template get <template-id> -o json
+osb template list -o json
+osb template delete <template-id> -o json
+```
+
+`template create` also accepts `--resource cpu=1 memory=512Mi disk=2Gi`,
+`--entrypoint` (repeat per argv item), `--env KEY=VALUE`, `--metadata
+KEY=VALUE`, `--format native|overlaybd`, `--readiness-probe`, and
+`--warmup-seconds`. Or pass a request file in the public `CreateTemplateRequest`
+JSON format:
+
+```bash
+osb template create -f template-request.json -o json
+```
+
+```json
+{
+  "image": "python:3.12",
+  "publish": "s3://bucket/publish",
+  "resourceLimits": { "cpu": "1", "memory": "512Mi" },
+  "readiness": { "probe": "tcp://127.0.0.1:44772", "warmupSeconds": 60 }
+}
+```
+
+### Manage snapshots
+
+Snapshots capture a sandbox's state and can back new sandboxes.
+
+```bash
+osb snapshot create <sandbox-id> --name golden -o json
+osb snapshot get <snapshot-id> -o json
+osb snapshot list --sandbox-id <sandbox-id> -o json
+osb snapshot delete <snapshot-id> -o json
+```
+
 ### List and inspect sandboxes
 
 ```bash
@@ -198,6 +296,10 @@ osb command run <sandbox-id> --background -o json -- sh -c "sleep 10; echo done"
 osb command status <sandbox-id> <execution-id> -o json
 osb command logs <sandbox-id> <execution-id> -o json
 ```
+
+Background start errors or a stream ending before startup confirmation make the
+CLI exit non-zero without success metadata. After a successful start, use
+`command status` and `command logs` to check the process's eventual result.
 
 By default the payload after `--` is joined into one shell command string, so
 pipelines, redirection, and `$VAR` expansion work as in a terminal. Add `--argv`
@@ -329,6 +431,8 @@ Not every command supports every format. Use `--help` on the specific command wh
 The main command groups are:
 
 - `osb sandbox`: lifecycle management
+- `osb template`: golden-image template builds
+- `osb snapshot`: snapshot management
 - `osb command`: command execution and persistent sessions
 - `osb file`: file and directory operations
 - `osb egress`: runtime egress policy
@@ -341,6 +445,8 @@ Explore them directly:
 
 ```bash
 osb sandbox --help
+osb template --help
+osb snapshot --help
 osb command --help
 osb file --help
 osb skills --help

@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -26,7 +26,6 @@ import (
 	"github.com/alibaba/opensandbox/egress/pkg/events"
 	"github.com/alibaba/opensandbox/egress/pkg/iptables"
 	"github.com/alibaba/opensandbox/egress/pkg/log"
-	"github.com/alibaba/opensandbox/egress/pkg/mitmproxy"
 )
 
 const (
@@ -66,7 +65,7 @@ func waitForShutdown(ctx context.Context, proxy *dnsproxy.Proxy, policySrv *http
 
 	if mitm != nil {
 		iptables.RemoveTransparentHTTP(mitm.port, mitm.uid, mitm.dports)
-		mitmproxy.GracefulShutdown(mitm.getRunning(), defaultMitmShutdownTimeout)
+		mitm.shutdown(defaultMitmShutdownTimeout)
 	}
 	iptables.RemoveRedirect(15353, exemptDst)
 

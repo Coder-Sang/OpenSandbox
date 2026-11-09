@@ -1,4 +1,4 @@
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,7 +14,7 @@
 
 """Runtime-neutral results and helpers for stable sandbox diagnostics."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 from fastapi import HTTPException, status
@@ -32,6 +32,16 @@ class DiagnosticResult:
     content: str
     truncated: bool = False
     warnings: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class DiagnosticContext:
+    """Structured runtime context, compatible with the upstream diagnostics API."""
+
+    sandbox_id: str
+    backend_type: str
+    state: str | None = None
+    backend_identifiers: dict[str, str] = field(default_factory=dict)
 
 
 def limit_diagnostic_lines(

@@ -1,4 +1,4 @@
-# Copyright 2025 Alibaba Group Holding Ltd.
+# Copyright 2025 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -42,6 +42,7 @@ from opensandbox_server.services.constants import (
     OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT,
     OPENSANDBOX_EGRESS_SANDBOX_ID,
     OPENSANDBOX_EGRESS_TOKEN,
+    EGRESS_UPSTREAM_EXTRA_CA_PATH,
     OPENSANDBOX_RUNTIME_MOUNT_PATH,
     SANDBOX_EGRESS_AUTH_TOKEN_METADATA_KEY,
     SANDBOX_EMBEDDING_PROXY_PORT_LABEL,
@@ -56,6 +57,7 @@ from opensandbox_server.services.endpoint_auth import (
     build_egress_auth_headers,
     merge_endpoint_headers,
 )
+from opensandbox_server.services.helpers import upstream_proxy_egress_env
 from opensandbox_server.services.validators import (
     ensure_credential_proxy_configured,
     ensure_egress_configured,
@@ -482,6 +484,10 @@ class DockerNetworkingMixin:
             sidecar_env.append(
                 f"{OTEL_EXPORTER_OTLP_ENDPOINT}={self.app_config.egress.otlp_endpoint}"
             )
+        for key, value in upstream_proxy_egress_env(
+            self.app_config.egress.upstream_proxy
+        ).items():
+            sidecar_env.append(f"{key}={value}")
         if credential_proxy_enabled:
             sidecar_env.append(f"{OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT}=true")
 
@@ -493,9 +499,10 @@ class DockerNetworkingMixin:
                 if key not in skip_keys and value is not None:
                     sidecar_env.append(f"{key}={value}")
 
+        publish_host = self.app_config.docker.publish_host
         sidecar_port_bindings: dict[str, tuple[str, int]] = {
-            "44772": ("0.0.0.0", host_execd_port),
-            "8080": ("0.0.0.0", host_http_port),
+            "44772": (publish_host, host_execd_port),
+            "8080": (publish_host, host_http_port),
         }
         if extra_port_bindings:
             sidecar_port_bindings.update(extra_port_bindings)
@@ -505,10 +512,18 @@ class DockerNetworkingMixin:
             "cap_add": ["NET_ADMIN"],
             "port_bindings": normalize_port_bindings(sidecar_port_bindings),
         }
+        sidecar_binds: list[str] = []
         if runtime_volume_name:
-            base_sidecar_host_config_kwargs["binds"] = [
+            sidecar_binds.append(
                 f"{runtime_volume_name}:{OPENSANDBOX_RUNTIME_MOUNT_PATH}:rw"
-            ]
+            )
+        upstream_proxy = self.app_config.egress.upstream_proxy
+        if upstream_proxy is not None and upstream_proxy.ca_cert_path is not None:
+            sidecar_binds.append(
+                f"{upstream_proxy.ca_cert_path}:{EGRESS_UPSTREAM_EXTRA_CA_PATH}:ro"
+            )
+        if sidecar_binds:
+            base_sidecar_host_config_kwargs["binds"] = sidecar_binds
 
         def build_sidecar_host_config(*, include_ipv6_sysctls: bool) -> Any:
             sidecar_host_config_kwargs = dict(base_sidecar_host_config_kwargs)

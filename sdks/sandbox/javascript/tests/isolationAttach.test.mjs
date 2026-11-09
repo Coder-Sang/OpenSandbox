@@ -1,3 +1,17 @@
+// Copyright 2026 The OpenSandbox Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
@@ -27,7 +41,12 @@ describe("attach", () => {
             last_run_at: "2026-01-02T03:05:06Z",
             idle_remaining_seconds: 30,
             profile: "strict",
-            workspace: { path: "/workspace", mode: "rw" },
+            // workspace echo is only emitted for single-overlay sessions,
+            // so it is deliberately absent from this multi-overlay fixture.
+            overlays: [
+              { path: "/", mode: "overlay" },
+              { path: "/workspace", mode: "overlay", persist: true },
+            ],
             extra_writable: ["/tmp", "/var/tmp"],
             binds: [{ source: "/host/a", dest: "/sbx/a", readonly: true }],
             share_net: false,
@@ -55,7 +74,11 @@ describe("attach", () => {
     assert.strictEqual(info.session_id, "sess-full");
     assert.strictEqual(info.created_at, "2026-01-02T03:04:05Z");
     assert.strictEqual(info.profile, "strict");
-    assert.deepStrictEqual(info.workspace, { path: "/workspace", mode: "rw" });
+    assert.strictEqual(info.workspace, undefined);
+    assert.deepStrictEqual(info.overlays, [
+      { path: "/", mode: "overlay" },
+      { path: "/workspace", mode: "overlay", persist: true },
+    ]);
     assert.deepStrictEqual(info.extra_writable, ["/tmp", "/var/tmp"]);
     assert.strictEqual(info.binds?.length, 1);
     assert.deepStrictEqual(info.binds[0], {

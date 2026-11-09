@@ -1,4 +1,4 @@
-# Copyright 2025 Alibaba Group Holding Ltd.
+# Copyright 2025 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -48,6 +48,9 @@ class DockerSnapshotRuntime:
 
     def supports_create_snapshot(self) -> bool:
         return True
+
+    def supports_synchronous_create(self) -> bool:
+        return False
 
     def create_snapshot_unsupported_message(self) -> str:
         return ""

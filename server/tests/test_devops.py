@@ -1,4 +1,4 @@
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -607,3 +607,20 @@ def test_diagnostics_summary_redacts_unexpected_exception_details(
     assert "backend secret token" not in response.text
     assert "events ok" in response.text
     assert "logs ok" in response.text
+
+
+def test_diagnostic_context(client, auth_headers, monkeypatch):
+    from opensandbox_server.services.diagnostics import DiagnosticContext
+
+    class StubService:
+        def get_sandbox_diagnostic_context(self, sandbox_id):
+            return DiagnosticContext(sandbox_id, "kubernetes", "Running", {"namespace": "ns", "podName": "pod-1"})
+
+    monkeypatch.setattr(devops, "sandbox_service", StubService())
+    response = client.get("/v1/sandboxes/sbx-1/diagnostics/context", headers=auth_headers)
+    assert response.status_code == 200
+    assert response.json() == {"sandboxId": "sbx-1", "backendType": "kubernetes", "state": "Running", "backendIdentifiers": {"namespace": "ns", "podName": "pod-1"}}
+
+
+def test_diagnostic_context_requires_auth(client):
+    assert client.get("/v1/sandboxes/sbx-1/diagnostics/context").status_code in (401, 403)

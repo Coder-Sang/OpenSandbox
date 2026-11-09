@@ -1,4 +1,4 @@
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -40,6 +40,7 @@ from opensandbox_server.services.templates.template_models import (
 )
 from opensandbox_server.services.templates.template_service import FastSandboxTemplateService
 from opensandbox_server.services.k8s.client import K8sClient
+from opensandbox_server.services.k8s.informer import WorkloadInformer
 from opensandbox_server.services.fast_sandbox.generated import fastpath_pb2 as pb2
 
 
@@ -134,9 +135,10 @@ def crs():
 
 
 @pytest.fixture
-def service(repo, crs):
+def service(repo, crs, monkeypatch):
+    monkeypatch.setattr(WorkloadInformer, "start", lambda self: None)
     with patch.object(K8sClient, "_load_config"):
-        k8s = K8sClient(KubernetesRuntimeConfig(informer_enabled=False))
+        k8s = K8sClient(KubernetesRuntimeConfig())
     crs.install(k8s)
     svc = FastSandboxTemplateService(_config(), repository=repo, k8s_client=k8s)
     yield svc
@@ -255,6 +257,28 @@ def test_create_maps_disk_resource_to_rootfs_size(service, crs):
     spec = crs.created[-1]["spec"]
     assert spec["output"]["rootfsSize"] == "10Gi"
     assert spec["machine"] == {"vcpu": "1", "memory": "512Mi"}
+
+
+def test_create_projects_env_to_crd(service, crs):
+    service.create_template(_create_request(env={"LOG_LEVEL": "info", "API_KEY": "k"}))
+    spec = crs.created[-1]["spec"]
+    assert sorted((e["name"], e["value"]) for e in spec["envs"]) == [
+        ("API_KEY", "k"),
+        ("LOG_LEVEL", "info"),
+    ]
+
+    service.create_template(_create_request())
+    assert "envs" not in crs.created[-1]["spec"]
+
+
+def test_create_rejects_invalid_env_names(service):
+    from fastapi import HTTPException
+
+    for name in ["1BAD", "HAS-DASH", "HAS.EQ=VAL", ""]:
+        with pytest.raises(HTTPException) as excinfo:
+            service.create_template(_create_request(env={name: "x"}))
+        assert excinfo.value.status_code == 400
+        assert "env names" in str(excinfo.value.detail).lower()
 
 
 def test_create_rolls_back_row_on_crd_conflict(service, crs, repo):
@@ -391,12 +415,14 @@ def test_routes_template_lifecycle(client, crs):
             "image": "alpine:3.19",
             "publish": "s3://sandbox-images/publish",
             "format": "native",
+            "env": {"LOG_LEVEL": "info"},
             "metadata": {"origin": "test"},
         },
     )
     assert response.status_code == 201, response.text
     body = response.json()
     assert body["status"]["phase"] == "Pending"
+    assert body["env"] == {"LOG_LEVEL": "info"}
     template_id = body["templateId"]
 
     crs.set_status("ns-1", template_id, {"phase": "Succeeded", "manifestRef": "s3://b/m"})
@@ -405,6 +431,7 @@ def test_routes_template_lifecycle(client, crs):
     assert detail.status_code == 200
     assert detail.json()["status"]["phase"] == "Succeeded"
     assert detail.json()["status"]["manifestRef"] == "s3://b/m"
+    assert detail.json()["env"] == {"LOG_LEVEL": "info"}
 
     listing = client.get("/v1/templates", params={"metadata": "origin%3Dtest"})
     assert listing.status_code == 200
@@ -497,7 +524,7 @@ def test_template_mode_create_maps_artifact_and_entrypoint(service, crs):
     crs.set_status("ns-1", record.crd_name, {"phase": "Succeeded", "manifestRef": "s3://b/m"})
 
     with patch.object(K8sClient, "_load_config"):
-        k8s = K8sClient(KubernetesRuntimeConfig(informer_enabled=False))
+        k8s = K8sClient(KubernetesRuntimeConfig())
     stub = _StubFastPath()
     sandbox_service = FastSandboxService(
         _config(), fastpath_client=stub, k8s_client=k8s, template_service=service
@@ -525,7 +552,7 @@ def test_template_mode_create_rejects_unknown_template(service):
     from opensandbox_server.services.fast_sandbox.service import FastSandboxService
 
     with patch.object(K8sClient, "_load_config"):
-        k8s = K8sClient(KubernetesRuntimeConfig(informer_enabled=False))
+        k8s = K8sClient(KubernetesRuntimeConfig())
     sandbox_service = FastSandboxService(
         _config(), fastpath_client=_StubFastPath(), k8s_client=k8s, template_service=service
     )
@@ -551,7 +578,7 @@ def test_composite_routes_template_id_create_to_fsb(service, crs):
     crs.set_status("ns-1", record.crd_name, {"phase": "Succeeded", "manifestRef": "s3://b/m"})
 
     with patch.object(K8sClient, "_load_config"):
-        k8s = K8sClient(KubernetesRuntimeConfig(informer_enabled=False))
+        k8s = K8sClient(KubernetesRuntimeConfig())
     fsb = FastSandboxService(
         _config(runtime="kubernetes"),
         fastpath_client=_StubFastPath(),

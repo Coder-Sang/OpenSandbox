@@ -1,5 +1,5 @@
 #
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -76,6 +76,9 @@ FSB_PUBLISH_TARGET = os.getenv(
 FSB_DOMAIN = os.getenv("OPENSANDBOX_TEST_DOMAIN", "127.0.0.1:18080")
 FSB_PROTOCOL = os.getenv("OPENSANDBOX_TEST_PROTOCOL", "http")
 FSB_API_KEY = os.getenv("OPENSANDBOX_TEST_API_KEY", "fast-sandbox-env")
+# Baked into the SDK-built template (test_01b) and verified inside a guest
+# created from it: the golden image must export it at runtime.
+FSB_TEMPLATE_ENV = {"FSB_E2E_MARKER": "env-baked-ok"}
 
 pytestmark = pytest.mark.skipif(
     not FSB_TEMPLATE_ID,
@@ -148,16 +151,22 @@ async def _get_sandbox_info(manager: SandboxManager, sandbox_id: str):
 
 
 async def _http_reachable_on(sandbox: Sandbox, target: str) -> bool:
-    """HTTP-level enforcement probe: busybox wget performs a real HTTPS GET."""
+    """HTTP-level enforcement probe: a real HTTPS GET must succeed.
+
+    curl rather than busybox wget: the fsb-sandbox-golden test image (the
+    default template source of the integration environment) ships curl
+    but no wget, so wget probes fail with "not found" regardless of the
+    egress data plane.
+    """
     result = await sandbox.commands.run(
-        f"wget -T 8 -q -O /dev/null https://{target}"
+        f"curl -fsS -m 8 -o /dev/null https://{target}"
     )
     return result.error is None
 
 
 async def _http_blocked_on(sandbox: Sandbox, target: str) -> bool:
     result = await sandbox.commands.run(
-        f"wget -T 8 -q -O /dev/null https://{target}"
+        f"curl -fsS -m 8 -o /dev/null https://{target}"
     )
     return result.error is not None
 
@@ -238,16 +247,20 @@ class TestFsbE2E:
             len(paged.template_infos),
         )
 
-    @pytest.mark.timeout(900)
-    async def test_01b_template_crud(self, manager: SandboxManager) -> None:
+    @pytest.mark.timeout(1800)
+    async def test_01b_template_crud(
+        self, manager: SandboxManager, connection_config
+    ) -> None:
         """Full template lifecycle via the SDK: async build -> Succeeded ->
-        listed under its metadata filter -> deleted (404)."""
+        listed under its metadata filter -> env visible inside a guest created
+        from the template -> deleted (404)."""
         created = await manager.create_template(
             CreateTemplateRequest(
                 image=FSB_TEMPLATE_IMAGE,
                 publish=FSB_PUBLISH_TARGET,
                 format="native",
                 resource_limits={"cpu": "1", "memory": "512Mi", "disk": "2Gi"},
+                env=FSB_TEMPLATE_ENV,
                 readiness=TemplateReadiness(warmup_seconds=15),
                 metadata={"origin": "fast-sandbox-env-sdk"},
             )
@@ -272,10 +285,14 @@ class TestFsbE2E:
             )
             assert info.status.manifest_ref, "template manifestRef is empty"
             assert info.image == FSB_TEMPLATE_IMAGE
+            assert info.env == FSB_TEMPLATE_ENV, (
+                f"template env not persisted: {info.env}"
+            )
             logger.info(
-                "template build Succeeded: manifestRef=%s image=%s",
+                "template build Succeeded: manifestRef=%s image=%s env=%s",
                 info.status.manifest_ref,
                 info.image,
+                info.env,
             )
 
             paged = await manager.list_templates(
@@ -286,6 +303,29 @@ class TestFsbE2E:
                 "template listed under metadata filter (%d hit(s))",
                 len(paged.template_infos),
             )
+
+            # Runtime env verification: the env is baked into the golden
+            # image at build time, so a sandbox created from this template
+            # must see it in the guest process environment.
+            sandbox = await Sandbox.create_from_template(
+                created.template_id,
+                timeout=timedelta(hours=1),
+                ready_timeout=COLD_READY_TIMEOUT,
+                connection_config=connection_config,
+            )
+            try:
+                result = await sandbox.commands.run("echo $FSB_E2E_MARKER")
+                assert result.error is None
+                marker = result.logs.stdout[0].text.strip()
+                assert marker == FSB_TEMPLATE_ENV["FSB_E2E_MARKER"], (
+                    f"template env not visible in the guest: "
+                    f"expected {FSB_TEMPLATE_ENV['FSB_E2E_MARKER']!r}, got {marker!r}"
+                )
+                logger.info(
+                    "template env visible in guest: FSB_E2E_MARKER=%s", marker
+                )
+            finally:
+                await _kill_and_wait_gone(manager, sandbox.id)
         finally:
             await manager.delete_template(created.template_id)
             logger.info("template deleted: %s", created.template_id)

@@ -107,6 +107,7 @@ Thanks to these contributors ❤️
 ```bash
 # Platform (Kubernetes) — render the chart at this tag and apply
 git clone https://github.com/opensandbox-group/OpenSandbox
+cd OpenSandbox
 git checkout release-X.Y.Z
 helm dependency build manifests/charts/opensandbox  # package file:// sub-charts (not committed)
 helm template ./manifests/charts/opensandbox | kubectl apply -f -
@@ -122,6 +123,3 @@ go get github.com/alibaba/OpenSandbox/sdks/sandbox/go@vX.Y.Z
 # Run the server locally
 uvx opensandbox-server==X.Y.Z
 ```
-
-Verify what you installed against the BOM: see
-[Release Verification](/community/release-verification).

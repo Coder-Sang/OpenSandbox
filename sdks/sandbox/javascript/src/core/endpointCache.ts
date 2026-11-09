@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -106,11 +106,16 @@ export class EndpointCache {
         if (this.generation === genBefore) {
           this.put(sandboxId, port, useServerProxy, ep);
         }
-        this.inflight.delete(key);
+        // Only clear our own entry (an invalidate() may have replaced it).
+        if (this.inflight.get(key) === promise) {
+          this.inflight.delete(key);
+        }
         return this.cloneEndpoint(ep);
       })
       .catch((err) => {
-        this.inflight.delete(key);
+        if (this.inflight.get(key) === promise) {
+          this.inflight.delete(key);
+        }
         throw err;
       });
 

@@ -1,5 +1,5 @@
 /*
- * Copyright 2025 Alibaba Group Holding Ltd.
+ * Copyright 2025 The OpenSandbox Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -116,6 +116,11 @@ class SandboxTest {
     @Test
     fun `files should return filesystem service`() {
         assertSame(fileSystemService, sandbox.files())
+    }
+
+    @Test
+    fun `filesWithIdentity rejects adapters without identity capability`() {
+        assertThrows(UnsupportedOperationException::class.java) { sandbox.filesWithIdentity(1, 2) }
     }
 
     @Test

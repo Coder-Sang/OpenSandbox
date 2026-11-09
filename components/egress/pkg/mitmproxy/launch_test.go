@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,6 +15,7 @@
 package mitmproxy
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -107,6 +108,50 @@ func TestBuildMitmdumpArgsSkipsEmptyScriptPaths(t *testing.T) {
 		}
 	}
 	require.Equal(t, []string{systemScriptPath, "/scripts/auth.py", "/scripts/logging.py"}, scripts)
+}
+
+func TestBuildMitmdumpArgsUpstreamProxyScriptOrdered(t *testing.T) {
+	t.Setenv("OPENSANDBOX_EGRESS_UPSTREAM_PROXY", "https://proxy.example.com:8443")
+	args := buildMitmdumpArgs(Config{
+		ListenPort:  18081,
+		ScriptPaths: []string{"/scripts/auth.py"},
+	})
+	scripts := []string{}
+	for i, a := range args {
+		if a == "-s" {
+			scripts = append(scripts, args[i+1])
+		}
+	}
+	require.Equal(t, []string{systemScriptPath, upstreamProxyScriptPath, "/scripts/auth.py"}, scripts)
+}
+
+func TestBuildMitmdumpArgsNoUpstreamProxyKeepsOrder(t *testing.T) {
+	args := buildMitmdumpArgs(Config{
+		ListenPort:  18081,
+		ScriptPaths: []string{"/scripts/auth.py"},
+	})
+	scripts := []string{}
+	for i, a := range args {
+		if a == "-s" {
+			scripts = append(scripts, args[i+1])
+		}
+	}
+	require.Equal(t, []string{systemScriptPath, "/scripts/auth.py"}, scripts)
+	require.NotContains(t, args, upstreamProxyScriptPath)
+}
+
+func TestLaunchRejectsInvalidUpstreamProxy(t *testing.T) {
+	t.Setenv("OPENSANDBOX_EGRESS_UPSTREAM_PROXY", "not-a-url")
+	_, err := Launch(Config{ListenPort: 18081})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "OPENSANDBOX_EGRESS_UPSTREAM_PROXY")
+}
+
+func TestLaunchRejectsUpstreamAuthWithoutProxy(t *testing.T) {
+	t.Setenv("OPENSANDBOX_EGRESS_UPSTREAM_PROXY_AUTH", "Basic dXNlcjpwYXNz")
+	_, err := Launch(Config{ListenPort: 18081})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "OPENSANDBOX_EGRESS_UPSTREAM_PROXY_AUTH")
 }
 
 func TestBuildMitmdumpEnvSetsMitmproxyHome(t *testing.T) {
@@ -234,4 +279,21 @@ func TestCredentialProxyMessageRejectsNonProxyLines(t *testing.T) {
 	require.False(t, ok)
 	_, ok = credentialProxyMessage("")
 	require.False(t, ok)
+}
+
+func TestBuildMitmdumpArgsTrustDirAndExtraCABothSet(t *testing.T) {
+	t.Setenv("OPENSANDBOX_EGRESS_MITMPROXY_UPSTREAM_TRUST_DIR", "/etc/ssl/upstream")
+	t.Setenv("OPENSANDBOX_EGRESS_MITMPROXY_UPSTREAM_EXTRA_CA", "/etc/ssl/certs/opensandbox-upstream-extra-ca.pem")
+	args := buildMitmdumpArgs(Config{ListenPort: 18081})
+	joined := strings.Join(args, "\x00")
+	require.Contains(t, joined, "--set\x00ssl_verify_upstream_trusted_confdir=/etc/ssl/upstream")
+	require.Contains(t, joined, "--set\x00ssl_verify_upstream_trusted_ca=/etc/ssl/certs/opensandbox-upstream-extra-ca.pem")
+}
+
+func TestBuildMitmdumpArgsExtraCAWhitespaceOnlyOmitted(t *testing.T) {
+	t.Setenv("OPENSANDBOX_EGRESS_MITMPROXY_UPSTREAM_EXTRA_CA", "   ")
+	args := buildMitmdumpArgs(Config{ListenPort: 18081})
+	for _, a := range args {
+		require.NotContains(t, a, "ssl_verify_upstream_trusted_ca")
+	}
 }

@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -55,6 +55,25 @@ type Client struct {
 	// timeout (see streamHTTPClient).
 	streamClient *http.Client
 	streamOnce   sync.Once
+}
+
+func (c *Client) cloneWithBaseURL(baseURL string) *Client {
+	// Streaming state contains sync.Once and must never be copied from a live client.
+	cloned := &Client{
+		baseURL:    baseURL,
+		apiKey:     c.apiKey,
+		authHeader: c.authHeader,
+		httpClient: c.httpClient,
+		timeout:    c.timeout,
+		retry:      c.retry,
+	}
+	if c.headers != nil {
+		cloned.headers = make(map[string]string, len(c.headers))
+		for k, v := range c.headers {
+			cloned.headers[k] = v
+		}
+	}
+	return cloned
 }
 
 // streamHTTPClient returns a dedicated HTTP client for SSE streaming.

@@ -1,5 +1,5 @@
 /*
- * Copyright 2025 Alibaba Group Holding Ltd.
+ * Copyright 2025 The OpenSandbox Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -281,4 +281,25 @@ interface Filesystem {
      * @throws SandboxException if the operation fails
      */
     fun readFileInfo(paths: List<String>): Map<String, EntryInfo>
+}
+
+/** Filesystem capability for requests scoped to an explicit Linux identity. */
+interface IdentityFilesystem : Filesystem {
+    companion object {
+        const val MAX_IDENTITY_ID: Long = 4294967294L
+    }
+
+    /**
+     * Returns an independent filesystem client bound to explicit Linux credentials.
+     * Implementations must validate both IDs before issuing requests and must never
+     * fall back to the default identity when an identity operation is unsupported.
+     *
+     * @param uid User ID in 0..[MAX_IDENTITY_ID], inclusive
+     * @param gid Group ID in 0..[MAX_IDENTITY_ID], inclusive
+     * @throws IllegalArgumentException if either ID is outside the valid range
+     */
+    fun withIdentity(
+        uid: Long,
+        gid: Long,
+    ): Filesystem
 }

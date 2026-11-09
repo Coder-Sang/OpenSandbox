@@ -1,4 +1,4 @@
-# Copyright 2025 Alibaba Group Holding Ltd.
+# Copyright 2025 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -19,9 +19,10 @@ Abstract workload provider interface for Kubernetes resources.
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Dict, List, Any, Optional
+from typing import Callable, Dict, List, Any, Optional
 
 from opensandbox_server.api.schema import Endpoint, ImageSpec, NetworkPolicy, PlatformSpec, Volume
+from opensandbox_server.config import EgressUpstreamProxyConfig
 
 
 @dataclass(frozen=True)
@@ -38,16 +39,17 @@ class EgressWorkloadSettings:
     resource_requests: Optional[Dict[str, str]]
     resource_limits: Optional[Dict[str, str]]
     otlp_endpoint: Optional[str] = None
+    upstream_proxy: Optional[EgressUpstreamProxyConfig] = None
 
 
 class WorkloadProvider(ABC):
     """
     Abstract interface for managing Kubernetes workload resources.
-    
+
     This abstraction allows supporting different K8s resource types
     (Pod, Job, StatefulSet, etc.) with a unified interface.
     """
-    
+
     @abstractmethod
     def create_workload(
         self,
@@ -93,21 +95,27 @@ class WorkloadProvider(ABC):
             ApiException: If creation fails
         """
         pass
-    
+
+    def subscribe_workload(
+        self, sandbox_id: str, namespace: str, callback: Callable[[str, Dict[str, Any]], None]
+    ) -> Optional[Callable[[], None]]:
+        """Return an unsubscribe callback, or None to use periodic checks only."""
+        return None
+
     @abstractmethod
     def get_workload(self, sandbox_id: str, namespace: str) -> Optional[Any]:
         """
         Get workload by sandbox ID.
-        
+
         Args:
             sandbox_id: Unique sandbox identifier
             namespace: Kubernetes namespace
-            
+
         Returns:
             Workload object or None if not found
         """
         pass
-    
+
     @abstractmethod
     def delete_workload(self, sandbox_id: str, namespace: str) -> None:
         """
@@ -121,62 +129,78 @@ class WorkloadProvider(ABC):
             ApiException: If deletion fails
         """
         pass
-    
+
     @abstractmethod
     def list_workloads(self, namespace: str, label_selector: str) -> List[Any]:
         """
         List workloads matching label selector.
-        
+
         Args:
             namespace: Kubernetes namespace
             label_selector: Label selector query
-            
+
         Returns:
             List of workload objects
         """
         pass
-    
+
+    def list_workloads_all_namespaces(self, label_selector: str) -> List[Any]:
+        """
+        List workloads matching label selector across all namespaces.
+
+        Used by the cross-namespace sandbox lookup fallback. Providers
+        without cluster-wide read access may keep this default; the
+        fallback then simply finds nothing.
+
+        Args:
+            label_selector: Label selector query
+
+        Returns:
+            List of workload objects
+        """
+        return []
+
     @abstractmethod
     def update_expiration(self, sandbox_id: str, namespace: str, expires_at: datetime) -> None:
         """
         Update workload expiration time.
-        
+
         Args:
             sandbox_id: Unique sandbox identifier
             namespace: Kubernetes namespace
             expires_at: New expiration time
-            
+
         Raises:
             Exception: If update fails
         """
         pass
-    
+
     @abstractmethod
     def get_expiration(self, workload: Any) -> Optional[datetime]:
         """
         Get expiration time from workload.
-        
+
         Args:
             workload: Workload object
-            
+
         Returns:
             Expiration datetime or None if not set
         """
         pass
-    
+
     @abstractmethod
     def get_status(self, workload: Any) -> Dict[str, Any]:
         """
         Get status from workload object.
-        
+
         Args:
             workload: Workload object
-            
+
         Returns:
             Dict with state, reason, message, last_transition_at
         """
         pass
-    
+
     @abstractmethod
     def get_endpoint_info(self, workload: Any, port: int, sandbox_id: str) -> Optional[Endpoint]:
         """

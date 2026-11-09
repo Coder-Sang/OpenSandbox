@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 // 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -239,6 +239,13 @@ export interface SandboxConnectOptions {
    */
   connectionConfig?: ConnectionConfig | ConnectionConfigOptions;
   /**
+   * Declare that the SDK owns (and may close) the connection config's
+   * transport on cleanup paths. Set when the config's transport was
+   * allocated for this connect (e.g. `sandbox.resume()`), or to transfer
+   * ownership of a caller-initialized config.
+   */
+  ownsTransport?: boolean;
+  /**
    * Advanced override: inject a custom adapter factory (custom transports, dependency injection).
    */
   adapterFactory?: AdapterFactory;
@@ -448,13 +455,26 @@ export class Sandbox {
       lifecycleBaseUrl: string;
       execdBaseUrl: string;
       egress: Egress;
+      ownsTransport: boolean;
     }
   >();
+
+  /**
+   * Return an independent filesystem client using explicit Linux credentials.
+   * Requires identity-aware Execd; unsupported servers never trigger fallback.
+   */
+  filesWithIdentity(uid: number, gid: number): SandboxFiles {
+    if (typeof this.files.withIdentity !== "function") {
+      throw new Error("The selected filesystem adapter does not support execution identity");
+    }
+    return this.files.withIdentity(uid, gid);
+  }
 
   private constructor(opts: {
     id: SandboxId;
     connectionConfig: ConnectionConfig;
     adapterFactory: AdapterFactory;
+    ownsTransport: boolean;
     lifecycleBaseUrl: string;
     execdBaseUrl: string;
     sandboxes: Sandboxes;
@@ -480,6 +500,7 @@ export class Sandbox {
       lifecycleBaseUrl: opts.lifecycleBaseUrl,
       execdBaseUrl: opts.execdBaseUrl,
       egress: opts.egress,
+      ownsTransport: opts.ownsTransport,
     });
 
     this.origin = opts.origin ?? SandboxOrigin.UNKNOWN;
@@ -542,7 +563,9 @@ export class Sandbox {
         lifecycleBaseUrl,
       }).sandboxes;
     } catch (err) {
-      await connectionConfig.closeTransport();
+      if (connectionConfig !== baseConnectionConfig) {
+        await connectionConfig.closeTransport();
+      }
       throw err;
     }
 
@@ -630,6 +653,7 @@ export class Sandbox {
         id: sandboxId,
         connectionConfig,
         adapterFactory,
+        ownsTransport: connectionConfig !== baseConnectionConfig,
         lifecycleBaseUrl,
         execdBaseUrl,
         sandboxes,
@@ -679,7 +703,9 @@ export class Sandbox {
           } catch {
             // Preserve the caller's abort error if sandbox cleanup fails.
           } finally {
-            await connectionConfig.closeTransport().catch(() => undefined);
+            if (connectionConfig !== baseConnectionConfig) {
+              await connectionConfig.closeTransport().catch(() => undefined);
+            }
           }
         })();
         throw err;
@@ -691,7 +717,9 @@ export class Sandbox {
           // Preserve the original creation error if sandbox cleanup fails.
         }
       }
-      await connectionConfig.closeTransport();
+      if (connectionConfig !== baseConnectionConfig) {
+        await connectionConfig.closeTransport();
+      }
       throw err;
     }
   }
@@ -738,7 +766,9 @@ export class Sandbox {
         lifecycleBaseUrl,
       }).sandboxes;
     } catch (err) {
-      await connectionConfig.closeTransport();
+      if (connectionConfig !== baseConnectionConfig) {
+        await connectionConfig.closeTransport();
+      }
       throw err;
     }
 
@@ -797,6 +827,7 @@ export class Sandbox {
         id: sandboxId,
         connectionConfig,
         adapterFactory,
+        ownsTransport: connectionConfig !== baseConnectionConfig,
         lifecycleBaseUrl,
         execdBaseUrl,
         sandboxes,
@@ -846,7 +877,9 @@ export class Sandbox {
           } catch {
             // Preserve the caller's abort error if sandbox cleanup fails.
           } finally {
-            await connectionConfig.closeTransport().catch(() => undefined);
+            if (connectionConfig !== baseConnectionConfig) {
+              await connectionConfig.closeTransport().catch(() => undefined);
+            }
           }
         })();
         throw err;
@@ -858,7 +891,9 @@ export class Sandbox {
           // Preserve the original creation error if sandbox cleanup fails.
         }
       }
-      await connectionConfig.closeTransport();
+      if (connectionConfig !== baseConnectionConfig) {
+        await connectionConfig.closeTransport();
+      }
       throw err;
     }
   }
@@ -872,6 +907,10 @@ export class Sandbox {
         ? opts.connectionConfig
         : new ConnectionConfig(opts.connectionConfig);
     const connectionConfig = baseConnectionConfig.withTransportIfMissing();
+    // Reference equality can't tell a resume-allocated config from a
+    // caller-initialized one; an explicit option wins.
+    const ownsTransport =
+      opts.ownsTransport === true || connectionConfig !== baseConnectionConfig;
     const adapterFactory = opts.adapterFactory ?? createDefaultAdapterFactory();
     const lifecycleBaseUrl = connectionConfig.getBaseUrl();
 
@@ -882,7 +921,9 @@ export class Sandbox {
         lifecycleBaseUrl,
       }).sandboxes;
     } catch (err) {
-      await connectionConfig.closeTransport();
+      if (ownsTransport) {
+        await connectionConfig.closeTransport();
+      }
       throw err;
     }
 
@@ -924,6 +965,7 @@ export class Sandbox {
         id: opts.sandboxId,
         connectionConfig,
         adapterFactory,
+        ownsTransport,
         lifecycleBaseUrl,
         execdBaseUrl,
         sandboxes,
@@ -944,10 +986,14 @@ export class Sandbox {
       return sbx;
     } catch (err) {
       if (opts.signal?.aborted) {
-        void connectionConfig.closeTransport().catch(() => undefined);
+        if (ownsTransport) {
+          void connectionConfig.closeTransport().catch(() => undefined);
+        }
         throw err;
       }
-      await connectionConfig.closeTransport();
+      if (ownsTransport) {
+        await connectionConfig.closeTransport();
+      }
       throw err;
     }
   }
@@ -990,9 +1036,13 @@ export class Sandbox {
       validatePollingInterval(opts.healthCheckPollingInterval);
     }
     await this.sandboxes.resumeSandbox(this.id);
+    const resumeConfig = this.connectionConfig.withFreshTransport();
     return await Sandbox.connect({
       sandboxId: this.id,
-      connectionConfig: this.connectionConfig,
+      // Allocated here for the resumed instance; without ownsTransport the
+      // dispatcher would leak (connect marks initialized configs caller-owned).
+      connectionConfig: resumeConfig,
+      ownsTransport: true,
       adapterFactory: Sandbox._priv.get(this)!.adapterFactory,
       skipHealthCheck: opts.skipHealthCheck ?? false,
       readyTimeoutSeconds: opts.readyTimeoutSeconds,
@@ -1012,22 +1062,23 @@ export class Sandbox {
         ? opts.connectionConfig
         : new ConnectionConfig(opts.connectionConfig);
     const adapterFactory = opts.adapterFactory ?? createDefaultAdapterFactory();
-    const resumeConnectionConfig = baseConnectionConfig.withTransportIfMissing();
-    const lifecycleBaseUrl = resumeConnectionConfig.getBaseUrl();
+    // Resume through a dedicated transport released right after the call.
+    const resumeOnlyConfig = baseConnectionConfig.withFreshTransport();
+    const lifecycleBaseUrl = resumeOnlyConfig.getBaseUrl();
 
     let sandboxes: Sandboxes;
     try {
       sandboxes = adapterFactory.createLifecycleStack({
-        connectionConfig: resumeConnectionConfig,
+        connectionConfig: resumeOnlyConfig,
         lifecycleBaseUrl,
       }).sandboxes;
       await sandboxes.resumeSandbox(opts.sandboxId);
     } catch (err) {
-      await resumeConnectionConfig.closeTransport();
+      await resumeOnlyConfig.closeTransport();
       throw err;
     }
 
-    await resumeConnectionConfig.closeTransport();
+    await resumeOnlyConfig.closeTransport();
     return await Sandbox.connect({ ...opts, connectionConfig: baseConnectionConfig, adapterFactory });
   }
 
@@ -1038,13 +1089,22 @@ export class Sandbox {
 
   /**
    * Release any client-side resources (e.g. Node.js HTTP agents) owned by this Sandbox instance.
+   *
+   * The transport is closed only when the SDK allocated it for this
+   * instance; caller-initialized `ConnectionConfig`s stay caller-owned —
+   * call `connectionConfig.closeTransport()` yourself when done.
    */
   async close(): Promise<void> {
-    await this.connectionConfig.closeTransport();
+    // Shared (caller-initialized) transports are closed by their owner.
+    if (Sandbox._priv.get(this)!.ownsTransport) {
+      await this.connectionConfig.closeTransport();
+    }
   }
 
   /**
    * Renew expiration by setting expiresAt to now + timeoutSeconds.
+   * This may shorten or extend the remaining lifetime. The creation-time
+   * server timeout limit does not apply.
    */
   async renew(timeoutSeconds: number): Promise<RenewSandboxExpirationResponse> {
     const expiresAt = new Date(

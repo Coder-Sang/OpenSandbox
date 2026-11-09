@@ -1,4 +1,4 @@
-// Copyright 2025 Alibaba Group Holding Ltd.
+// Copyright 2025 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -705,7 +705,13 @@ func (r *PoolReconciler) doAllocate(ctx context.Context, pool *sandboxv1alpha1.P
 	toSyncMap := r.getLatestAllocated(ctx, pool, batchSandboxes, toAllocate)
 
 	// 2. Concurrently sync each sandbox's Allocated annotation (AddFinalizer is called inside SyncSandboxAllocation).
-	return r.syncSandboxConcurrently(ctx, batchSandboxes, toSyncMap, r.Allocator.SyncSandboxAllocation, "allocated")
+	syncStart := time.Now()
+	err := r.syncSandboxConcurrently(ctx, batchSandboxes, toSyncMap, r.Allocator.SyncSandboxAllocation, "allocated")
+	// Skip no-op rounds (nothing to sync) so idle reconciles don't skew the histogram.
+	if len(toSyncMap) > 0 {
+		recordAllocatorSyncAllocResultDuration(ctx, pool, time.Since(syncStart), err)
+	}
+	return err
 }
 
 // getLatestAllocated computes the latest allocated pods for each sandbox by merging current allocation with new pods to allocate.
@@ -760,9 +766,12 @@ func (r *PoolReconciler) syncSandboxConcurrently(ctx context.Context, batchSandb
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			if err := syncFn(ctx, sandbox, pods); err != nil {
-				log.Error(err, "Failed to sync sandbox "+label, "sandbox", sandbox.Name)
-				errCh <- err
+			syncStart := time.Now()
+			syncErr := syncFn(ctx, sandbox, pods)
+			recordAllocatorSyncSingleAllocResultDuration(ctx, sandbox, time.Since(syncStart), syncErr)
+			if syncErr != nil {
+				log.Error(syncErr, "Failed to sync sandbox "+label, "sandbox", sandbox.Name)
+				errCh <- syncErr
 			}
 		}()
 	}
@@ -1002,7 +1011,9 @@ func (r *PoolReconciler) scheduleSandbox(ctx context.Context, pool *sandboxv1alp
 		Pool:      pool,
 		Pods:      pods,
 	}
+	scheduleStart := time.Now()
 	allocAction, err := r.Allocator.Schedule(ctx, spec)
+	recordAllocatorScheduleDuration(ctx, pool, time.Since(scheduleStart), err)
 	if err != nil {
 		r.Recorder.Eventf(pool, corev1.EventTypeWarning, eventReasonAllocationFailed, "Failed to schedule sandboxes: %v", err)
 		return nil, err

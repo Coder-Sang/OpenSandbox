@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -138,6 +138,9 @@ func LookupUser(userName string) (uid, gid uint32, home string, err error) {
 
 // Launch starts mitmdump in the background; check Wait/GracefulShutdown on the returned Running.
 func Launch(cfg Config) (*Running, error) {
+	if err := validateUpstreamProxyEnv(); err != nil {
+		return nil, fmt.Errorf("mitmproxy: %w", err)
+	}
 	if runtime.GOOS != "linux" {
 		return nil, fmt.Errorf("mitmproxy: transparent mitmdump is only supported on linux")
 	}
@@ -240,12 +243,18 @@ func buildMitmdumpArgs(cfg Config) []string {
 	if trustDir := strings.TrimSpace(os.Getenv(constants.EnvMitmproxyUpstreamTrustDir)); trustDir != "" {
 		args = append(args, "--set", "ssl_verify_upstream_trusted_confdir="+trustDir)
 	}
+	if extraCA := strings.TrimSpace(os.Getenv(constants.EnvMitmproxyUpstreamExtraCA)); extraCA != "" {
+		args = append(args, "--set", "ssl_verify_upstream_trusted_ca="+extraCA)
+	}
 
 	if constants.IsTruthy(os.Getenv(constants.EnvMitmproxySslInsecure)) {
 		args = append(args, "--set", "ssl_insecure=true")
 	}
 
 	args = append(args, "-s", systemScriptPath)
+	if strings.TrimSpace(os.Getenv(constants.EnvUpstreamProxy)) != "" {
+		args = append(args, "-s", upstreamProxyScriptPath)
+	}
 	for _, p := range cfg.ScriptPaths {
 		if s := strings.TrimSpace(p); s != "" {
 			args = append(args, "-s", s)

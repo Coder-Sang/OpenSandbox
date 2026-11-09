@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -41,7 +41,8 @@ type ConnectionConfig struct {
 	UseServerProxy bool
 
 	// RequestTimeout is the timeout for non-streaming HTTP requests.
-	// Zero means no timeout. Defaults to DefaultRequestTimeout.
+	// Zero means DefaultRequestTimeout (30s); there is currently no way to
+	// select "no timeout".
 	RequestTimeout time.Duration
 
 	// Headers are custom HTTP headers added to all requests.
