@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 // 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -149,11 +149,11 @@ export class CodeInterpreter {
     if (typeof this.codes.ping === "function") {
       return await this.codes.ping(signal);
     }
-    const { error } = await this.execdPingClient().GET("/ping", {
+    const { response } = await this.execdPingClient().GET("/ping", {
       parseAs: "text",
       signal,
     });
-    return error == null;
+    return response.ok;
   }
 
   private execdPingClient() {

@@ -59,13 +59,16 @@ jobs:
         run: |
           go test ./...
 
-      - name: Run timed nft element regression
+      - name: Run privileged nft regressions
         working-directory: components/egress
         run: |
           sudo apt-get update
           sudo apt-get install -y nftables
           go test -c -o /tmp/egress-nft.test ./pkg/nftables
-          sudo env OPENSANDBOX_NFT_TEST=1 /tmp/egress-nft.test -test.run '^TestDynamicElementRenewal$' -test.v
+          for test_name in TestDynamicElementRenewal TestNftQuiescenceAfterCommittedStaticError; do
+            /tmp/egress-nft.test -test.list "^${test_name}$" | grep -Fx "$test_name"
+          done
+          sudo env OPENSANDBOX_NFT_TEST=1 /tmp/egress-nft.test -test.run '^(TestDynamicElementRenewal|TestNftQuiescenceAfterCommittedStaticError)$' -test.v
 
       - name: Run mitmscripts unit and runtime tests
         working-directory: components/egress
@@ -106,6 +109,20 @@ jobs:
         run: |
           chmod +x tests/smoke-dns-upstream-probe.sh
           ./tests/smoke-dns-upstream-probe.sh
+
+      - name: Run dns upstream blackhole test
+        working-directory: components/egress
+        run: |
+          chmod +x tests/smoke-dns-upstream-blackhole.sh
+          ./tests/smoke-dns-upstream-blackhole.sh
+
+      - name: Upload blackhole smoke egress log
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: blackhole-smoke-egress-log
+          path: components/egress/tests/egress-smoke-dns-upstream-blackhole.egress.log
+          retention-days: 5
 
   fast-sandbox-smoke:
     needs: changes

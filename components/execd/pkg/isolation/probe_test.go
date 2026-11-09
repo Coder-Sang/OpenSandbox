@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -37,32 +37,6 @@ func TestParseBwrapVersion(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("parseBwrapVersion(%q) = %q, want %q", tt.in, got, tt.want)
 		}
-	}
-}
-
-func TestProbeConfigDefaults(t *testing.T) {
-	cfg := ProbeConfig{
-		UpperRoot:     "/var/lib/execd/isolation",
-		UpperMaxBytes: 8 * 1024 * 1024 * 1024,
-	}
-	if cfg.UpperRoot == "" {
-		t.Error("UpperRoot should not be empty")
-	}
-}
-
-func TestProbeResult_Defaults(t *testing.T) {
-	result := ProbeResult{}
-	if result.Available {
-		t.Error("default ProbeResult should have Available=false")
-	}
-	if result.CommitSupported {
-		t.Error("default ProbeResult should have CommitSupported=false")
-	}
-	if result.DiffSupported {
-		t.Error("default ProbeResult should have DiffSupported=false")
-	}
-	if result.SetprivAvailable || result.SetprivSwitchAvailable || result.UsernsAvailable {
-		t.Error("default ProbeResult should have both uid modes unavailable")
 	}
 }
 

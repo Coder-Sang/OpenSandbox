@@ -1,5 +1,5 @@
 /*
- * Copyright 2026 Alibaba Group Holding Ltd.
+ * Copyright 2026 The OpenSandbox Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -49,6 +49,7 @@ internal object TemplateModelConverter {
             publish = this.publish,
             resourceLimits = this.resourceLimits,
             entrypoint = this.entrypoint,
+            env = this.env,
             metadata = this.metadata,
             readiness = this.readiness?.toApiFsbTemplateReadiness(),
             format =
@@ -80,6 +81,7 @@ internal object TemplateModelConverter {
             updatedAt = this.updatedAt,
             resourceLimits = this.resourceLimits,
             entrypoint = this.entrypoint,
+            env = this.env,
             metadata = this.metadata,
             readiness = this.readiness?.toTemplateReadiness(),
         )

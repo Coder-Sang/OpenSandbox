@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -65,9 +65,11 @@ const (
 
 // Bounded operation values for RecordNftablesUpdateFailed.
 const (
-	NftOpStaticApply = "static_apply"
-	NftOpDynamicAdd  = "dynamic_add"
-	NftOpRemove      = "remove"
+	NftOpStaticApply       = "static_apply"
+	NftOpDynamicAdd        = "dynamic_add"
+	NftOpRemove            = "remove"
+	NftOpUpstreamProxyAdd  = "upstream_proxy_add"
+	NftOpUpstreamProxySync = "upstream_proxy_sync"
 	// Fast Sandbox-profile operations (OSEP-0022).
 	NftOpReset     = "reset"
 	NftOpDenyFirst = "deny_first"

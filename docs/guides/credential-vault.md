@@ -126,7 +126,7 @@ Use one of these operator patterns instead:
 - keep mesh injection enabled, but do not enable `credentialProxy` / Credential Vault for those pods
 - move outbound policy and credential handling to a platform mechanism outside the sandbox pod if mesh injection is mandatory
 
-For the underlying egress-sidecar limitation, see [Egress](/components/egress#service-mesh-compatibility).
+For the underlying egress-sidecar limitation, see [Egress](/architecture/network/egress#service-mesh-compatibility).
 
 Credential bindings are intentionally precise. A default-deny egress policy is
 required. Use a narrow path match, for example `/v1/*` for Anthropic API calls.
@@ -499,6 +499,24 @@ curl -fsS https://api.example.com/v1/projects/123/variables
   metadata.
 - Keep fake environment variables when a CLI refuses to start without a key; the
   vault-injected header is what authenticates the outbound request.
+
+## Path Ambiguity Guard
+
+The sidecar inspects the request path only for requests that would receive
+injected credentials. A request is rejected with `403` when its path contains
+dot-segments (`..`) or backslashes (`\`, `%5c`) at any percent-decoding depth,
+or when percent-decoding does not converge within the guard's iteration bound —
+these are traversal or path-confusion primitives that legitimate clients do not
+send.
+
+Encoded slashes (`%2f`, including nested forms like `%252f`) are allowed when
+every decoding depth of the path matches the same credential binding. This
+keeps legitimate encoded wire formats working — npm scoped registry paths
+(`/@scope%2fname`) and artifact-store download URLs whose coordinates are
+double-encoded (for example `pkg%252F1.0`, as produced by some internal pypi
+proxies) — while a path whose decoding would cross a binding boundary is still
+rejected before any credential is injected. Requests outside every binding
+scope pass through untouched.
 
 ## Migrating From `ports`
 

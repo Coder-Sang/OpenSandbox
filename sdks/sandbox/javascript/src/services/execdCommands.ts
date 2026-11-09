@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 // 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -31,6 +31,26 @@ export interface ExecdCommands {
    * Convenience: run a command, consume the stream, and build a structured execution result.
    */
   run(command: string | string[], opts?: RunCommandOpts, handlers?: ExecutionHandlers, signal?: AbortSignal): Promise<CommandExecution>;
+
+  /**
+   * Persist an environment variable for future commands and sessions.
+   *
+   * Appends `KEY=VALUE` to the sandbox env file that the runtime loads for every
+   * command and session (the file pointed to by the sandbox's `EXECD_ENVS`
+   * variable, resolved inside the sandbox). Keys must match
+   * `[A-Za-z_][A-Za-z0-9_]*`; values are stored verbatim with proper escaping.
+   * The file is append-only: when a key is written multiple times, the last
+   * entry wins.
+   *
+   * @param key Environment variable name
+   * @param value Environment variable value
+   * @remarks Values without a single quote are stored verbatim; values
+   * containing a single quote use the env file's double-quoted form, in which
+   * shell-style `$NAME` sequences may be expanded when the runtime loads the
+   * file.
+   * @throws If arguments are invalid or the sandbox fails to persist the variable
+   */
+  setEnv(key: string, value: string): Promise<void>;
 
   /**
    * Interrupt the current execution in the given context/session.

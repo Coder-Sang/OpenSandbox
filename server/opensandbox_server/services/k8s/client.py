@@ -1,4 +1,4 @@
-# Copyright 2025 Alibaba Group Holding Ltd.
+# Copyright 2025 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -20,7 +20,7 @@ operations. All API access goes through this class.
 import logging
 import threading
 from functools import partial
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Callable, Any, Dict, List, Optional, Tuple
 
 from kubernetes import client, config
 from kubernetes.client import (
@@ -81,6 +81,14 @@ class K8sClient:
                 config.load_kube_config(config_file=self.config.kubeconfig_path)
             else:
                 config.load_incluster_config()
+            if self.config.insecure_skip_tls_verify:
+                logger.warning(
+                    "kubernetes.insecure_skip_tls_verify is enabled; TLS certificate "
+                    "verification for the Kubernetes API server is disabled"
+                )
+                cfg = client.Configuration.get_default_copy()
+                cfg.verify_ssl = False
+                client.Configuration.set_default(cfg)
         except Exception as e:
             raise Exception(f"Failed to load Kubernetes configuration: {e}") from e
 
@@ -111,8 +119,6 @@ class K8sClient:
         """Return an existing informer without starting one. Used by write paths
         to invalidate cache entries; never auto-create on writes since list paths
         own the lazy-start contract."""
-        if not self.config.informer_enabled:
-            return None
         key: _InformerKey = (group, version, plural, namespace)
         with self._informers_lock:
             return self._informers.get(key)
@@ -126,9 +132,6 @@ class K8sClient:
         event_handler=None,
     ) -> Optional[WorkloadInformer]:
         """Return the informer for this resource+namespace, starting it lazily."""
-        if not self.config.informer_enabled:
-            return None
-
         key: _InformerKey = (group, version, plural, namespace)
         with self._informers_lock:
             informer = self._informers.get(key)
@@ -172,10 +175,26 @@ class K8sClient:
 
         The handler fires for every watch event and for every item of an
         initial or reconnecting LIST snapshot, turning the informer into an
-        event reactor. Returns None when informers are disabled. The watch
-        stops with ``stop_informers``.
+        event reactor. Returns None when the informer cannot be started. The
+        watch stops with ``stop_informers``.
         """
         return self._get_informer(group, version, plural, namespace, event_handler)
+
+
+    def subscribe_custom_objects(
+        self,
+        group: str,
+        version: str,
+        namespace: str,
+        plural: str,
+        names: List[str],
+        callback: Callable[[str, Dict[str, Any]], None],
+    ) -> Optional[Callable[[], None]]:
+        """Reuse the shared informer to notify a waiter about named resources."""
+        informer = self._get_informer(group, version, plural, namespace)
+        if informer is None:
+            return None
+        return informer.subscribe(names, callback)
 
     def create_custom_object(
         self,
@@ -311,6 +330,34 @@ class K8sClient:
             for informer in self._informers.values():
                 informer.stop()
             self._informers.clear()
+
+    def list_custom_objects_all_namespaces(
+        self,
+        group: str,
+        version: str,
+        plural: str,
+        label_selector: str = "",
+    ) -> List[Dict[str, Any]]:
+        """List custom resources across all namespaces, returning the items list.
+
+        Direct API call only (cluster-scoped informers are not maintained).
+        Used as a fallback to locate a sandbox when no namespace is known.
+        """
+        if self._read_limiter:
+            self._read_limiter.acquire()
+        try:
+            resp = self.get_custom_objects_api().list_cluster_custom_object(
+                group=group,
+                version=version,
+                plural=plural,
+                label_selector=label_selector,
+                _request_timeout=(10, 30),
+            )
+            return resp.get("items", [])
+        except ApiException as e:
+            if e.status == 404:
+                return []
+            raise
 
     def delete_custom_object(
         self,

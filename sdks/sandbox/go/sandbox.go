@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -474,7 +474,9 @@ func (s *Sandbox) Ping(ctx context.Context) error {
 	return s.execd.Ping(ctx)
 }
 
-// Renew extends the sandbox's expiration by the given duration from now.
+// Renew sets the sandbox's expiration to the given duration from now.
+// This may shorten or extend the remaining lifetime. The creation-time
+// server timeout limit does not apply.
 func (s *Sandbox) Renew(ctx context.Context, duration time.Duration) (*RenewExpirationResponse, error) {
 	return s.lifecycle.RenewExpiration(ctx, s.id, time.Now().Add(duration))
 }

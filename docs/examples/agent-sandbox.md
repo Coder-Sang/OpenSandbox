@@ -46,6 +46,35 @@ use `Ready`, `selector`, `podIPs`, and `serviceFQDN`.
 
 OpenSandbox's own BatchSandbox API remains `sandbox.opensandbox.io/v1alpha1`.
 
+## Pause and resume
+
+This provider supports the standard `POST /v1/sandboxes/{id}/pause` and
+`POST /v1/sandboxes/{id}/resume` endpoints. Both are implemented by patching
+the `Sandbox` CRD's `spec.operatingMode` field.
+
+Pause patches `spec.operatingMode: Suspended`. The agent-sandbox controller
+terminates and destroys the Pod but retains the `Sandbox` object, so the
+`sandboxId` stays stable across pause/resume cycles. The sandbox reports
+`Running` → `Pausing` → `Paused`; while the Pod is terminating, the status
+`reason` comes from the `Suspended` condition (e.g. `PodTerminating`).
+
+Resume patches `spec.operatingMode: Running`. The controller recreates the Pod
+from the Sandbox spec, so expect scheduling and image-pull latency before the
+sandbox is usable again. The sandbox reports `Paused` → `Resuming` →
+`Pending` → `Running`.
+
+| | Preserved? |
+|--|-----------|
+| Persistent volume (PVC) data | ✅ Yes — volumes are retained with the Sandbox object |
+| `sandboxId` and sandbox metadata | ✅ Yes |
+| Memory / running processes | ❌ No — the Pod is destroyed |
+| Root filesystem runtime state | ❌ No — the Pod is recreated from the original image on resume |
+
+Anything not written to a persistent volume is lost on pause.
+
+A paused sandbox still expires at its original timeout; a retained expired
+sandbox reports `Terminated` and can no longer be paused or resumed.
+
 ## Start OpenSandbox server
 
 1. Install the server package and fetch the example config for agent-sandbox:

@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -302,7 +302,10 @@ func (p *DefaultSandboxPool) Acquire(ctx context.Context, opts AcquireOptions) (
 			// Remove it, best-effort kill, then either retry (RetryNextIdle*) or fall through
 			// (single-shot policies).
 			lastIdleAttemptErr = connectErr
-			_ = p.config.StateStore.RemoveIdle(ctx, p.config.PoolName, takeResult.SandboxID)
+			// Detached: the caller's ctx may be cancelled, stranding the dead ID.
+			removeCtx, removeCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			_ = p.config.StateStore.RemoveIdle(removeCtx, p.config.PoolName, takeResult.SandboxID)
+			removeCancel()
 			go p.killSandboxBestEffort(takeResult.SandboxID)
 			p.config.Logger.Warn("acquire: idle sandbox connect/health check failed",
 				"pool_name", p.config.PoolName,

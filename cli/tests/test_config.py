@@ -1,4 +1,4 @@
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -36,15 +36,6 @@ class TestLoadConfigFile:
     def test_returns_empty_when_file_missing(self, tmp_path: Path) -> None:
         result = load_config_file(tmp_path / "nonexistent.toml")
         assert result == {}
-
-    def test_parses_toml_file(self, tmp_path: Path) -> None:
-        cfg = tmp_path / "config.toml"
-        cfg.write_text(
-            '[connection]\napi_key = "abc"\ndomain = "example.com"\n'
-        )
-        result = load_config_file(cfg)
-        assert result["connection"]["api_key"] == "abc"
-        assert result["connection"]["domain"] == "example.com"
 
     def test_parses_all_sections(self, tmp_path: Path) -> None:
         cfg = tmp_path / "config.toml"

@@ -1,5 +1,5 @@
 #
-# Copyright 2025 Alibaba Group Holding Ltd.
+# Copyright 2025 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -99,18 +99,22 @@ class CodesAdapterSync(CodesSync):
         base_url = f"{self.connection_config.protocol}://{self.execd_endpoint.endpoint}"
         timeout_seconds = self.connection_config.request_timeout.total_seconds()
         timeout = httpx.Timeout(timeout_seconds)
-        headers = {
-            "User-Agent": self.connection_config.user_agent,
-            **self.connection_config.headers,
-            **(self.execd_endpoint.headers or {}),
-        }
+        headers = self.execd_endpoint.build_request_headers(self.connection_config)
 
+        # Adapter clients must own their transports: close() closes them,
+        # and the shared/user connection_config transport must survive that.
+        self._owns_clients = self.connection_config.owns_transport
+        main_transport: httpx.BaseTransport | None
+        if self._owns_clients:
+            main_transport = self.connection_config.new_owned_transport()
+        else:
+            main_transport = self.connection_config.transport
         self._client = Client(base_url=base_url, timeout=timeout)
         self._httpx_client = httpx.Client(
             base_url=base_url,
             headers=headers,
             timeout=timeout,
-            transport=self.connection_config.transport,
+            transport=main_transport,
         )
         self._client.set_httpx_client(self._httpx_client)
 
@@ -122,12 +126,17 @@ class CodesAdapterSync(CodesSync):
         # SSE bootstraps bypass the retry wrapper: request bodies are
         # not replayable and a non-idempotent status opt-in would cause
         # duplicate execution on a resent SSE POST.
+        sse_transport = (
+            self.connection_config.new_owned_transport()
+            if self._owns_clients
+            else self.connection_config.transport
+        )
         self._sse_client = httpx.Client(
             headers=sse_headers,
             timeout=httpx.Timeout(
                 connect=timeout_seconds, read=None, write=timeout_seconds, pool=None
             ),
-            transport=unwrap_retry_transport(self.connection_config.transport),
+            transport=unwrap_retry_transport(sse_transport),
         )
 
     def _get_execd_url(self, path: str) -> str:
@@ -135,6 +144,21 @@ class CodesAdapterSync(CodesSync):
         return (
             f"{self.connection_config.protocol}://{self.execd_endpoint.endpoint}{path}"
         )
+
+    def close(self) -> None:
+        """Release the adapter-owned HTTP clients.
+
+        Never closes the shared ``connection_config.transport``; the sandbox
+        stays usable after ``close()``. Clients wrapping a user-supplied
+        transport are left open (httpx would close the caller's transport
+        with them).
+        """
+        if not self._owns_clients:
+            return
+        try:
+            self._httpx_client.close()
+        finally:
+            self._sse_client.close()
 
     def create_context(self, language: str) -> CodeContextSync:
         """

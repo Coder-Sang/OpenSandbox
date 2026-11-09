@@ -1,4 +1,4 @@
-// Copyright 2025 Alibaba Group Holding Ltd.
+// Copyright 2025 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -60,6 +60,14 @@ func main() {
 }
 
 func run() int {
+	if len(os.Args) > 1 && os.Args[1] == web.FilesystemWorkerArg {
+		if err := web.RunFilesystemWorker(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		return 0
+	}
+
 	clone3Compat := clone3compat.MaybeApply()
 
 	version.EchoVersion("OpenSandbox Execd")

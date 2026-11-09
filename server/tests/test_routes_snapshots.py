@@ -1,4 +1,4 @@
-# Copyright 2025 Alibaba Group Holding Ltd.
+# Copyright 2025 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -220,6 +220,10 @@ def test_snapshot_routes_can_use_persisted_service(
         @staticmethod
         def supports_create_snapshot() -> bool:
             return True
+
+        @staticmethod
+        def supports_synchronous_create() -> bool:
+            return False
 
         @staticmethod
         def create_snapshot_unsupported_message() -> str:

@@ -1,5 +1,5 @@
 /*
- * Copyright 2025 Alibaba Group Holding Ltd.
+ * Copyright 2025 The OpenSandbox Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -63,7 +63,7 @@ import java.time.OffsetDateTime
  *
  * // List all running sandboxes
  * val runningSandboxes = manager.listSandboxInfos(
- *     SandboxFilter.builder().state("RUNNING").build()
+ *     SandboxFilter.builder().states(SandboxState.RUNNING).build()
  * )
  *
  * // Individual operations

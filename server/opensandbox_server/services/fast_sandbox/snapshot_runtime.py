@@ -1,4 +1,4 @@
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -43,13 +43,14 @@ from opensandbox_server.services.k8s.snapshot_runtime import (
 )
 from opensandbox_server.services.snapshot_models import SnapshotState
 from opensandbox_server.services.snapshot_runtime import (
+    SNAPSHOT_CREATE_CONFLICT_REASON,
     SnapshotRuntimePreflightError,
     SnapshotRuntimeStatus,
 )
 
 GROUP = "sandbox.fast.io"
 VERSION = "v1alpha2"
-PLURAL = "sandboxesnapshots"
+PLURAL = "sandboxsnapshots"
 
 # FastPath validates snapshot metadata keys as DNS-1123 labels and projects
 # them onto CR labels as "metadata.sandbox.fast.io/<key>" (same convention as
@@ -110,6 +111,9 @@ class FastSandboxSnapshotRuntime:
     def supports_create_snapshot(self) -> bool:
         return True
 
+    def supports_synchronous_create(self) -> bool:
+        return True
+
     def create_snapshot_unsupported_message(self) -> str:
         return ""
 
@@ -157,6 +161,14 @@ class FastSandboxSnapshotRuntime:
                 message=f"Failed to create fsb snapshot {snapshot_name}: source sandbox not found: {exc}",
             )
         except FastPathError as exc:
+            if exc.code == "FAILED_PRECONDITION":
+                # Re-entry fence: the sandbox is already held by another
+                # snapshot's dump window. Conflict semantics, not a failure.
+                return SnapshotRuntimeStatus(
+                    state=SnapshotState.FAILED,
+                    reason=SNAPSHOT_CREATE_CONFLICT_REASON,
+                    message=f"Failed to create fsb snapshot {snapshot_name}: {exc}",
+                )
             return SnapshotRuntimeStatus(
                 state=SnapshotState.FAILED,
                 reason="snapshot_runtime_create_failed",
@@ -257,7 +269,7 @@ class FastSandboxSnapshotRuntime:
             return
         if informer is None:
             logger.debug(
-                f"Informers disabled; fsb snapshot {namespace}/{PLURAL} converges via reads only"
+                f"fsb snapshot watch failed to start; fsb snapshot {namespace}/{PLURAL} converges via reads only"
             )
             return
         with self._watch_lock:

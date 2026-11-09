@@ -1,5 +1,5 @@
 #
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -130,6 +130,16 @@ class CreateTemplateRequest(BaseModel):
             "['tail', '-f', '/dev/null']."
         ),
     )
+    env: dict[str, str] | None = Field(
+        default=None,
+        description=(
+            "Environment variables baked into the golden image (injected as "
+            "'/etc/sandbox-init.env' in the guest; literal values only). The "
+            "source image's own OCI Config.Env is inherited; an env with the "
+            "same name overrides the inherited value. Names must be valid "
+            "shell variable names."
+        ),
+    )
     metadata: dict[str, str] | None = Field(
         default=None,
         description="Custom key-value metadata for management, filtering, and tagging.",
@@ -179,6 +189,10 @@ class TemplateInfo(BaseModel):
     entrypoint: list[str] | None = Field(
         default=None,
         description="Guest business command (argv).",
+    )
+    env: dict[str, str] | None = Field(
+        default=None,
+        description="Environment variables baked into the golden image.",
     )
     metadata: dict[str, str] | None = Field(
         default=None,

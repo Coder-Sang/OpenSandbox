@@ -1,4 +1,4 @@
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -418,9 +418,6 @@ def _install_guidance_text() -> str:
         "    osb skills install <skill-name> --target <tool> --scope <scope>\n\n"
         "  Install all bundled skills for one tool:\n"
         "    osb skills install --all-builtins --target <tool> --scope <scope>\n\n"
-        "  Discover skills and targets:\n"
-        "    osb skills list\n"
-        "    osb skills show <skill-name>\n\n"
         f"  Available skills: {', '.join(_ALL_SKILL_NAMES)}\n"
         f"  Available targets: {', '.join(_ALL_TARGET_NAMES)}\n"
         f"  Available scopes: {', '.join(_ALL_SCOPE_NAMES)}"

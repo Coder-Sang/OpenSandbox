@@ -1,5 +1,5 @@
 #
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -27,6 +27,7 @@ from uuid import UUID
 
 import httpx
 
+from opensandbox._httpx import build_async_redirect_client_options
 from opensandbox.adapters.converter.exception_converter import ExceptionConverter
 from opensandbox.adapters.converter.filesystem_model_converter import (
     FilesystemModelConverter,
@@ -88,9 +89,14 @@ class IsolatedFilesystemAdapter(Filesystem):
             headers=headers,
             timeout=timeout,
             transport=self.connection_config.transport,
+            **build_async_redirect_client_options(self.connection_config, base_url),
         )
 
-        self._client = Client(base_url=base_url, timeout=timeout)
+        self._client = Client(
+            base_url=base_url,
+            timeout=timeout,
+            follow_redirects=self.connection_config.follow_redirects,
+        )
         self._client.set_async_httpx_client(self._httpx_client)
 
     def _get_url(self, path_template: str) -> str:
@@ -202,7 +208,7 @@ class IsolatedFilesystemAdapter(Filesystem):
                     content_type = "application/octet-stream"
                 elif isinstance(entry.data, str):
                     encoding = entry.encoding or "utf-8"
-                    content = entry.data
+                    content = entry.data.encode(encoding)
                     content_type = f"text/plain; charset={encoding}"
                 elif isinstance(entry.data, IOBase):
                     if isinstance(entry.data, TextIOBase):
@@ -219,7 +225,11 @@ class IsolatedFilesystemAdapter(Filesystem):
                 multipart_parts.append(("file", (entry.path, content, content_type)))
 
             url = self._get_url(self.UPLOAD_PATH)
-            response = await self._httpx_client.post(url, files=multipart_parts)
+            response = await self._httpx_client.post(
+                url,
+                files=multipart_parts,
+                follow_redirects=False,
+            )
             response.raise_for_status()
         except Exception as e:
             raise ExceptionConverter.to_sandbox_exception(e) from e

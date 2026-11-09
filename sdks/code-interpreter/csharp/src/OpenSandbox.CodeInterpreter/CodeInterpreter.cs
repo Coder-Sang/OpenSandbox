@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -283,7 +283,10 @@ public sealed class CodeInterpreter
             var execution = await Sandbox.Commands.RunAsync(
                 CodeInterpreterHealthCheck.RuntimeCheckCommand,
                 cancellationToken: cancellationToken).ConfigureAwait(false);
-            return execution?.Error == null;
+            // A non-zero exit without an error event is still a failure;
+            // an indeterminate result (neither Complete nor Error observed,
+            // e.g. a dropped stream) is not proof of health either.
+            return execution is { Error: null, ExitCode: 0 };
         }
         catch (Exception ex)
         {

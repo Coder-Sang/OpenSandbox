@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 // 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -44,6 +44,7 @@ export { MetricsAdapter } from "./adapters/metricsAdapter.js";
 export { FilesystemAdapter } from "./adapters/filesystemAdapter.js";
 export { CommandsAdapter } from "./adapters/commandsAdapter.js";
 export { IsolatedSessionsAdapter } from "./adapters/isolatedSessionsAdapter.js";
+export { EndpointCache } from "./core/endpointCache.js";
 
 // Client-IP detection helpers (advanced/testing).
 export {

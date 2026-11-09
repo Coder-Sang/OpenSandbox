@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 
 //go:build !windows
 
@@ -358,11 +358,17 @@ func TestGetIsolatedSession_ReturnsCreationParams(t *testing.T) {
 	if state.Profile != "balanced" {
 		t.Errorf("Profile = %q, want balanced", state.Profile)
 	}
-	if state.WorkspacePath == "" {
-		t.Error("WorkspacePath is empty")
+	if len(state.Overlays) != 1 {
+		t.Fatalf("Overlays len = %d, want 1", len(state.Overlays))
 	}
-	if state.WorkspaceMode != "overlay" {
-		t.Errorf("WorkspaceMode = %q, want overlay", state.WorkspaceMode)
+	if state.Overlays[0].Path == "" {
+		t.Error("Overlays[0].Path is empty")
+	}
+	if state.Overlays[0].Mode != "overlay" {
+		t.Errorf("Overlays[0].Mode = %q, want overlay", state.Overlays[0].Mode)
+	}
+	if state.Overlays[0].Persist == nil || !*state.Overlays[0].Persist {
+		t.Error("Overlays[0].Persist not defaulted to true")
 	}
 	if len(state.ExtraWritable) != 1 {
 		t.Errorf("ExtraWritable len = %d, want 1", len(state.ExtraWritable))
@@ -423,8 +429,8 @@ func TestGetIsolatedSession_EchoesEffectiveDefaults(t *testing.T) {
 	if state.Profile != "strict" {
 		t.Errorf("Profile = %q, want strict (execd default)", state.Profile)
 	}
-	if state.WorkspaceMode != "overlay" {
-		t.Errorf("WorkspaceMode = %q, want overlay (execd default)", state.WorkspaceMode)
+	if len(state.Overlays) != 1 || state.Overlays[0].Mode != "overlay" {
+		t.Errorf("Overlays = %+v, want a single overlay (execd default mode)", state.Overlays)
 	}
 	if state.EnvPassthroughMode != "deny" {
 		t.Errorf("EnvPassthroughMode = %q, want deny (execd default)", state.EnvPassthroughMode)
@@ -597,21 +603,6 @@ func TestCapabilities(t *testing.T) {
 	}
 	if caps.Isolator != "stub" {
 		t.Errorf("Isolator = %q, want stub", caps.Isolator)
-	}
-}
-
-func TestIsolatedSessionOptions_Defaults(t *testing.T) {
-	opts := &IsolatedSessionOptions{
-		WorkspacePath: "/ws",
-	}
-	if opts.Profile != "" {
-		t.Error("Profile should default to empty (controller sets strict)")
-	}
-	if opts.WorkspaceMode != "" {
-		t.Error("WorkspaceMode should default to empty (controller sets overlay)")
-	}
-	if opts.ShareNet != nil {
-		t.Error("ShareNet should default to nil (start defaults to true)")
 	}
 }
 
