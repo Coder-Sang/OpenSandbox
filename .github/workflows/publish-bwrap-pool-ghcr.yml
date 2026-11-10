@@ -1,0 +1,92 @@
+name: Publish bwrap-pool images to GHCR
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [feature/bwrap-pool]
+    paths: [.github/workflows/publish-bwrap-pool-ghcr.yml]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bwrap-pool-ghcr-c36796db
+  cancel-in-progress: false
+
+env:
+  SOURCE_SHA: c36796dba0d06dfc2195018049a320c8bf031da3
+  IMAGE_TAG: bwrap-pool-c36796db
+
+jobs:
+  publish:
+    if: github.repository == 'Coder-Sang/OpenSandbox'
+    name: Publish ${{ matrix.component }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - component: server
+            context: server
+            file: server/Dockerfile
+            build_args: SETUPTOOLS_SCM_PRETEND_VERSION=1.1.1+bwrap.c36796db
+          - component: controller
+            context: kubernetes
+            file: kubernetes/Dockerfile
+            build_args: |
+              PACKAGE=./cmd/controller
+              COMMIT_ID=c36796db
+          - component: execd
+            context: .
+            file: components/execd/Dockerfile
+            build_args: |
+              VERSION=1.1.1-bwrap.c36796db
+              GIT_COMMIT=c36796dba0d06dfc2195018049a320c8bf031da3
+          - component: task-executor
+            context: kubernetes
+            file: kubernetes/Dockerfile
+            build_args: |
+              PACKAGE=cmd/task-executor/main.go
+              USERID=0
+              COMMIT_ID=c36796db
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+      - name: Verify source commit
+        run: test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Authenticate to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and publish only to owned GHCR namespace
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ghcr.io/coder-sang/opensandbox/${{ matrix.component }}:${{ env.IMAGE_TAG }}
+          build-args: ${{ matrix.build_args }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/Coder-Sang/OpenSandbox
+            org.opencontainers.image.revision=${{ env.SOURCE_SHA }}
+            org.opencontainers.image.version=${{ env.IMAGE_TAG }}
+            org.opencontainers.image.licenses=Apache-2.0
+      - name: Record published digest
+        env:
+          IMAGE: ghcr.io/coder-sang/opensandbox/${{ matrix.component }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          printf '### %s\n\nTag: `%s:%s`\n\nDigest: `%s@%s`\n' \
+            "$IMAGE" "$IMAGE" "$IMAGE_TAG" "$IMAGE" "$DIGEST" >> "$GITHUB_STEP_SUMMARY"
